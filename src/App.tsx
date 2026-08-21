@@ -29,7 +29,8 @@ import {
   Settings,
   Cpu,
   Loader2,
-  Fingerprint
+  Fingerprint,
+  X
 } from "lucide-react";
 import { Story, Chapter, Character, WorldRule, TextSelection, AuthorEditTarget } from "./types";
 import { hashText } from "./lib/authorAudit";
@@ -90,6 +91,8 @@ export default function App() {
   const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [showAuthorProfile, setShowAuthorProfile] = useState(false);
   const [showAgent, setShowAgent] = useState(false);
+  // На телефоне главы и инструменты открываются как отдельные панели, не как постоянные колонки.
+  const [mobilePanel, setMobilePanel] = useState<"chapters" | "assistant" | null>(null);
   const [llmKeysDraft, setLlmKeysDraft] = useState<StoredLlmKeys>(() => loadLlmKeys());
   const [llmStatus, setLlmStatus] = useState<{
     geminiKeys: number;
@@ -698,6 +701,7 @@ export default function App() {
     setSelectedText("");
     setTextSelection(null);
     setActiveTab("text");
+    setMobilePanel("assistant");
     setOpenAuthorRequest((value) => value + 1);
   };
 
@@ -1342,16 +1346,16 @@ export default function App() {
 
   return (
     <div
-      className="notranslate flex flex-col h-screen w-full bg-[#0b0f19] text-slate-100 selection:bg-blue-600/30 overflow-hidden"
+      className="notranslate flex flex-col h-[100dvh] w-full bg-[#0b0f19] text-slate-100 selection:bg-blue-600/30 overflow-hidden"
       id="main-app-container"
       lang="ru"
       translate="no"
     >
       {/* Top Navigation Panel */}
-      <header className="flex justify-between items-center px-5 h-14 bg-[#0e1424] border-b border-slate-800/80 shrink-0 z-10">
+      <header className="flex items-center gap-2 px-3 sm:px-5 h-14 bg-[#0e1424] border-b border-slate-800/80 shrink-0 z-10">
         {/* Book Selector Dropdown */}
-        <div className="flex items-center gap-3">
-          <BookMarked className="w-5 h-5 text-blue-400" />
+        <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+          <BookMarked className="hidden sm:block w-5 h-5 text-blue-400" />
           <div className="flex items-center gap-1.5">
             <select
               value={selectedStoryId}
@@ -1364,7 +1368,7 @@ export default function App() {
                   }
                 }
               }}
-              className="bg-slate-900 border border-slate-800 text-slate-100 px-3 py-1 text-sm rounded-lg font-medium outline-none focus:border-blue-500 cursor-pointer"
+              className="max-w-[12.5rem] sm:max-w-none bg-slate-900 border border-slate-800 text-slate-100 px-2.5 py-1.5 text-xs sm:text-sm rounded-lg font-medium outline-none focus:border-blue-500 cursor-pointer"
               id="book-selector"
             >
               {stories.map(s => (
@@ -1383,7 +1387,7 @@ export default function App() {
 
           <button
             onClick={() => setShowNewStoryModal(true)}
-            className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
+            className="hidden sm:flex px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
             id="create-new-book-btn"
             title="Добавить новую книгу в студию"
           >
@@ -1392,8 +1396,13 @@ export default function App() {
           </button>
         </div>
 
-        {/* Sync & Focus status */}
-        <div className="flex items-center gap-4">
+        <div className="flex lg:hidden items-center gap-1.5 shrink-0">
+          <button type="button" onClick={openLlmSettings} className="min-h-10 min-w-10 grid place-items-center rounded-xl border border-amber-800/50 bg-amber-950/30 text-amber-200" aria-label="Ключи API" title="Ключи API"><Settings className="w-4 h-4" /></button>
+          <button type="button" onClick={() => setShowAuthorProfile(true)} className="min-h-10 min-w-10 grid place-items-center rounded-xl border border-emerald-800/50 bg-emerald-950/30 text-emerald-200" aria-label="Профиль автора" title="Профиль автора"><Fingerprint className="w-4 h-4" /></button>
+        </div>
+
+        {/* Desktop sync and global actions */}
+        <div className="hidden lg:flex items-center gap-4">
 
           <div className="text-xs text-slate-400 flex items-center gap-1.5">
             <div className={`w-2 h-2 rounded-full ${isSaving ? "bg-amber-400 animate-pulse" : "bg-emerald-500"}`} />
@@ -1533,11 +1542,11 @@ export default function App() {
       </header>
 
       {/* Main Workspace Frame */}
-      <div className="flex flex-1 overflow-hidden w-full relative">
+      <div className="flex flex-1 overflow-hidden w-full relative pb-[4.5rem] lg:pb-0">
         
         {/* Leftmost Chapter Sidebar */}
         {!focusMode && activeStory && (
-          <aside className="w-64 bg-[#0e1424]/60 border-r border-slate-800/80 p-4 flex flex-col shrink-0" id="chapters-sidebar">
+          <aside className="hidden lg:flex w-64 bg-[#0e1424]/60 border-r border-slate-800/80 p-4 flex-col shrink-0" id="chapters-sidebar">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800/60 mb-3">
               <span className="text-xs uppercase font-bold tracking-wider text-slate-400 flex items-center gap-1.5">
                 <Layers className="w-4 h-4 text-blue-400" />
@@ -1608,19 +1617,19 @@ export default function App() {
         )}
 
         {/* Center Section: The Editor Workspace */}
-        <main className="flex-1 flex flex-col bg-[#0b0f19] h-full overflow-hidden relative">
+        <main className="min-w-0 flex-1 flex flex-col bg-[#0b0f19] h-full overflow-hidden relative">
           {activeChapter ? (
-            <div className="flex-1 flex flex-col h-full overflow-hidden p-6 max-w-4xl mx-auto w-full">
+            <div className="flex-1 flex flex-col h-full overflow-hidden p-3 sm:p-4 lg:p-6 max-w-4xl mx-auto w-full">
               
               {/* Chapter Title Edit Block */}
-              <div className="mb-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-800/40 pb-3" id="chapter-title-edit-block">
+              <div className="mb-3 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3 border-b border-slate-800/40 pb-3" id="chapter-title-edit-block">
                 <div className="flex-1 space-y-1 w-full">
                   <input
                     type="text"
                     value={activeChapter.title}
                     onChange={(e) => handleUpdateChapterDetails(e.target.value, activeChapter.summary)}
                     placeholder="Заголовок главы..."
-                    className="bg-transparent text-slate-100 text-2xl font-bold tracking-tight outline-none w-full pb-0.5"
+                    className="bg-transparent text-slate-100 text-xl sm:text-2xl font-bold tracking-tight outline-none w-full pb-0.5"
                   />
                   <input
                     type="text"
@@ -1631,10 +1640,10 @@ export default function App() {
                   />
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     onClick={() => handleOpenInAuthorEditor(activeChapter.id)}
-                    className="px-3 py-1.5 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-500/20 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all"
+                    className="min-h-10 px-3 py-1.5 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-500/20 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all"
                     title="Открыть бережную редактуру с голосом автора"
                   >
                     <Wand2 className="w-3.5 h-3.5" />
@@ -1652,7 +1661,7 @@ export default function App() {
                   {/* Save button */}
                   <button
                     onClick={handleManualSave}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${
+                    className={`min-h-10 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${
                       showSaveSuccess
                         ? "bg-emerald-950/40 text-emerald-400 border-emerald-900/50"
                         : "bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-850"
@@ -1665,7 +1674,7 @@ export default function App() {
                   {/* Download as Word button */}
                   <button
                     onClick={() => handleExportSingleChapterDoc(activeChapter)}
-                    className="px-3 py-1.5 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 hover:text-indigo-300 border border-indigo-500/20 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+                    className="hidden sm:flex min-h-10 px-3 py-1.5 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 hover:text-indigo-300 border border-indigo-500/20 rounded-lg text-xs font-semibold items-center gap-1.5 transition-all cursor-pointer"
                     title="Скачать эту главу как Word документ (.docx)"
                   >
                     <Download className="w-3.5 h-3.5" />
@@ -1675,7 +1684,7 @@ export default function App() {
                   {/* Clear current chapter text only */}
                   <button
                     onClick={handleClearActiveChapterContent}
-                    className="px-3 py-1.5 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 hover:text-amber-300 border border-amber-500/20 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+                    className="hidden sm:flex min-h-10 px-3 py-1.5 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 hover:text-amber-300 border border-amber-500/20 rounded-lg text-xs font-semibold items-center gap-1.5 transition-all cursor-pointer"
                     title="Стереть текст этой главы (название в оглавлении останется)"
                     id="clear-chapter-content-btn"
                   >
@@ -1694,13 +1703,13 @@ export default function App() {
                   onMouseUp={handleTextSelection}
                   onKeyUp={handleTextSelection}
                   placeholder="Начните писать свой роман здесь... Вы также можете выделить нужный кусок и воспользоваться Редактором Стиля справа."
-                  className="flex-1 w-full p-6 text-sm leading-relaxed bg-transparent text-slate-100 outline-none resize-none font-sans scrollbar-thin placeholder:text-slate-600"
+                  className="flex-1 w-full p-4 sm:p-6 text-[15px] sm:text-sm leading-7 sm:leading-relaxed bg-transparent text-slate-100 outline-none resize-none font-sans scrollbar-thin placeholder:text-slate-600"
                   id="draft-editor-textarea"
                 />
 
                 {/* Selection floating helper & Micro-editing Toolbar */}
                 {selectedText && (
-                  <div className="absolute top-4 right-8 px-2 py-1.5 bg-slate-900 border border-emerald-900/50 text-slate-300 text-[11px] font-medium rounded-lg shadow-2xl flex items-center gap-2 z-10 transition-all shadow-emerald-900/20">
+                  <div className="hidden sm:flex absolute top-4 right-8 px-2 py-1.5 bg-slate-900 border border-emerald-900/50 text-slate-300 text-[11px] font-medium rounded-lg shadow-2xl flex items-center gap-2 z-10 transition-all shadow-emerald-900/20">
                     <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
                     <span>Выделено {getWordCount(selectedText)} слов</span>
                     <div className="h-4 w-px bg-slate-700 mx-1"></div>
@@ -1737,12 +1746,12 @@ export default function App() {
                 )}
 
                 {/* Editor Footer / Metric Counter */}
-                <div className="h-9 border-t border-slate-800/60 px-4 bg-slate-950/40 flex justify-between items-center shrink-0 text-xs font-mono text-slate-400">
-                  <div className="flex gap-4">
+                <div className="h-10 border-t border-slate-800/60 px-3 sm:px-4 bg-slate-950/40 flex justify-between items-center shrink-0 text-[11px] sm:text-xs font-mono text-slate-400">
+                  <div className="flex gap-2 sm:gap-4">
                     <span>Слов: <strong>{getWordCount(activeChapter.content)}</strong></span>
-                    <span>Символов: <strong>{getCharCount(activeChapter.content)}</strong></span>
+                    <span className="hidden sm:inline">Символов: <strong>{getCharCount(activeChapter.content)}</strong></span>
                   </div>
-                  <div className="text-[10px] text-slate-500 uppercase">
+                  <div className="hidden sm:block text-[10px] text-slate-500 uppercase">
                     UTF-8 • Draft Mode
                   </div>
                 </div>
@@ -1750,7 +1759,7 @@ export default function App() {
 
               {/* Bottom Quick AI Continuer helper */}
               {!focusMode && (
-                <div className="mt-3 flex items-center justify-between p-3 bg-slate-900/40 border border-slate-800/80 rounded-xl shrink-0">
+                <div className="mt-3 flex items-center justify-between gap-3 p-3 bg-slate-900/40 border border-slate-800/80 rounded-xl shrink-0">
                   <div className="flex items-center gap-2">
                     <div className="p-1.5 bg-blue-500/10 text-blue-400 rounded-lg">
                       <Sparkle className="w-4 h-4 animate-spin-slow" />
@@ -1763,13 +1772,14 @@ export default function App() {
                   <button
                     onClick={() => {
                       setActiveTab("text");
+                      setMobilePanel("assistant");
                       // Switch focus to AI continuation
                       setTimeout(() => {
                         const btn = document.getElementById("ai-action-btn");
                         btn?.scrollIntoView({ behavior: "smooth" });
                       }, 100);
                     }}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                    className="min-h-10 shrink-0 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer"
                   >
                     Продолжить ИИ
                     <ChevronRight className="w-4 h-4" />
@@ -1793,7 +1803,7 @@ export default function App() {
 
         {/* Правая панель строится вокруг задач автора, а не отдельных ИИ-движков. */}
         {!focusMode && activeStory && (
-          <aside className="w-96 bg-[#0e1424]/60 border-l border-slate-800/80 flex flex-col shrink-0" id="assistant-panel">
+          <aside className="hidden lg:flex w-96 bg-[#0e1424]/60 border-l border-slate-800/80 flex-col shrink-0" id="assistant-panel">
             <div className="flex border-b border-slate-800/80 bg-slate-950/50 p-1 gap-1 shrink-0 text-xs font-semibold">
               <button
                 type="button"
@@ -1887,6 +1897,56 @@ export default function App() {
           </aside>
         )}
       </div>
+
+      {/* Mobile navigation: один главный экран и две выезжающие панели вместо трёх постоянных колонок. */}
+      {!focusMode && activeStory && (
+        <>
+          {mobilePanel && (
+            <div className="lg:hidden fixed inset-0 z-40">
+              <button type="button" aria-label="Закрыть панель" onClick={() => setMobilePanel(null)} className="absolute inset-0 bg-slate-950/75 backdrop-blur-sm" />
+              <section className="absolute inset-x-0 bottom-0 flex max-h-[82dvh] flex-col rounded-t-3xl border-t border-slate-700 bg-[#0e1424] shadow-2xl shadow-black/60" role="dialog" aria-modal="true">
+                {mobilePanel === "chapters" ? (
+                  <>
+                    <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+                      <div><p className="text-sm font-semibold text-slate-100">Главы</p><p className="text-[11px] text-slate-500">{activeStory.title}</p></div>
+                      <div className="flex items-center gap-1"><button type="button" onClick={handleAddChapter} className="min-h-10 min-w-10 grid place-items-center rounded-xl bg-blue-600 text-white" aria-label="Добавить главу"><Plus className="w-4 h-4" /></button><button type="button" onClick={() => setMobilePanel(null)} className="min-h-10 min-w-10 grid place-items-center rounded-xl border border-slate-700 text-slate-300" aria-label="Закрыть"><X className="w-4 h-4" /></button></div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-3 pb-6 space-y-1.5">
+                      {activeStory.chapters.map((ch) => (
+                        <button key={ch.id} type="button" onClick={() => { setSelectedChapterId(ch.id); setSelectedText(""); setTextSelection(null); setMobilePanel(null); }} className={`flex min-h-12 w-full items-center gap-3 rounded-xl border px-3 text-left transition ${selectedChapterId === ch.id ? "border-blue-500/50 bg-blue-600/15 text-blue-200" : "border-transparent bg-slate-900/50 text-slate-300"}`}>
+                          <FileText className="h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 truncate text-sm font-medium">{ch.title}</span><span className="text-[10px] text-slate-500">{getWordCount(ch.content)} слов</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3"><div><p className="text-sm font-semibold text-slate-100">{activeTab === "text" ? "Инструменты текста" : activeTab === "book" ? "Книга" : "Муза"}</p><p className="text-[11px] text-slate-500">Проведите вниз или нажмите ×, чтобы вернуться к рукописи</p></div><button type="button" onClick={() => setMobilePanel(null)} className="min-h-10 min-w-10 grid place-items-center rounded-xl border border-slate-700 text-slate-300" aria-label="Закрыть"><X className="w-4 h-4" /></button></div>
+                    <div className="flex border-b border-slate-800 bg-slate-950/50 p-1 gap-1 shrink-0 text-xs font-semibold">
+                      {([ ["text", "Текст"], ["book", "Книга"], ["muse", "Муза"] ] as const).map(([tab, label]) => <button key={tab} type="button" onClick={() => { setActiveTab(tab); setShowAgent(false); }} className={`min-h-10 flex-1 rounded-lg ${activeTab === tab ? "bg-slate-800 text-slate-100" : "text-slate-400"}`}>{label}</button>)}
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-hidden p-3">
+                      <React.Suspense fallback={<div className="p-4 text-sm text-slate-500">Загрузка…</div>}>
+                        {activeTab === "text" && (showAgent ? <AgentPanel story={activeStory} currentDraft={activeChapter?.content || ""} activeChapter={activeChapter} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onInsertText={handleInsertText} onClose={() => setShowAgent(false)} /> : <AIPanel story={activeStory} currentDraft={activeChapter?.content || ""} selectedText={selectedText} textSelection={textSelection} onInsertText={handleInsertText} onApplyAuthorEdit={handleApplyAuthorEdit} activeChapter={activeChapter} onUpdateStoryChapters={handleUpdateStoryChapters} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} openAuthorRequest={openAuthorRequest} onOpenAuthorProfile={() => setShowAuthorProfile(true)} onOpenAgent={() => setShowAgent(true)} />)}
+                        {activeTab === "book" && <BookPanel story={activeStory} onUpdateCharacters={handleUpdateCharacters} onUpdateWorldRules={handleUpdateWorldRules} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} />}
+                        {activeTab === "muse" && <MuseChat story={activeStory} currentDraft={activeChapter?.content || ""} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} />}
+                      </React.Suspense>
+                    </div>
+                  </>
+                )}
+              </section>
+            </div>
+          )}
+
+          <nav className="lg:hidden fixed inset-x-0 bottom-0 z-30 flex h-[4.5rem] items-stretch border-t border-slate-700/80 bg-[#0e1424]/98 px-1 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_24px_rgba(0,0,0,.25)]" aria-label="Основная навигация">
+            <button type="button" onClick={() => setMobilePanel("chapters")} className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-1 text-[10px] ${mobilePanel === "chapters" ? "text-blue-300" : "text-slate-400"}`}><Layers className="h-5 w-5" /><span>Главы</span></button>
+            <button type="button" onClick={() => setMobilePanel(null)} className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-1 text-[10px] ${mobilePanel === null ? "text-blue-300" : "text-slate-400"}`}><FileText className="h-5 w-5" /><span>Писать</span></button>
+            <button type="button" onClick={() => { setActiveTab("text"); setMobilePanel("assistant"); }} className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-1 text-[10px] ${mobilePanel === "assistant" && activeTab === "text" ? "text-violet-300" : "text-slate-400"}`}><Wand2 className="h-5 w-5" /><span>Текст</span></button>
+            <button type="button" onClick={() => { setActiveTab("book"); setShowAgent(false); setMobilePanel("assistant"); }} className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-1 text-[10px] ${mobilePanel === "assistant" && activeTab === "book" ? "text-emerald-300" : "text-slate-400"}`}><BookMarked className="h-5 w-5" /><span>Книга</span></button>
+            <button type="button" onClick={() => { setActiveTab("muse"); setShowAgent(false); setMobilePanel("assistant"); }} className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-1 text-[10px] ${mobilePanel === "assistant" && activeTab === "muse" ? "text-pink-300" : "text-slate-400"}`}><Sparkles className="h-5 w-5" /><span>Муза</span></button>
+          </nav>
+        </>
+      )}
 
       <React.Suspense fallback={null}>
         <AuthorProfileModal

@@ -418,7 +418,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
   return (
     <div className="flex flex-col h-full bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden" id="ai-panel-container">
       {/* Один результат автора — одна точка входа. Детали раскрываются только после выбора действия. */}
-      <div className="grid grid-cols-4 gap-1 border-b border-slate-800 bg-slate-950/40 p-1 text-[10px] font-semibold">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 border-b border-slate-800 bg-slate-950/40 p-1 text-[11px] font-semibold">
         <button
           type="button"
           onClick={() => { setActiveTool("continue"); setContinueMode("whole_chapter"); setResult(""); }}

@@ -5,13 +5,34 @@
   --font-mono: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
 }
 
+html, body, #root {
+  min-height: 100%;
+  height: 100%;
+}
+
 body {
   font-family: var(--font-sans);
   background-color: #0f172a; /* Deep slate background */
   color: #f1f5f9;
   margin: 0;
   padding: 0;
-  overflow: hidden; /* Main window is single-screen */
+  overflow: hidden; /* Рабочая область управляет собственной прокруткой. */
+  overscroll-behavior: none;
+}
+
+button, input, select, textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@media (max-width: 1023px) {
+  input, select, textarea {
+    /* Предотвращает автоматический zoom WebView при фокусе поля. */
+    font-size: 16px !important;
+  }
+
+  textarea {
+    overscroll-behavior: contain;
+  }
 }
 
 /* Custom scrollbar styling for a premium feel */
