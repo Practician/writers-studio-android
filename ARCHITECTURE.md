@@ -26,6 +26,8 @@ API-ключи не включаются в исходный код, GitHub Acti
 
 ## Сборка
 
-GitHub Actions запускается после push в `master`/`main`: TypeScript → тесты → Vite build → Capacitor sync → debug APK. Готовый файл доступен в artifacts workflow в течение 14 дней.
+GitHub Actions запускается после push в `master`/`main`: TypeScript → тесты → Vite build → Capacitor sync → APK. Пока постоянная подпись не настроена, workflow явно публикует debug APK для тестирования.
 
-Release APK/AAB требует отдельного signing workflow. Единственные секреты для него — signing keystore и пароли подписи. LLM API-ключи пользователей никогда не становятся CI secrets.
+Для обычных обновлений без удаления приложения workflow использует подписанную release-сборку. В repository secrets добавляются только `KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD` и `RELEASE_KEY_ALIAS`; пароль ключа берётся равным паролю keystore, как в исходной схеме Bookstore. Keystore расшифровывается только на время CI и исключён из Git. `APP_VERSION_CODE` получает номер запуска GitHub Actions, поэтому каждая release-сборка имеет более высокий Android versionCode.
+
+LLM API-ключи пользователей никогда не становятся CI secrets и не входят в APK.

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { BookOpen, Database, Globe2, Users } from "lucide-react";
+import { BookOpen, Database, FileText, Globe2, Users } from "lucide-react";
 import type { Story, Character, WorldRule } from "../types";
 import CharacterManager from "./CharacterManager";
 import WorldBuilder from "./WorldBuilder";
@@ -14,6 +14,7 @@ interface BookPanelProps {
   selectedModel?: string;
   llmProvider?: "auto" | "gemini" | "nvidia" | "groq" | "openrouter";
   llmApiFields?: Record<string, unknown>;
+  onOpenBookMaterials?: () => void;
 }
 
 const sections: Array<{ id: BookSection; label: string; description: string; icon: typeof Users }> = [
@@ -29,6 +30,7 @@ export default function BookPanel({
   selectedModel,
   llmProvider = "auto",
   llmApiFields,
+  onOpenBookMaterials,
 }: BookPanelProps) {
   const [activeSection, setActiveSection] = useState<BookSection>("characters");
 
@@ -44,6 +46,12 @@ export default function BookPanel({
             <p className="text-[10px] text-slate-400">Материалы и канон вашей истории в одном месте</p>
           </div>
         </div>
+        {onOpenBookMaterials && (
+          <button type="button" onClick={onOpenBookMaterials} className="mt-3 flex min-h-11 w-full items-center justify-between rounded-xl border border-blue-500/30 bg-blue-950/25 px-3 text-left transition-colors hover:bg-blue-950/45">
+            <span className="flex items-center gap-2"><FileText className="h-4 w-4 text-blue-300" /><span><span className="block text-xs font-semibold text-blue-100">Материалы книги</span><span className="block text-[10px] text-slate-400">Библия мира и план сюжета</span></span></span>
+            <span className="text-[10px] font-semibold text-blue-300">Изменить</span>
+          </button>
+        )}
         <div className="mt-3 grid grid-cols-3 gap-1 rounded-xl border border-slate-800 bg-slate-950/45 p-1">
           {sections.map((section) => {
             const Icon = section.icon;

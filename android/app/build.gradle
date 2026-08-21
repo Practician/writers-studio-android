@@ -7,7 +7,9 @@ android {
         applicationId "com.practician.writersstudio"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
+        // В CI это номер запуска GitHub Actions: каждая опубликованная сборка может обновить предыдущую.
+        def appVersionCode = System.getenv("APP_VERSION_CODE")?.trim()
+        versionCode (appVersionCode ? appVersionCode.toInteger() : 3)
         versionName "1.0.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
@@ -16,8 +18,35 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    def releaseStoreFilePath = System.getenv("RELEASE_STORE_FILE")
+    def releaseStorePassword = System.getenv("RELEASE_STORE_PASSWORD")
+    def releaseKeyAlias = System.getenv("RELEASE_KEY_ALIAS")
+    // Для ключа Bookstore пароль ключа совпадает с паролем keystore; отдельный секрет не требуется.
+    def releaseKeyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: releaseStorePassword
+    def releaseSigningReady = releaseStoreFilePath && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
+    signingConfigs {
+        release {
+            if (releaseSigningReady) {
+                storeFile file(releaseStoreFilePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    def requestedTasks = gradle.startParameter.taskNames.collect { it.toLowerCase() }
+    def releaseTaskRequested = requestedTasks.any { it.contains("release") }
+    if (releaseTaskRequested && !releaseSigningReady) {
+        throw new GradleException("Release signing requires RELEASE_STORE_FILE, RELEASE_STORE_PASSWORD and RELEASE_KEY_ALIAS from GitHub Actions Secrets.")
+    }
+
     buildTypes {
         release {
+            if (releaseSigningReady) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

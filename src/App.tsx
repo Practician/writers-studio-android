@@ -1378,7 +1378,7 @@ export default function App() {
             
             <button
               onClick={() => setShowStoryDetailsModal(true)}
-              title="Редактировать описание книги"
+              title="Материалы и параметры книги"
               className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-lg cursor-pointer transition-colors"
             >
               <Info className="w-4 h-4" />
@@ -1881,6 +1881,7 @@ export default function App() {
                     selectedModel={selectedModel}
                     llmProvider={llmProvider}
                     llmApiFields={llmApiFields}
+                    onOpenBookMaterials={() => setShowStoryDetailsModal(true)}
                   />
                 )}
                 {activeTab === "muse" && (
@@ -1932,7 +1933,7 @@ export default function App() {
                     <div className="min-h-0 flex-1 overflow-hidden p-3">
                       <React.Suspense fallback={<div className="p-4 text-sm text-slate-500">Загрузка…</div>}>
                         {activeTab === "text" && (showAgent ? <AgentPanel story={activeStory} currentDraft={activeChapter?.content || ""} activeChapter={activeChapter} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onInsertText={handleInsertText} onClose={() => setShowAgent(false)} /> : <AIPanel story={activeStory} currentDraft={activeChapter?.content || ""} selectedText={selectedText} textSelection={textSelection} onInsertText={handleInsertText} onApplyAuthorEdit={handleApplyAuthorEdit} activeChapter={activeChapter} onUpdateStoryChapters={handleUpdateStoryChapters} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} openAuthorRequest={openAuthorRequest} onOpenAuthorProfile={() => setShowAuthorProfile(true)} onOpenAgent={() => setShowAgent(true)} />)}
-                        {activeTab === "book" && <BookPanel story={activeStory} onUpdateCharacters={handleUpdateCharacters} onUpdateWorldRules={handleUpdateWorldRules} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} />}
+                        {activeTab === "book" && <BookPanel story={activeStory} onUpdateCharacters={handleUpdateCharacters} onUpdateWorldRules={handleUpdateWorldRules} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onOpenBookMaterials={() => setShowStoryDetailsModal(true)} />}
                         {activeTab === "muse" && <MuseChat story={activeStory} currentDraft={activeChapter?.content || ""} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} />}
                       </React.Suspense>
                     </div>
@@ -2099,11 +2100,12 @@ export default function App() {
       {/* MODAL 1: Edit Story Details */}
       {showStoryDetailsModal && activeStory && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-xl w-full p-5 space-y-4 max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+          <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-xl max-w-xl w-full p-4 sm:p-5 space-y-4 max-h-[92dvh] flex flex-col overflow-hidden shadow-2xl">
             <h3 className="font-bold text-base text-slate-100 pb-2 border-b border-slate-800 shrink-0 flex items-center gap-2">
               <Settings className="w-4 h-4 text-blue-400" />
-              <span>Описание и материалы книги</span>
+              <span>Параметры и материалы книги</span>
             </h3>
+            <p className="shrink-0 rounded-lg border border-blue-500/20 bg-blue-950/20 px-3 py-2 text-[11px] leading-relaxed text-slate-300">Вы редактируете материалы книги <strong className="text-blue-200">«{activeStory.title}»</strong>. Сохранение обновляет только её Библию мира и план; главы не меняются, пока вы отдельно не выберете пересоздание.</p>
             
             <form onSubmit={(e) => {
               e.preventDefault();
@@ -2168,7 +2170,7 @@ export default function App() {
               </div>
 
               <div className="space-y-2">
-                <div className="flex justify-between items-center">
+                <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <label className="block text-slate-400 font-medium text-purple-400">План сюжета (для генерации глав)</label>
                   <button
                     type="button"
@@ -2197,11 +2199,12 @@ export default function App() {
                   rows={4}
                   className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-slate-100 outline-none focus:border-purple-500 font-sans text-[11px]"
                 />
-                <div className="flex justify-end mt-1">
+                <div className="mt-1 rounded-lg border border-red-500/20 bg-red-950/15 p-2">
+                  <p className="mb-1.5 text-[10px] leading-relaxed text-slate-400">Пересоздание — отдельное действие: оно удалит текущие главы только после подтверждения.</p>
                   <button
                     type="button"
                     onClick={handleApplyPlanToChapters}
-                    className="px-2.5 py-1 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 rounded text-[10px] font-semibold transition-all cursor-pointer"
+                    className="min-h-10 w-full px-2.5 py-1 bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-500/30 rounded text-[10px] font-semibold transition-all cursor-pointer"
                   >
                     Пересоздать главы по этому плану
                   </button>
@@ -2209,9 +2212,9 @@ export default function App() {
               </div>
 
               <div className="space-y-2">
-                <div className="flex justify-between items-center">
+                <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <label className="block text-slate-400 font-medium text-blue-400">Библия мира / Сеттинг / Лор</label>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={handleLoadLabirint}
@@ -2259,7 +2262,7 @@ export default function App() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded cursor-pointer"
+                  className="min-h-10 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded cursor-pointer"
                 >
                   Сохранить
                 </button>

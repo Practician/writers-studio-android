@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build-debug-apk:
-    name: Проверка и debug APK
+  build-apk:
+    name: Проверка и APK
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -46,25 +46,68 @@ jobs:
       - name: Синхронизировать Capacitor Android
         run: npx cap sync android
 
-      - name: Собрать debug APK
+      - name: Проверить готовность release signing
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$RELEASE_STORE_PASSWORD" ] && [ -n "$RELEASE_KEY_ALIAS" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "label=подписанная release-сборка" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "label=debug-сборка (release signing ещё не настроен)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Восстановить release keystore
+        if: steps.signing.outputs.available == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/release-key.jks
+          chmod 600 android/release-key.jks
+
+      - name: Собрать APK
         working-directory: android
+        env:
+          APP_VERSION_CODE: ${{ github.run_number }}
+          RELEASE_STORE_FILE: ${{ github.workspace }}/android/release-key.jks
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          # У ключа из Bookstore пароль ключа совпадает с паролем keystore.
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon
+          if [ "${{ steps.signing.outputs.available }}" = "true" ]; then
+            ./gradlew :app:assembleRelease --no-daemon
+          else
+            ./gradlew :app:assembleDebug --no-daemon
+          fi
 
       - name: Подготовить APK для скачивания
         id: apk
+        env:
+          SIGNED_RELEASE: ${{ steps.signing.outputs.available }}
         run: |
           VERSION_NAME=$(grep -E '^[[:space:]]*versionName ' android/app/build.gradle | sed -E 's/.*"([^"]+)".*/\1/')
           APK_NAME="WritersStudio-Android-v${VERSION_NAME}-build-${{ github.run_number }}.apk"
-          cp android/app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
+          if [ "$SIGNED_RELEASE" = "true" ]; then
+            cp android/app/build/outputs/apk/release/app-release.apk "$APK_NAME"
+            KIND="подписанная release-сборка"
+          else
+            cp android/app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
+            KIND="debug-сборка: для обновлений добавьте release signing secrets"
+          fi
           echo "name=$APK_NAME" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
 
       - name: Сохранить APK как workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: writers-studio-android-debug-${{ github.sha }}
+          name: writers-studio-android-${{ github.sha }}
           path: ${{ steps.apk.outputs.name }}
           if-no-files-found: error
           retention-days: 14
@@ -74,17 +117,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: v${{ steps.apk.outputs.version }}-build-${{ github.run_number }}
-          RELEASE_TITLE: Writers Studio Android v${{ steps.apk.outputs.version }} · тестовая сборка ${{ github.run_number }}
+          RELEASE_TITLE: Writers Studio Android v${{ steps.apk.outputs.version }} · сборка ${{ github.run_number }}
           APK_NAME: ${{ steps.apk.outputs.name }}
+          APK_KIND: ${{ steps.apk.outputs.kind }}
         run: |
           gh release create "$RELEASE_TAG" \
             "$APK_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TITLE" \
-            --notes "Установочный APK для коммита $GITHUB_SHA. Внутри — автономный Writers Studio; ключ ИИ добавляется после установки. Это debug-сборка для тестирования, не файл для Google Play." \
+            --notes "$APK_KIND. Установочный APK для коммита $GITHUB_SHA. Writers Studio работает автономно; ключ ИИ добавляется пользователем после установки." \
             --latest
 
-# Подписанный release APK/AAB для Google Play создаётся отдельным signing workflow.
-# Signing keystore и пароли хранятся только как GitHub Secrets; LLM API-ключи
-# в GitHub Secrets и APK не добавляются, их вводит пользователь после установки.
+# Для постоянных обновлений добавьте в repository secrets:
+# KEYSTORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS.
+# Keystore и пароли не хранятся в Git, GitHub Releases или APK.
