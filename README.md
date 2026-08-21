@@ -44,9 +44,9 @@ npx cap open android
 
 ## GitHub Actions
 
-После каждого push в `master` или `main` workflow `.github/workflows/android-apk.yml` выполняет проверку типов, тесты, Vite build, Capacitor sync и создаёт debug APK. Файл можно скачать во вкладке **Actions → Artifacts** в течение 14 дней.
+После каждого push в `master` или `main` workflow `.github/workflows/android-apk.yml` выполняет проверку типов, тесты, Vite build, Capacitor sync и создаёт debug APK. После успешной сборки APK автоматически прикрепляется к новому prerelease во вкладке **Releases**; копия также остаётся в **Actions → Artifacts** на 14 дней.
 
-Для подписанного release APK/AAB нужен отдельный signing workflow. В GitHub Secrets при этом хранятся только keystore и пароли подписи; пользовательские LLM API-ключи туда не добавляются.
+Для подписанного production APK/AAB нужен отдельный signing workflow. В GitHub Secrets при этом хранятся только keystore и пароли подписи; пользовательские LLM API-ключи туда не добавляются.
 
 ## Дополнительно
 

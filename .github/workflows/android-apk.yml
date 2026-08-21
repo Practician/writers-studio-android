@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-debug-apk:
@@ -52,7 +52,7 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:assembleDebug --no-daemon
 
-      - name: Сохранить APK
+      - name: Сохранить APK как workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: writers-studio-android-debug-${{ github.sha }}
@@ -60,6 +60,21 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-# Для release APK/AAB по тегу добавьте отдельный signing workflow.
+      - name: Опубликовать APK в GitHub Releases
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: android-debug-${{ github.run_number }}
+          RELEASE_TITLE: Writers Studio Android · debug #${{ github.run_number }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            android/app/build/outputs/apk/debug/app-debug.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TITLE" \
+            --notes "Автоматическая debug-сборка APK для коммита $GITHUB_SHA. Это установочный APK для тестирования, а не подписанный Google Play release." \
+            --prerelease
+
+# Подписанный release APK/AAB для Google Play создаётся отдельным signing workflow.
 # Signing keystore и пароли хранятся только как GitHub Secrets; LLM API-ключи
 # в GitHub Secrets и APK не добавляются, их вводит пользователь после установки.
