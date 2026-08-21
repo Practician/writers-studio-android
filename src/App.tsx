@@ -1909,7 +1909,11 @@ export default function App() {
                   <>
                     <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
                       <div><p className="text-sm font-semibold text-slate-100">Главы</p><p className="text-[11px] text-slate-500">{activeStory.title}</p></div>
-                      <div className="flex items-center gap-1"><button type="button" onClick={handleAddChapter} className="min-h-10 min-w-10 grid place-items-center rounded-xl bg-blue-600 text-white" aria-label="Добавить главу"><Plus className="w-4 h-4" /></button><button type="button" onClick={() => setMobilePanel(null)} className="min-h-10 min-w-10 grid place-items-center rounded-xl border border-slate-700 text-slate-300" aria-label="Закрыть"><X className="w-4 h-4" /></button></div>
+                      <button type="button" onClick={() => setMobilePanel(null)} className="min-h-10 min-w-10 grid place-items-center rounded-xl border border-slate-700 text-slate-300" aria-label="Закрыть"><X className="w-4 h-4" /></button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 border-b border-slate-800 bg-slate-950/35 p-3">
+                      <button type="button" onClick={() => { setMobilePanel(null); setShowNewStoryModal(true); }} className="flex min-h-11 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 text-sm font-semibold text-white shadow-lg shadow-blue-950/30"><Plus className="h-4 w-4" />Новая книга</button>
+                      <button type="button" onClick={handleAddChapter} className="flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 text-sm font-semibold text-slate-200"><Plus className="h-4 w-4" />Новая глава</button>
                     </div>
                     <div className="flex-1 overflow-y-auto p-3 pb-6 space-y-1.5">
                       {activeStory.chapters.map((ch) => (
