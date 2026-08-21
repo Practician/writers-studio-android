@@ -1,0 +1,65 @@
+name: Android APK
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-debug-apk:
+    name: Проверка и debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@v4
+
+      - name: Настроить Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Настроить Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Установить зависимости
+        run: npm ci
+
+      - name: Проверить TypeScript
+        run: npm run lint
+
+      - name: Запустить тесты
+        run: npm test
+
+      - name: Собрать web bundle внутри APK
+        run: npm run build
+
+      - name: Синхронизировать Capacitor Android
+        run: npx cap sync android
+
+      - name: Собрать debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Сохранить APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: writers-studio-android-debug-${{ github.sha }}
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+# Для release APK/AAB по тегу добавьте отдельный signing workflow.
+# Signing keystore и пароли хранятся только как GitHub Secrets; LLM API-ключи
+# в GitHub Secrets и APK не добавляются, их вводит пользователь после установки.
