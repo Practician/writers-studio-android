@@ -176,6 +176,31 @@ export default function App() {
     return () => window.removeEventListener("writers-studio-openrouter-fallback", handleOpenRouterFallback);
   }, []);
 
+  // Автономный APK не использует серверную SSE-ленту. Показываем в этом же
+  // журнале только безопасные сведения о фактическом прямом запросе: без ключа и текста.
+  useEffect(() => {
+    if (!isAutonomousApk()) return;
+    const handleApiTrace = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        provider?: string; model?: string; endpoint?: string; keyPresent?: boolean;
+        keySuffix?: string; status?: number; message?: string;
+      }>).detail;
+      if (!detail?.provider || !detail.model || !detail.endpoint) return;
+      const key = detail.keyPresent ? `ключ есть (…${detail.keySuffix || "????"})` : "ключ не передан";
+      const status = detail.status ? `HTTP ${detail.status}` : "без HTTP-статуса";
+      const message = [detail.endpoint, `модель ${detail.model}`, key, status, detail.message].filter(Boolean).join(" · ");
+      setLlmLogs((prev) => [...prev, {
+        level: detail.status && detail.status >= 400 ? "error" : "success",
+        provider: detail.provider,
+        message,
+        ts: Date.now(),
+      }].slice(-40));
+      setShowLlmLog(true);
+    };
+    window.addEventListener("writers-studio-api-trace", handleApiTrace);
+    return () => window.removeEventListener("writers-studio-api-trace", handleApiTrace);
+  }, []);
+
   const selectedModel = llmProvider === "openrouter"
     ? openrouterModel
     : defaultModelForProvider(llmProvider, llmStatus);

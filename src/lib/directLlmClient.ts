@@ -23,6 +23,48 @@ const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const OX_ALPHA_MODEL = "stealth/ox-alpha";
 const OPENROUTER_FREE_ROUTER = "openrouter/free";
 
+type ApiTrace = {
+  provider: Exclude<DirectProvider, "auto">;
+  model: string;
+  endpoint: string;
+  keyPresent: boolean;
+  keySuffix?: string;
+  status?: number;
+  message?: string;
+};
+
+class DirectProviderError extends Error {
+  constructor(message: string, readonly status: number, readonly trace: ApiTrace) {
+    super(message);
+    this.name = "DirectProviderError";
+  }
+}
+
+function endpointFor(provider: Exclude<DirectProvider, "auto">, model: string, key: string): string {
+  if (provider === "gemini") return `${GEMINI_URL}/${encodeURIComponent(model)}:generateContent`;
+  if (provider === "openrouter") return OPENROUTER_URL;
+  if (provider === "groq") return GROQ_URL;
+  return NVIDIA_URL;
+}
+
+function emitApiTrace(trace: ApiTrace): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("writers-studio-api-trace", { detail: trace }));
+}
+
+function traceFor(provider: Exclude<DirectProvider, "auto">, model: string, key: string, status?: number, message?: string): ApiTrace {
+  const url = new URL(endpointFor(provider, model, key));
+  return {
+    provider,
+    model,
+    endpoint: `${url.host}${url.pathname}`,
+    keyPresent: Boolean(key),
+    ...(key ? { keySuffix: key.slice(-4) } : {}),
+    ...(status !== undefined ? { status } : {}),
+    ...(message ? { message: String(message).slice(0, 300) } : {}),
+  };
+}
+
 function notifyOpenRouterFallback(from: string, to: string): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent("writers-studio-openrouter-fallback", { detail: { from, to } }));
@@ -87,8 +129,10 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   // Автовыбор определяет и провайдера, и совместимую с ним модель.
   // Это защищает APK от старого model id, сохранённого для другого API.
   const model = requestedProvider === "auto" ? defaultModel(provider) : request.model || defaultModel(provider);
+  let effectiveModel = model;
   const system = request.system || "Ты внимательный литературный помощник. Отвечай по-русски.";
 
+  const key = request.apiKeys?.[provider] || "";
   let response: Response;
   let payload: any;
   if (provider === "gemini") {
@@ -103,8 +147,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       }),
     });
   } else {
-    const endpoint = provider === "openrouter" ? OPENROUTER_URL : provider === "groq" ? GROQ_URL : NVIDIA_URL;
-    const key = request.apiKeys?.[provider] || "";
+    const endpoint = endpointFor(provider, model, key);
     response = await fetch(endpoint, {
       method: "POST",
       signal: request.signal,
@@ -131,6 +174,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     && model === OX_ALPHA_MODEL
     && response.status === 402
   ) {
+    effectiveModel = OPENROUTER_FREE_ROUTER;
     response = await fetch(OPENROUTER_URL, {
       method: "POST",
       signal: request.signal,
@@ -141,7 +185,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         "X-OpenRouter-Title": "Writers Studio Android",
       },
       body: JSON.stringify({
-        model: OPENROUTER_FREE_ROUTER,
+        model: effectiveModel,
         messages: [{ role: "system", content: system }, { role: "user", content: request.prompt }],
         temperature: request.temperature ?? 0.75,
         ...(request.json ? { response_format: { type: "json_object" } } : {}),
@@ -151,7 +195,10 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     if (response.ok) notifyOpenRouterFallback(OX_ALPHA_MODEL, OPENROUTER_FREE_ROUTER);
   }
 
-  if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Ошибка ${providerLabel(provider)} (${response.status})`);
+  const providerMessage = payload?.error?.message || payload?.error || `Ошибка ${providerLabel(provider)} (${response.status})`;
+  const trace = traceFor(provider, effectiveModel, key, response.status, response.ok ? undefined : providerMessage);
+  emitApiTrace(trace);
+  if (!response.ok) throw new DirectProviderError(String(providerMessage), response.status, trace);
   return responseText(payload);
 }
 
@@ -271,7 +318,11 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
     if (path.startsWith("/api/dev/load-labirint")) return json({ bible: "", plan: "" });
     return json({ error: `Автономный APK не поддерживает маршрут ${path}` }, 404);
   } catch (error: any) {
-    return json({ error: error?.message || "Не удалось выполнить прямой запрос к ИИ-провайдеру." }, 400);
+    const status = error instanceof DirectProviderError ? error.status : 400;
+    return json({
+      error: error?.message || "Не удалось выполнить прямой запрос к ИИ-провайдеру.",
+      ...(error instanceof DirectProviderError ? { diagnostics: error.trace } : {}),
+    }, status);
   }
 }
 

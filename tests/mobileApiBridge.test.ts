@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { directGenerate } from "../src/lib/directLlmClient";
+import { directApi, directGenerate } from "../src/lib/directLlmClient";
 
 async function withMockFetch<T>(handler: (url: string, init?: RequestInit) => Promise<Response>, run: () => Promise<T>): Promise<T> {
   const originalFetch = globalThis.fetch;
@@ -45,4 +45,33 @@ test("auto mode does not include model field in UI request fields", async () => 
   assert.equal(fields.llmProvider, "auto");
   assert.equal(fields.model, undefined);
   assert.deepEqual(fields.apiKeys, { nvidia: "nvapi-test", openrouter: "sk-or-test" });
+});
+
+test("direct bridge preserves provider HTTP status and returns non-secret diagnostics", async () => {
+  const response = await withMockFetch(async () => new Response(JSON.stringify({
+    error: { message: "Маршрут не найден" },
+  }), { status: 404 }), () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "continue",
+      llmApiFields: {
+        llmProvider: "nvidia",
+        apiKeys: { nvidia: "nvapi-very-secret-1234" },
+      },
+    }),
+  }));
+
+  const payload = await response.json();
+  assert.equal(response.status, 404);
+  assert.equal(payload.error, "Маршрут не найден");
+  assert.deepEqual(payload.diagnostics, {
+    provider: "nvidia",
+    model: "meta/llama-3.3-70b-instruct",
+    endpoint: "integrate.api.nvidia.com/v1/chat/completions",
+    keyPresent: true,
+    keySuffix: "1234",
+    status: 404,
+    message: "Маршрут не найден",
+  });
+  assert.equal(JSON.stringify(payload).includes("very-secret"), false);
 });
