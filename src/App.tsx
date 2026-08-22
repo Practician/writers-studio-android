@@ -1478,7 +1478,7 @@ export default function App() {
       const { exportStoryDocx } = await import("./lib/exportDocx");
       const result = await exportStoryDocx(activeStory);
       if (result.savedNatively && !result.openedInDocumentApp) {
-        alert(`Word-файл сохранён: Documents/Writers Studio/${result.filename}. Установите Word или другой редактор DOCX, чтобы открыть его.`);
+        alert(`Word-файл сохранён в Загрузки: ${result.filename}. Установите Word или другой редактор DOCX, чтобы открыть его.`);
       }
     } catch (err) {
       console.error(err);
@@ -1502,7 +1502,7 @@ export default function App() {
       const { exportChapterDocx } = await import("./lib/exportDocx");
       const result = await exportChapterDocx(activeStory.title, ch);
       if (result.savedNatively && !result.openedInDocumentApp) {
-        alert(`Word-файл сохранён: Documents/Writers Studio/${result.filename}. Установите Word или другой редактор DOCX, чтобы открыть его.`);
+        alert(`Word-файл сохранён в Загрузки: ${result.filename}. Установите Word или другой редактор DOCX, чтобы открыть его.`);
       }
     } catch (err) {
       console.error(err);

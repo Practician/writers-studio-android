@@ -35,22 +35,20 @@ async function blobToBase64(blob: Blob): Promise<string> {
 }
 
 /**
- * Ссылка <a download> не передаёт файл в Downloads/Documents из Android WebView.
- * В APK сохраняем настоящий DOCX нативно в пользовательские документы и передаём его
+ * Ссылка <a download> не передаёт файл в Android WebView. В APK сохраняем настоящий
+ * DOCX непосредственно в общую папку Downloads через MediaStore, затем передаём его
  * штатному приложению для просмотра. В браузере остаётся обычное скачивание.
  */
 async function saveDocx(blob: Blob, filename: string): Promise<DocxExportResult> {
   if (!Capacitor.isNativePlatform()) return downloadBlob(blob, filename);
 
-  const [{ Filesystem, Directory }, { FileOpener }] = await Promise.all([
-    import("@capacitor/filesystem"),
+  const [{ FileOpener }, { WriterStudioDownloads }] = await Promise.all([
     import("@capawesome-team/capacitor-file-opener"),
+    import("./writerStudioDownloads"),
   ]);
-  const file = await Filesystem.writeFile({
-    path: `Writers Studio/${filename}`,
-    directory: Directory.Documents,
+  const file = await WriterStudioDownloads.saveDocx({
+    filename,
     data: await blobToBase64(blob),
-    recursive: true,
   });
 
   try {

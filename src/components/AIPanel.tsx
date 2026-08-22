@@ -376,11 +376,9 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
         const bookPlanText = story.bookPlan || (planChapter ? planChapter.content : "");
 
         payload.action = "generate_full_chapter";
-        payload.title = story.title;
         payload.genre = story.genre;
         payload.description = story.description;
         payload.currentChapterTitle = activeChapter?.title || "Без названия";
-        payload.currentChapterSummary = activeChapter?.summary || "Без синопсиса";
         payload.previousChapter = prevChapterContent;
         payload.worldBible = worldBibleText;
         payload.bookPlan = bookPlanText;
