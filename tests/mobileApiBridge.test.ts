@@ -236,11 +236,11 @@ test("OpenRouter sends the selected literary profile instead of a hidden default
     return new Response(JSON.stringify({ choices: [{ message: { content: "Автоматический выбор." } }] }), { status: 200 });
   }, () => directGenerate({
     provider: "openrouter",
-    model: "mistralai/mistral-small-creative",
+    model: "deepseek/deepseek-v3.2",
     apiKeys: { openrouter: "sk-or-test" },
     prompt: "Тест автоматической модели.",
   }));
-  assert.equal(requestedModel, "mistralai/mistral-small-creative");
+  assert.equal(requestedModel, "deepseek/deepseek-v3.2");
 });
 
 test("NVIDIA retries once with a smaller output budget after HTTP 504", async () => {
@@ -460,21 +460,21 @@ test("Groq sends the selected literary profile to its OpenAI-compatible endpoint
   assert.equal(requestedModel, "qwen/qwen3.6-27b");
 });
 
-test("a selected OpenRouter literary profile falls back to free-router when unavailable", async () => {
+test("a selected OpenRouter DeepSeek profile falls back to free-router when unavailable", async () => {
   const calls: string[] = [];
   const text = await withMockFetch(async (_url, init) => {
     const model = JSON.parse(String(init?.body || "{}")).model;
     calls.push(model);
-    if (model === "mistralai/mistral-small-creative") {
+    if (model === "deepseek/deepseek-v3.2") {
       return new Response(JSON.stringify({ error: { message: "Model unavailable" } }), { status: 404 });
     }
     return new Response(JSON.stringify({ choices: [{ message: { content: "Текст от free-router." } }] }), { status: 200 });
   }, () => directGenerate({
     provider: "openrouter",
-    model: "mistralai/mistral-small-creative",
+    model: "deepseek/deepseek-v3.2",
     apiKeys: { openrouter: "sk-or-test" },
     prompt: "Тест fallback профиля.",
   }));
   assert.equal(text, "Текст от free-router.");
-  assert.deepEqual(calls, ["mistralai/mistral-small-creative", "openrouter/free"]);
+  assert.deepEqual(calls, ["deepseek/deepseek-v3.2", "openrouter/free"]);
 });

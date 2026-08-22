@@ -38,8 +38,9 @@ export const GROQ_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
 ];
 
 export const OPENROUTER_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
-  { id: DEFAULT_OPENROUTER_MODEL, label: "Авто — Ox Alpha", description: "Текущий профиль OpenRouter; при пустом ответе или квоте APK сам перейдёт на бесплатный router." },
-  { id: "mistralai/mistral-small-creative", label: "Mistral Small Creative — художественный", description: "Специализированный вариант для повествования, диалогов и ролевого текста." },
+  { id: DEFAULT_OPENROUTER_MODEL, label: "Авто — Ox Alpha", description: "Текущий профиль OpenRouter; при пустом ответе, недоступности или квоте APK сам перейдёт на бесплатный router." },
+  { id: "deepseek/deepseek-v3.2", label: "DeepSeek V3.2 — связная проза", description: "Актуальная текстовая модель для последовательного повествования, сцен и диалогов." },
+  { id: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash — длинная глава", description: "Актуальная текстовая модель с длинным контекстом для большой главы и сохранения канона." },
   { id: "openrouter/free", label: "Бесплатный router — OpenRouter", description: "OpenRouter сам выбирает доступную бесплатную текстовую модель; состав пула меняется." },
 ];
 
