@@ -15,7 +15,32 @@ export interface StoredLlmKeys {
 const PROVIDER_LS = "writers_studio_llm_provider";
 const KEYS_LS = "writers_studio_llm_keys_v1";
 const OPENROUTER_MODEL_LS = "writers_studio_openrouter_model_v1";
+const NVIDIA_MODEL_LS = "writers_studio_nvidia_model_v1";
 export const DEFAULT_OPENROUTER_MODEL = "stealth/ox-alpha";
+/** Литературный профиль: первый в цепочке локального RU-бенчмарка основного приложения. */
+export const DEFAULT_NVIDIA_MODEL = "deepseek-ai/deepseek-v4-flash-0731";
+export const NVIDIA_LITERARY_MODELS = [
+  {
+    id: DEFAULT_NVIDIA_MODEL,
+    label: "Литературный авто — DeepSeek V4 Flash",
+    description: "Рекомендуется для русской прозы; первый в автоматической цепочке NVIDIA.",
+  },
+  {
+    id: "z-ai/glm-5.2",
+    label: "GLM 5.2 — сложная проза",
+    description: "Альтернатива для более обстоятельных сцен и диалогов.",
+  },
+  {
+    id: "minimaxai/minimax-m3",
+    label: "MiniMax M3 — вариативный стиль",
+    description: "Резервный литературный вариант при недоступности предыдущих.",
+  },
+  {
+    id: "meta/llama-3.3-70b-instruct",
+    label: "Llama 3.3 70B — совместимый запасной",
+    description: "Универсальная модель; прежний стартовый вариант APK.",
+  },
+] as const;
 /** Одноразовая миграция: старый default NVIDIA → auto (Groq-first). */
 const PROVIDER_MIGRATE_V3 = "writers_studio_llm_provider_v3_groq_first";
 
@@ -62,6 +87,20 @@ export function loadOpenrouterModel(): string {
 export function saveOpenrouterModel(model: string): void {
   const normalized = model.trim();
   localStorage.setItem(OPENROUTER_MODEL_LS, normalized || DEFAULT_OPENROUTER_MODEL);
+}
+
+/** Идентификатор NVIDIA-модели не секретен; ключи по-прежнему находятся в Keystore. */
+export function loadNvidiaModel(): string {
+  const saved = localStorage.getItem(NVIDIA_MODEL_LS)?.trim();
+  return NVIDIA_LITERARY_MODELS.some((model) => model.id === saved) ? saved! : DEFAULT_NVIDIA_MODEL;
+}
+
+export function saveNvidiaModel(model: string): void {
+  const normalized = model.trim();
+  const selected = NVIDIA_LITERARY_MODELS.some((item) => item.id === normalized)
+    ? normalized
+    : DEFAULT_NVIDIA_MODEL;
+  localStorage.setItem(NVIDIA_MODEL_LS, selected);
 }
 
 function normalizeKeys(value: Partial<StoredLlmKeys> | null | undefined): StoredLlmKeys {
@@ -163,7 +202,7 @@ export function defaultModelForProvider(
   } | null,
 ): string {
   if (provider === "nvidia") {
-    return status?.nvidiaDefaultModel || "deepseek-ai/deepseek-v4-flash";
+    return status?.nvidiaDefaultModel || DEFAULT_NVIDIA_MODEL;
   }
   if (provider === "groq") {
     return status?.groqDefaultModel || "llama-3.3-70b-versatile";

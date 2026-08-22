@@ -46,6 +46,8 @@ import { loadGlobalAuthorProfile, saveGlobalAuthorProfile } from "./lib/authorSt
 import { isAutonomousApk } from "./lib/directLlmClient";
 import {
   defaultModelForProvider,
+  loadNvidiaModel,
+  NVIDIA_LITERARY_MODELS,
   loadLlmKeys,
   loadStoredLlmKeys,
   loadLlmProvider,
@@ -53,6 +55,7 @@ import {
   providerLabel,
   saveLlmKeys,
   saveLlmProvider,
+  saveNvidiaModel,
   type LlmProviderChoice,
   type StoredLlmKeys,
 } from "./lib/llmSettings";
@@ -90,6 +93,8 @@ export default function App() {
   const [llmProvider, setLlmProvider] = useState<LlmProviderChoice>(() => loadLlmProvider());
   const [llmKeys, setLlmKeys] = useState<StoredLlmKeys>(() => loadLlmKeys());
   const [llmKeysReady, setLlmKeysReady] = useState(() => !isAutonomousApk());
+  const [nvidiaModel, setNvidiaModel] = useState(() => loadNvidiaModel());
+  const [nvidiaModelDraft, setNvidiaModelDraft] = useState(() => loadNvidiaModel());
   const [openrouterFallbackNotice, setOpenrouterFallbackNotice] = useState<string | null>(null);
   const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [showAuthorProfile, setShowAuthorProfile] = useState(false);
@@ -255,7 +260,9 @@ export default function App() {
   // использует openrouter/free, если Ox Alpha вернёт квоту или пустой ответ.
   const selectedModel = llmProvider === "openrouter"
     ? "stealth/ox-alpha"
-    : defaultModelForProvider(llmProvider, llmStatus);
+    : llmProvider === "nvidia"
+      ? nvidiaModel
+      : defaultModelForProvider(llmProvider, llmStatus);
   const llmApiFields = useMemo(
     () => llmRequestFields(llmProvider, llmKeys, llmProvider === "auto" ? undefined : selectedModel),
     [llmProvider, llmKeys, selectedModel],
@@ -273,12 +280,15 @@ export default function App() {
 
   const openLlmSettings = () => {
     setLlmKeysDraft({ ...llmKeys });
+    setNvidiaModelDraft(nvidiaModel);
     setShowLlmSettings(true);
   };
 
   const saveLlmSettings = () => {
     saveLlmKeys(llmKeysDraft);
+    saveNvidiaModel(nvidiaModelDraft);
     setLlmKeys({ ...llmKeysDraft });
+    setNvidiaModel(nvidiaModelDraft);
     setShowLlmSettings(false);
   };
 
@@ -1681,6 +1691,31 @@ export default function App() {
         </div>
       </header>
 
+      <div className="lg:hidden flex items-center gap-2 overflow-x-auto border-b border-slate-800/80 bg-[#0e1424] px-3 py-2 shrink-0" aria-label="Экспорт рукописи">
+        <button
+          type="button"
+          onClick={() => activeChapter && handleExportSingleChapterDoc(activeChapter)}
+          disabled={!activeChapter}
+          className="min-h-10 shrink-0 rounded-xl border border-indigo-500/35 bg-indigo-950/35 px-3 text-xs font-semibold text-indigo-200 disabled:cursor-not-allowed disabled:opacity-40 flex items-center gap-1.5"
+          title="Скачать текущую главу как Word (.docx)"
+          id="mobile-export-chapter-doc-btn"
+        >
+          <FileText className="h-4 w-4" />
+          <span>Глава Word</span>
+        </button>
+        <button
+          type="button"
+          onClick={handleExportDoc}
+          disabled={!activeStory}
+          className="min-h-10 shrink-0 rounded-xl border border-blue-500/35 bg-blue-950/35 px-3 text-xs font-semibold text-blue-200 disabled:cursor-not-allowed disabled:opacity-40 flex items-center gap-1.5"
+          title="Скачать всю книгу как Word (.docx)"
+          id="mobile-export-book-doc-btn"
+        >
+          <Download className="h-4 w-4" />
+          <span>Вся книга Word</span>
+        </button>
+      </div>
+
       {openrouterFallbackNotice && (
         <div role="status" className="fixed inset-x-3 top-3 z-[70] mx-auto flex max-w-lg items-start gap-3 rounded-xl border border-amber-500/40 bg-slate-950/95 p-3 text-xs text-amber-100 shadow-2xl">
           <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
@@ -2219,6 +2254,24 @@ export default function App() {
                   </div>
                 );
               })}
+
+              <div className="rounded-xl border border-orange-500/25 bg-orange-950/20 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="font-semibold text-slate-100 text-[12px]">NVIDIA для русской прозы</label>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-md border border-orange-800/40 bg-orange-950/50 text-orange-200">профиль модели</span>
+                </div>
+                <select
+                  value={nvidiaModelDraft}
+                  onChange={(event) => setNvidiaModelDraft(event.target.value)}
+                  className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-orange-500/70 focus:ring-1 focus:ring-orange-500/20 text-[11px]"
+                  id="nvidia-literary-model-select"
+                >
+                  {NVIDIA_LITERARY_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+                </select>
+                <p className="text-[10px] leading-relaxed text-slate-400">
+                  {NVIDIA_LITERARY_MODELS.find((model) => model.id === nvidiaModelDraft)?.description} При ошибке 502/503/504 APK по-прежнему переберёт резервные NVIDIA-модели.
+                </p>
+              </div>
 
               <div className="rounded-xl border border-violet-500/25 bg-violet-950/20 p-3.5 text-[10px] leading-relaxed text-violet-100">
                 <strong>Модель OpenRouter выбирается автоматически.</strong> Приложение сначала использует Ox Alpha. Если она вернёт ошибку квоты или пустой ответ, запрос автоматически повторяется через <code className="text-violet-200">openrouter/free</code>. Вручную ничего вводить не нужно.

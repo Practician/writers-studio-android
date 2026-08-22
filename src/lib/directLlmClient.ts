@@ -174,7 +174,7 @@ function providerLabel(provider: Exclude<DirectProvider, "auto">): string {
 function defaultModel(provider: Exclude<DirectProvider, "auto">): string {
   if (provider === "gemini") return "gemini-3.5-flash";
   if (provider === "groq") return "llama-3.3-70b-versatile";
-  if (provider === "nvidia") return "meta/llama-3.3-70b-instruct";
+  if (provider === "nvidia") return "deepseek-ai/deepseek-v4-flash-0731";
   return "stealth/ox-alpha";
 }
 

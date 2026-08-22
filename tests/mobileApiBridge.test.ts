@@ -29,7 +29,7 @@ test("auto mode chooses NVIDIA and its compatible model despite stale Gemini mod
   assert.deepEqual(calls, [{
     url: "https://integrate.api.nvidia.com/v1/chat/completions",
     body: {
-      model: "meta/llama-3.3-70b-instruct",
+      model: "deepseek-ai/deepseek-v4-flash-0731",
       messages: [
         { role: "system", content: "Ты внимательный литературный помощник. Отвечай по-русски." },
         { role: "user", content: "Тест." },
@@ -38,6 +38,20 @@ test("auto mode chooses NVIDIA and its compatible model despite stale Gemini mod
       max_tokens: 2048,
     },
   }]);
+});
+
+test("explicit NVIDIA literary profile is sent to the NVIDIA endpoint", async () => {
+  let requestedModel = "";
+  await withMockFetch(async (_url, init) => {
+    requestedModel = JSON.parse(String(init?.body || "{}")).model;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Проза." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "nvidia",
+    model: "z-ai/glm-5.2",
+    apiKeys: { nvidia: "nvapi-test" },
+    prompt: "Тест выбора профиля.",
+  }));
+  assert.equal(requestedModel, "z-ai/glm-5.2");
 });
 
 test("auto mode does not include model field in UI request fields", async () => {
@@ -67,7 +81,7 @@ test("direct bridge preserves provider HTTP status and returns non-secret diagno
   assert.equal(payload.error, "Маршрут не найден");
   assert.deepEqual(payload.diagnostics, {
     provider: "nvidia",
-    model: "z-ai/glm-5.2",
+    model: "minimaxai/minimax-m3",
     endpoint: "integrate.api.nvidia.com/v1/chat/completions",
     keyPresent: true,
     keySuffix: "1234",
