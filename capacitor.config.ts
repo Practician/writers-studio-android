@@ -8,6 +8,13 @@ const config: CapacitorConfig = {
   android: {
     allowMixedContent: false,
   },
+  // Внешние AI API (включая NVIDIA) не всегда разрешают CORS из capacitor://localhost.
+  // Native HTTP передаёт запрос через Android-сетевой стек, не ослабляя HTTPS-ограничения.
+  plugins: {
+    CapacitorHttp: {
+      enabled: true,
+    },
+  },
 };
 
 export default config;
