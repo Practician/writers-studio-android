@@ -67,7 +67,7 @@ test("direct bridge preserves provider HTTP status and returns non-secret diagno
   assert.equal(payload.error, "Маршрут не найден");
   assert.deepEqual(payload.diagnostics, {
     provider: "nvidia",
-    model: "meta/llama-3.3-70b-instruct",
+    model: "z-ai/glm-5.2",
     endpoint: "integrate.api.nvidia.com/v1/chat/completions",
     keyPresent: true,
     keySuffix: "1234",
@@ -227,4 +227,104 @@ test("OpenRouter ignores a stale manual model and always begins with Ox Alpha", 
     prompt: "Тест автоматической модели.",
   }));
   assert.equal(requestedModel, "stealth/ox-alpha");
+});
+
+test("NVIDIA retries once with a smaller output budget after HTTP 504", async () => {
+  const tokenBudgets: number[] = [];
+  const text = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    tokenBudgets.push(body.max_tokens);
+    if (tokenBudgets.length === 1) {
+      return new Response(JSON.stringify({ error: { message: "Gateway timeout" } }), { status: 504 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ после повтора NVIDIA." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "nvidia",
+    model: "meta/llama-3.3-70b-instruct",
+    apiKeys: { nvidia: "nvapi-test" },
+    prompt: "Тест 504.",
+    maxTokens: 6_144,
+  }));
+  assert.equal(text, "Ответ после повтора NVIDIA.");
+  assert.deepEqual(tokenBudgets, [6_144, 4_096]);
+});
+
+test("full chapter request targets 3300 words", async () => {
+  let body: any = null;
+  await withMockFetch(async (_url, init) => {
+    body = JSON.parse(String(init?.body || "{}"));
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Готовая глава." } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "generate_full_chapter",
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  assert.equal(body.max_tokens, 6_144);
+  assert.equal(body.messages[1].content.includes("около 3 300 слов"), true);
+});
+
+test("single OpenRouter key reports that rotation cannot run after quota error", async () => {
+  const response = await withMockFetch(async () => new Response(JSON.stringify({
+    error: { message: "Недостаточно квоты" },
+  }), { status: 402 }), () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "continue",
+      llmApiFields: { llmProvider: "openrouter", apiKeys: { openrouter: "only-one-key" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(response.status, 402);
+  assert.equal(payload.error.includes("сохранён только ключ 1/1"), true);
+});
+
+test("NVIDIA rotates to a backup model after its retry also times out", async () => {
+  const models: string[] = [];
+  const text = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    models.push(body.model);
+    if (models.length < 3) return new Response(JSON.stringify({ error: { message: "Timeout" } }), { status: 504 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ резервной NVIDIA-модели." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "nvidia",
+    model: "meta/llama-3.3-70b-instruct",
+    apiKeys: { nvidia: "nvapi-test" },
+    prompt: "Тест ротации NVIDIA.",
+    maxTokens: 6_144,
+  }));
+  assert.equal(text, "Ответ резервной NVIDIA-модели.");
+  assert.deepEqual(models, [
+    "meta/llama-3.3-70b-instruct",
+    "meta/llama-3.3-70b-instruct",
+    "deepseek-ai/deepseek-v4-flash-0731",
+  ]);
+});
+
+test("NVIDIA falls through to Groq after all bounded NVIDIA model attempts fail", async () => {
+  const calls: Array<{ url: string; model: string }> = [];
+  const text = await withMockFetch(async (url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    calls.push({ url, model: body.model });
+    if (url.includes("integrate.api.nvidia.com")) {
+      return new Response(JSON.stringify({ error: { message: "Gateway unavailable" } }), { status: 504 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ Groq после NVIDIA." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "nvidia",
+    model: "meta/llama-3.3-70b-instruct",
+    apiKeys: { nvidia: "nvapi-test", groq: "gsk-test" },
+    prompt: "Тест межпровайдерного fallback.",
+    maxTokens: 6_144,
+  }));
+  assert.equal(text, "Ответ Groq после NVIDIA.");
+  assert.deepEqual(calls.map((call) => call.model), [
+    "meta/llama-3.3-70b-instruct",
+    "meta/llama-3.3-70b-instruct",
+    "deepseek-ai/deepseek-v4-flash-0731",
+    "z-ai/glm-5.2",
+    "llama-3.3-70b-versatile",
+  ]);
+  assert.equal(calls.at(-1)?.url, "https://api.groq.com/openai/v1/chat/completions");
 });

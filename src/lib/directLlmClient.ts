@@ -25,6 +25,21 @@ const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const OX_ALPHA_MODEL = "stealth/ox-alpha";
 const OPENROUTER_FREE_ROUTER = "openrouter/free";
 
+// Та же проверенная цепочка, что использует серверная версия. В APK пробуем
+// максимум три модели за запрос, чтобы не превращать один сбой в долгий цикл.
+const NVIDIA_FALLBACK_MODELS = [
+  "deepseek-ai/deepseek-v4-flash-0731",
+  "z-ai/glm-5.2",
+  "minimaxai/minimax-m3",
+  "stepfun-ai/step-3.7-flash",
+  "qwen/qwen3-235b-a22b-instruct-2507",
+  "moonshotai/kimi-k2.6",
+  "mistralai/mistral-nemotron",
+  "mistralai/mistral-large-2-instruct",
+  "meta/llama-3.3-70b-instruct",
+];
+const NVIDIA_MAX_MODEL_ATTEMPTS = 3;
+
 type ApiTrace = {
   provider: Exclude<DirectProvider, "auto">;
   model: string;
@@ -102,6 +117,21 @@ function notifyHumanizePass(depth: string, beforeChars: number, afterChars: numb
 function shouldRotateKey(status: number): boolean {
   // Только квота/лимит: неверный ключ, 404 и ошибки сети не должны расходовать остальные ключи.
   return status === 402 || status === 429;
+}
+
+function nvidiaModelChain(primary: string): string[] {
+  return [...new Set([primary, ...NVIDIA_FALLBACK_MODELS])].slice(0, NVIDIA_MAX_MODEL_ATTEMPTS);
+}
+
+function shouldRotateNvidiaModel(status: number): boolean {
+  // Для лимитов аккаунта первична ротация личных ключей; модели меняем при
+  // недоступности маршрута/модели или тайм-ауте gateway.
+  return status === 404 || status === 502 || status === 503 || status === 504;
+}
+
+function providerAfterNvidia(keys: ApiKeys): Exclude<DirectProvider, "auto" | "nvidia"> | undefined {
+  // Порядок соответствует автономной политике: быстрый Groq → Gemini → OpenRouter.
+  return (["groq", "gemini", "openrouter"] as const).find((provider) => hasProviderKey(keys, provider));
 }
 
 export function isAutonomousApk(): boolean {
@@ -237,6 +267,70 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
 
     payload = await response.json().catch(() => ({}));
 
+    // 504 означает, что NVIDIA не отдала результат. Повтор безопасен: текста ответа
+    // ещё нет. Во второй попытке сокращаем лимит, чтобы снизить нагрузку на gateway.
+    if (provider === "nvidia" && response.status === 504) {
+      const retryMaxTokens = Math.min(maxTokens, 4_096);
+      emitApiTrace(traceFor(
+        provider,
+        model,
+        key,
+        index + 1,
+        keyPool.length,
+        response.status,
+        `NVIDIA не ответила вовремя; повтор с лимитом ${retryMaxTokens} токенов.`,
+        { chars: 0 },
+      ));
+      response = await fetch(NVIDIA_URL, {
+        method: "POST",
+        signal: request.signal,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "system", content: system }, { role: "user", content: request.prompt }],
+          temperature: request.temperature ?? 0.75,
+          max_tokens: retryMaxTokens,
+          ...(request.json ? { response_format: { type: "json_object" } } : {}),
+        }),
+      });
+      payload = await response.json().catch(() => ({}));
+    }
+
+    // После неудачи исходной модели (или повторной попытки при 504) пробуем до
+    // двух резервных моделей NVIDIA. Переходы показываются в журнале без ключа и текста.
+    if (provider === "nvidia") {
+      const candidates = nvidiaModelChain(model).slice(1);
+      for (const nextModel of candidates) {
+        const needsRotation = (response.ok && !hasVisibleResponseText(payload))
+          || (!response.ok && shouldRotateNvidiaModel(response.status));
+        if (!needsRotation) break;
+        emitApiTrace(traceFor(
+          provider,
+          effectiveModel,
+          key,
+          index + 1,
+          keyPool.length,
+          response.status,
+          `Ротация модели NVIDIA: ${effectiveModel} → ${nextModel}.`,
+          { chars: 0, finishReason: finishReasonFor(payload) },
+        ));
+        effectiveModel = nextModel;
+        response = await fetch(NVIDIA_URL, {
+          method: "POST",
+          signal: request.signal,
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          body: JSON.stringify({
+            model: effectiveModel,
+            messages: [{ role: "system", content: system }, { role: "user", content: request.prompt }],
+            temperature: request.temperature ?? 0.75,
+            max_tokens: Math.min(maxTokens, 4_096),
+            ...(request.json ? { response_format: { type: "json_object" } } : {}),
+          }),
+        });
+        payload = await response.json().catch(() => ({}));
+      }
+    }
+
     // Ox Alpha может вернуть HTTP 200, но израсходовать лимит на рассуждение и не
     // отдать видимый content (finish_reason=length). Для автора это такой же неуспех,
     // как 402: пробуем free-router, а исходную диагностику оставляем в журнале.
@@ -278,13 +372,20 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       payload = await response.json().catch(() => ({}));
     }
 
-    const providerMessage = payload?.error?.message || payload?.error || `Ошибка ${providerLabel(provider)} (${response.status})`;
+    const rawProviderMessage = payload?.error?.message || payload?.error || `Ошибка ${providerLabel(provider)} (${response.status})`;
+    const providerMessage = shouldRotateKey(response.status) && index + 1 >= keyPool.length
+      ? `${rawProviderMessage}. Ротация ключей недоступна: сохранён только ключ ${index + 1}/${keyPool.length}.`
+      : rawProviderMessage;
     if (response.ok) {
       try {
         const text = responseText(payload);
         emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, undefined, { chars: text.length, finishReason: finishReasonFor(payload) }));
         return text;
       } catch (error: any) {
+        const nextProvider = provider === "nvidia" ? providerAfterNvidia(request.apiKeys || {}) : undefined;
+        const message = nextProvider
+          ? `${error?.message || "NVIDIA не передала текст."} NVIDIA исчерпала ротацию моделей; переход к ${providerLabel(nextProvider)}.`
+          : error?.message || "Успешный ответ без текста.";
         const trace = traceFor(
           provider,
           effectiveModel,
@@ -292,22 +393,28 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
           index + 1,
           keyPool.length,
           response.status,
-          error?.message || "Успешный ответ без текста.",
+          message,
           { chars: 0, finishReason: finishReasonFor(payload) },
         );
         emitApiTrace(trace);
+        if (nextProvider) return directGenerate({ ...request, provider: nextProvider, model: undefined });
         // У провайдера HTTP 200, но для UI это должна быть явная ошибка, а не пустой результат.
         throw new DirectProviderError(String(trace.message), 502, trace);
       }
     }
-    const trace = traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, providerMessage, { chars: 0, finishReason: finishReasonFor(payload) });
+    const nextProvider = provider === "nvidia" ? providerAfterNvidia(request.apiKeys || {}) : undefined;
+    const messageWithFallback = nextProvider && provider === "nvidia"
+      ? `${providerMessage}. NVIDIA исчерпала ротацию моделей; переход к ${providerLabel(nextProvider)}.`
+      : providerMessage;
+    const trace = traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, messageWithFallback, { chars: 0, finishReason: finishReasonFor(payload) });
     emitApiTrace(trace);
 
     if (index + 1 < keyPool.length && shouldRotateKey(response.status)) {
       notifyApiKeyRotation(provider, index + 1, index + 2, keyPool.length, response.status);
       continue;
     }
-    throw new DirectProviderError(String(providerMessage), response.status, trace);
+    if (nextProvider) return directGenerate({ ...request, provider: nextProvider, model: undefined });
+    throw new DirectProviderError(String(messageWithFallback), response.status, trace);
   }
 
   throw new Error(`Добавьте ключ ${providerLabel(provider)} в настройках ИИ.`);
@@ -374,7 +481,7 @@ function promptForAction(action: string, body: any): { system: string; prompt: s
   if (action === "brainstorm") return { system: "Ты творческий соавтор.", prompt: `${context}\n\nПредложи свежие варианты для темы: ${body?.topic || body?.customPrompt || "следующей сцены"}. Дай несколько конкретных идей.` };
   if (action === "muse") return { system: "Ты Муза — бережный соавтор писателя.", prompt: `${context}\n\nОтветь на вопрос автора: ${body?.customPrompt || body?.prompt || "Помоги со следующей сценой."}` };
   if (action === "improve" || action === "rewrite_detector_segments") return { system: "Ты бережный литературный редактор. Сохраняй события, имена и факты.", prompt: `${context}${humanize}\n\nПерепиши текст по задаче «${body?.stylePreset || body?.customPrompt || "улучшить стиль"}». Верни только готовый текст.\n\nТекст:\n${text}` };
-  if (action === "continue" || action === "generate_full_chapter") return { system: "Ты пишешь художественную прозу по канону автора. Не объясняй свои действия.", prompt: `${context}${humanize}\n\n${action === "continue" ? "Продолжи текущую сцену 4–7 содержательными абзацами, с действием, деталями и завершённым микроповоротом" : "Напиши полноценную художественную главу объёмом 3 000–4 500 слов, с несколькими сценами, диалогами, конкретными деталями и завершённым поворотом. Не обрывай текст до достижения минимального объёма"}. Учти пожелание: ${body?.customPrompt || "сохрани тон и канон"}.\n\nТекущий текст:\n${text}` };
+  if (action === "continue" || action === "generate_full_chapter") return { system: "Ты пишешь художественную прозу по канону автора. Не объясняй свои действия.", prompt: `${context}${humanize}\n\n${action === "continue" ? "Продолжи текущую сцену 4–7 содержательными абзацами, с действием, деталями и завершённым микроповоротом" : "Напиши полноценную художественную главу объёмом около 3 300 слов (допустимо ±10%), с несколькими сценами, диалогами, конкретными деталями и завершённым поворотом. Не обрывай текст до достижения 3 000 слов"}. Учти пожелание: ${body?.customPrompt || "сохрани тон и канон"}.\n\nТекущий текст:\n${text}` };
   return { system: "Ты литературный помощник.", prompt: `${context}\n\n${body?.customPrompt || "Помоги автору с текстом."}\n\n${text}` };
 }
 
@@ -466,7 +573,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         const depth = body?.humanizeDepth === "fast" || body?.humanizeDepth === "balanced" || body?.humanizeDepth === "maximum"
           ? body.humanizeDepth
           : "balanced";
-        const minWords = action === "generate_full_chapter" ? "3 000 слов" : "исходный объём";
+        const minWords = action === "generate_full_chapter" ? "3 000 слов и ориентир около 3 300 слов" : "исходный объём";
         const beforeChars = text.length;
         text = await generate({
           provider: credentials.provider,
