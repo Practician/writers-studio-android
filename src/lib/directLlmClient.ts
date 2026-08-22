@@ -186,7 +186,11 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   const provider = selectProvider(requestedProvider, request.apiKeys || {}, request.model);
   // Автовыбор определяет и провайдера, и совместимую с ним модель.
   // Это защищает APK от старого model id, сохранённого для другого API.
-  const model = requestedProvider === "auto" ? defaultModel(provider) : request.model || defaultModel(provider);
+  // Идентификатор OpenRouter не вводится пользователем: всегда начинаем с Ox Alpha.
+  // Старые сохранённые model id намеренно игнорируются, а fallback выполняется внутри моста.
+  const model = requestedProvider === "auto" || provider === "openrouter"
+    ? defaultModel(provider)
+    : request.model || defaultModel(provider);
   const system = request.system || "Ты внимательный литературный помощник. Отвечай по-русски.";
   const maxTokens = Math.max(128, Math.min(request.maxTokens ?? 2_048, 6_144));
   const keyPool = splitApiKeyPool(request.apiKeys?.[provider]);

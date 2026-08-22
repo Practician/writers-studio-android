@@ -49,12 +49,10 @@ import {
   loadLlmKeys,
   loadStoredLlmKeys,
   loadLlmProvider,
-  loadOpenrouterModel,
   llmRequestFields,
   providerLabel,
   saveLlmKeys,
   saveLlmProvider,
-  saveOpenrouterModel,
   type LlmProviderChoice,
   type StoredLlmKeys,
 } from "./lib/llmSettings";
@@ -92,7 +90,6 @@ export default function App() {
   const [llmProvider, setLlmProvider] = useState<LlmProviderChoice>(() => loadLlmProvider());
   const [llmKeys, setLlmKeys] = useState<StoredLlmKeys>(() => loadLlmKeys());
   const [llmKeysReady, setLlmKeysReady] = useState(() => !isAutonomousApk());
-  const [openrouterModel, setOpenrouterModel] = useState(() => loadOpenrouterModel());
   const [openrouterFallbackNotice, setOpenrouterFallbackNotice] = useState<string | null>(null);
   const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [showAuthorProfile, setShowAuthorProfile] = useState(false);
@@ -100,7 +97,6 @@ export default function App() {
   // На телефоне главы и инструменты открываются как отдельные панели, не как постоянные колонки.
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "assistant" | null>(null);
   const [llmKeysDraft, setLlmKeysDraft] = useState<StoredLlmKeys>(() => loadLlmKeys());
-  const [openrouterModelDraft, setOpenrouterModelDraft] = useState(() => loadOpenrouterModel());
   const [openrouterKeyCheck, setOpenrouterKeyCheck] = useState<{
     state: "idle" | "loading" | "success" | "error";
     message?: string;
@@ -167,10 +163,7 @@ export default function App() {
     const handleOpenRouterFallback = (event: Event) => {
       const detail = (event as CustomEvent<{ from?: string; to?: string }>).detail;
       if (!detail?.to) return;
-      saveOpenrouterModel(detail.to);
-      setOpenrouterModel(detail.to);
-      setOpenrouterModelDraft(detail.to);
-      setOpenrouterFallbackNotice(`Ox Alpha вернула отказ по квоте. Приложение переключилось на ${detail.to}; итог запроса виден в журнале ИИ.`);
+      setOpenrouterFallbackNotice(`Ox Alpha недоступна или не вернула текст. Для этого запроса использован ${detail.to}; итог виден в журнале ИИ.`);
     };
     window.addEventListener("writers-studio-openrouter-fallback", handleOpenRouterFallback);
     return () => window.removeEventListener("writers-studio-openrouter-fallback", handleOpenRouterFallback);
@@ -240,8 +233,10 @@ export default function App() {
     return () => window.removeEventListener("writers-studio-api-key-rotation", handleKeyRotation);
   }, []);
 
+  // OpenRouter не требует ручного model id: стартуем с Ox Alpha, а мост сам
+  // использует openrouter/free, если Ox Alpha вернёт квоту или пустой ответ.
   const selectedModel = llmProvider === "openrouter"
-    ? openrouterModel
+    ? "stealth/ox-alpha"
     : defaultModelForProvider(llmProvider, llmStatus);
   const llmApiFields = useMemo(
     () => llmRequestFields(llmProvider, llmKeys, llmProvider === "auto" ? undefined : selectedModel),
@@ -260,15 +255,12 @@ export default function App() {
 
   const openLlmSettings = () => {
     setLlmKeysDraft({ ...llmKeys });
-    setOpenrouterModelDraft(openrouterModel);
     setShowLlmSettings(true);
   };
 
   const saveLlmSettings = () => {
     saveLlmKeys(llmKeysDraft);
-    saveOpenrouterModel(openrouterModelDraft);
     setLlmKeys({ ...llmKeysDraft });
-    setOpenrouterModel(openrouterModelDraft.trim() || "stealth/ox-alpha");
     setShowLlmSettings(false);
   };
 
@@ -2198,22 +2190,8 @@ export default function App() {
                 );
               })}
 
-              <div className="rounded-xl border border-violet-500/25 bg-violet-950/20 p-3.5 space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <label className="font-semibold text-slate-100 text-[12px]">Модель OpenRouter</label>
-                  <span className="text-[9px] px-1.5 py-0.5 rounded-md border border-violet-800/40 bg-violet-950/50 text-violet-300">можно изменить</span>
-                </div>
-                <input
-                  type="text"
-                  autoComplete="off"
-                  placeholder="stealth/ox-alpha"
-                  value={openrouterModelDraft}
-                  onChange={(e) => setOpenrouterModelDraft(e.target.value)}
-                  className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-violet-500/70 focus:ring-1 focus:ring-violet-500/20 font-mono text-[11px] placeholder:text-slate-600"
-                />
-                <p className="text-[10px] text-slate-500">
-                  Ox Alpha задана по умолчанию. Если временный preview закончится, укажите здесь другой доступный идентификатор модели из OpenRouter и сохраните настройки.
-                </p>
+              <div className="rounded-xl border border-violet-500/25 bg-violet-950/20 p-3.5 text-[10px] leading-relaxed text-violet-100">
+                <strong>Модель OpenRouter выбирается автоматически.</strong> Приложение сначала использует Ox Alpha. Если она вернёт ошибку квоты или пустой ответ, запрос автоматически повторяется через <code className="text-violet-200">openrouter/free</code>. Вручную ничего вводить не нужно.
               </div>
 
               <div className="rounded-xl border border-sky-500/25 bg-sky-950/20 p-3.5 space-y-2.5">

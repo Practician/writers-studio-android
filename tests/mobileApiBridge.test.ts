@@ -214,3 +214,17 @@ test("OpenRouter falls back when Ox Alpha returns HTTP 200 without visible conte
   assert.equal(text, "Текст от free-router.");
   assert.deepEqual(calls, ["stealth/ox-alpha", "openrouter/free"]);
 });
+
+test("OpenRouter ignores a stale manual model and always begins with Ox Alpha", async () => {
+  let requestedModel = "";
+  await withMockFetch(async (_url, init) => {
+    requestedModel = JSON.parse(String(init?.body || "{}")).model;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Автоматический выбор." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "openrouter",
+    model: "vendor/obsolete-manual-model",
+    apiKeys: { openrouter: "sk-or-test" },
+    prompt: "Тест автоматической модели.",
+  }));
+  assert.equal(requestedModel, "stealth/ox-alpha");
+});
