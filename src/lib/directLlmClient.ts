@@ -61,7 +61,7 @@ function defaultModel(provider: Exclude<DirectProvider, "auto">): string {
   if (provider === "gemini") return "gemini-3.5-flash";
   if (provider === "groq") return "llama-3.3-70b-versatile";
   if (provider === "nvidia") return "meta/llama-3.3-70b-instruct";
-  return "openai/gpt-4.1-mini";
+  return "stealth/ox-alpha";
 }
 
 function responseText(payload: any): string {

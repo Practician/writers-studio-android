@@ -14,6 +14,8 @@ export interface StoredLlmKeys {
 
 const PROVIDER_LS = "writers_studio_llm_provider";
 const KEYS_LS = "writers_studio_llm_keys_v1";
+const OPENROUTER_MODEL_LS = "writers_studio_openrouter_model_v1";
+export const DEFAULT_OPENROUTER_MODEL = "stealth/ox-alpha";
 /** Одноразовая миграция: старый default NVIDIA → auto (Groq-first). */
 const PROVIDER_MIGRATE_V3 = "writers_studio_llm_provider_v3_groq_first";
 
@@ -50,6 +52,16 @@ export function loadLlmProvider(): LlmProviderChoice {
 
 export function saveLlmProvider(provider: LlmProviderChoice): void {
   localStorage.setItem(PROVIDER_LS, provider);
+}
+
+/** Идентификатор модели OpenRouter хранится отдельно от ключа и не является секретом. */
+export function loadOpenrouterModel(): string {
+  return localStorage.getItem(OPENROUTER_MODEL_LS)?.trim() || DEFAULT_OPENROUTER_MODEL;
+}
+
+export function saveOpenrouterModel(model: string): void {
+  const normalized = model.trim();
+  localStorage.setItem(OPENROUTER_MODEL_LS, normalized || DEFAULT_OPENROUTER_MODEL);
 }
 
 function normalizeKeys(value: Partial<StoredLlmKeys> | null | undefined): StoredLlmKeys {
@@ -157,7 +169,7 @@ export function defaultModelForProvider(
     return status?.groqDefaultModel || "llama-3.3-70b-versatile";
   }
   if (provider === "openrouter") {
-    return status?.openrouterDefaultModel || "openrouter/free";
+    return status?.openrouterDefaultModel || DEFAULT_OPENROUTER_MODEL;
   }
   if (provider === "gemini") return "gemini-3.5-flash";
   // auto — Gemini первым: лучший результат максимального humanize-бенчмарка.

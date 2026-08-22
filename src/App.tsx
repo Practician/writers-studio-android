@@ -49,10 +49,12 @@ import {
   loadLlmKeys,
   loadStoredLlmKeys,
   loadLlmProvider,
+  loadOpenrouterModel,
   llmRequestFields,
   providerLabel,
   saveLlmKeys,
   saveLlmProvider,
+  saveOpenrouterModel,
   type LlmProviderChoice,
   type StoredLlmKeys,
 } from "./lib/llmSettings";
@@ -88,12 +90,14 @@ export default function App() {
   // LLM: в Android APK ключи загружаются из зашифрованного device storage.
   const [llmProvider, setLlmProvider] = useState<LlmProviderChoice>(() => loadLlmProvider());
   const [llmKeys, setLlmKeys] = useState<StoredLlmKeys>(() => loadLlmKeys());
+  const [openrouterModel, setOpenrouterModel] = useState(() => loadOpenrouterModel());
   const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [showAuthorProfile, setShowAuthorProfile] = useState(false);
   const [showAgent, setShowAgent] = useState(false);
   // На телефоне главы и инструменты открываются как отдельные панели, не как постоянные колонки.
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "assistant" | null>(null);
   const [llmKeysDraft, setLlmKeysDraft] = useState<StoredLlmKeys>(() => loadLlmKeys());
+  const [openrouterModelDraft, setOpenrouterModelDraft] = useState(() => loadOpenrouterModel());
   const [llmStatus, setLlmStatus] = useState<{
     geminiKeys: number;
     nvidiaConfigured: boolean;
@@ -143,7 +147,9 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  const selectedModel = defaultModelForProvider(llmProvider, llmStatus);
+  const selectedModel = llmProvider === "openrouter"
+    ? openrouterModel
+    : defaultModelForProvider(llmProvider, llmStatus);
   const llmApiFields = useMemo(
     () => llmRequestFields(llmProvider, llmKeys, selectedModel),
     [llmProvider, llmKeys, selectedModel],
@@ -160,12 +166,15 @@ export default function App() {
 
   const openLlmSettings = () => {
     setLlmKeysDraft({ ...llmKeys });
+    setOpenrouterModelDraft(openrouterModel);
     setShowLlmSettings(true);
   };
 
   const saveLlmSettings = () => {
     saveLlmKeys(llmKeysDraft);
+    saveOpenrouterModel(openrouterModelDraft);
     setLlmKeys({ ...llmKeysDraft });
+    setOpenrouterModel(openrouterModelDraft.trim() || "stealth/ox-alpha");
     setShowLlmSettings(false);
   };
 
@@ -655,14 +664,14 @@ export default function App() {
   };
 
   /**
-   * Восстановить слоты 1–9 (в т.ч. гл.7) и текст 5–6 для ТЕКУЩЕЙ книги.
+   * Восстановить слоты 1–20 из пользовательского плана и текст 5–7 для текущей книги.
    * Работает даже если книгу переименовали — слоты кладутся в activeStory.
    */
   const handleResyncLabyrinthCanon = () => {
     if (!activeStory) return;
     if (
       !confirm(
-        "Восстановить структуру канона в этой книге?\n• Появятся недостающие главы 1–9 (в т.ч. 7-я)\n• Главы 5–6: текст из канона (перезапишет)\n• Текст остальных глав не затирается",
+        "Восстановить структуру канона в этой книге?\n• Появятся недостающие главы 1–20\n• Главы 5–7: текст из канона (перезапишет)\n• Текст остальных глав не затирается",
       )
     ) {
       return;
@@ -2059,6 +2068,24 @@ export default function App() {
                   </div>
                 );
               })}
+
+              <div className="rounded-xl border border-violet-500/25 bg-violet-950/20 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="font-semibold text-slate-100 text-[12px]">Модель OpenRouter</label>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-md border border-violet-800/40 bg-violet-950/50 text-violet-300">можно изменить</span>
+                </div>
+                <input
+                  type="text"
+                  autoComplete="off"
+                  placeholder="stealth/ox-alpha"
+                  value={openrouterModelDraft}
+                  onChange={(e) => setOpenrouterModelDraft(e.target.value)}
+                  className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-violet-500/70 focus:ring-1 focus:ring-violet-500/20 font-mono text-[11px] placeholder:text-slate-600"
+                />
+                <p className="text-[10px] text-slate-500">
+                  Ox Alpha задана по умолчанию. Если временный preview закончится, укажите здесь другой доступный идентификатор модели из OpenRouter и сохраните настройки.
+                </p>
+              </div>
 
               <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-3.5 py-3 text-[10px] text-slate-500 leading-relaxed">
                 В Android APK ключи хранятся в зашифрованном Android Keystore; они не попадают в Git, GitHub Actions или APK-артефакт.

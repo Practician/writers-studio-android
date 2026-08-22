@@ -19,7 +19,8 @@ describe("labyrinthCanon", () => {
     const story = buildLabyrinthStory(1);
     assert.equal(story.id, LABYRINTH_STORY_ID);
     assert.ok(story.worldBible?.includes(LABYRINTH_CANON_MARKER));
-    assert.ok(story.bookPlan?.includes("3 кольца"));
+    assert.ok(story.bookPlan?.includes("Глава 20. Не случайный участник"));
+    assert.equal(story.chapters.length, 20);
     assert.ok(story.worldRules.some((r) => r.id === "lr-rings-puzzle"));
     assert.ok(story.worldRules.some((r) => r.id === "lr-detector-yandex"));
     assert.ok(story.worldRules.some((r) => r.id === "lr-style-patterns-ch6"));
@@ -32,7 +33,7 @@ describe("labyrinthCanon", () => {
     const ch8 = story.chapters.find((c) => /глава\s*8/i.test(c.title));
     assert.ok(ch5?.content && ch5.content.length > 500);
     assert.ok(ch6?.content && ch6.content.length > 500);
-    assert.ok(ch6?.summary.includes("12 секторов"));
+    assert.ok(ch6?.summary.includes("источник заряда"));
     assert.ok(/2%/.test(ch5?.content || ""));
     assert.ok(ch6?.content.includes("Правый коридор был темнее"));
     assert.ok(ch6?.content.includes("три кольца"));
@@ -120,12 +121,12 @@ describe("labyrinthCanon", () => {
     const merged = mergeLabyrinthCanonIntoStories([existing]);
     const s = merged[0];
     assert.ok(s.worldBible?.includes(LABYRINTH_CANON_MARKER));
-    assert.ok(s.bookPlan?.includes("12 секторов"));
+    assert.ok(s.bookPlan?.includes("Глава 20. Не случайный участник"));
     const ch6 = s.chapters.find((c) => /глава\s*6/i.test(c.title))!;
     const ch7 = s.chapters.find((c) => /глава\s*7/i.test(c.title))!;
     // короткий stub → seed канона
     assert.ok(!ch6.content.includes("Начну снова"));
-    assert.ok(ch6.summary.includes("кольца"));
+    assert.ok(ch6.summary.includes("источник заряда"));
     assert.equal(ch7.content, "уже написанный текст седьмой");
     assert.ok(ch7.summary.includes("20%"));
   });
@@ -151,11 +152,11 @@ describe("labyrinthCanon", () => {
     const merged = mergeLabyrinthCanonIntoStories([existing]);
     const ch6 = merged[0].chapters.find((c) => /глава\s*6/i.test(c.title))!;
     assert.ok(ch6.content.includes("Моя ручная правка главы шесть"));
-    assert.ok(ch6.summary.includes("кольца"), "summary всё равно из канона");
+    assert.ok(ch6.summary.includes("источник заряда"), "summary всё равно из канона");
     assert.ok(!ch6.content.includes("Правый коридор был темнее") || ch6.content.includes("ручная правка"));
   });
 
-  it("merge restores deleted chapter 7 and orders slots 1–9", () => {
+  it("merge restores deleted chapters and orders all 20 slots", () => {
     const existing: Story = {
       id: LABYRINTH_STORY_ID,
       title: "Лабиринт",
@@ -176,13 +177,13 @@ describe("labyrinthCanon", () => {
     const s = merged[0];
     const titles = s.chapters.map((c) => c.title);
     assert.ok(titles.some((t) => /глава\s*7/i.test(t)), "глава 7 должна появиться");
-    assert.ok(titles.some((t) => /глава\s*9/i.test(t)), "глава 9 должна появиться");
+    assert.ok(titles.some((t) => /глава\s*20/i.test(t)), "глава 20 должна появиться");
     const nums = s.chapters
       .map((c) => c.title.match(/(?:глава|chapter)\s*(\d+)/iu)?.[1])
       .filter(Boolean)
       .map(Number);
-    // первые 9 слотов по возрастанию
-    assert.deepEqual(nums.slice(0, 9), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // все 20 слотов по возрастанию
+    assert.deepEqual(nums.slice(0, 20), Array.from({ length: 20 }, (_, index) => index + 1));
     const ch6 = s.chapters.find((c) => /глава\s*6/i.test(c.title))!;
     assert.ok(ch6.content.includes("Правый коридор"), "гл.6 из канона, не старый текст");
     assert.ok(!ch6.content.includes("старый текст 6"));
@@ -204,7 +205,8 @@ describe("labyrinthCanon", () => {
     const fixed = ensureLabyrinthChapterSlots(story);
     assert.ok(fixed.chapters.some((c) => /глава\s*7/i.test(c.title)));
     assert.ok(fixed.chapters.some((c) => /глава\s*8/i.test(c.title)));
-    assert.ok(fixed.chapters.length >= 9);
+    assert.equal(fixed.chapters.length, 20);
+    assert.ok(fixed.chapters.some((c) => /глава\s*20/i.test(c.title)));
     assert.ok(fixed.chapters.find((c) => /глава\s*6/i.test(c.title))!.content.includes("Правый коридор"));
     const ch8 = fixed.chapters.find((c) => /глава\s*8/i.test(c.title))!;
     assert.ok(ch8.content.length > 500, "пустой слот 8 заполняется seed");
