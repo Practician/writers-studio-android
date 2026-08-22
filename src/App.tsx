@@ -1783,11 +1783,14 @@ export default function App() {
                       setActiveTab("text");
                       setShowAgent(false);
                       setMobilePanel("assistant");
-                      // Switch focus to AI continuation
-                      setTimeout(() => {
-                        const btn = document.getElementById("ai-action-btn");
-                        btn?.scrollIntoView({ behavior: "smooth" });
-                      }, 100);
+                      // Мобильная панель рендерится отдельно от скрытой desktop-копии.
+                      // Поэтому фокусируем уникальное мобильное действие, а не первый ai-action-btn в DOM.
+                      requestAnimationFrame(() => requestAnimationFrame(() => {
+                        const btn = document.getElementById("ai-mobile-action-btn")
+                          ?? document.getElementById("ai-action-btn");
+                        btn?.scrollIntoView({ behavior: "smooth", block: "center" });
+                        if (btn instanceof HTMLElement) btn.focus({ preventScroll: true });
+                      }));
                     }}
                     className="min-h-10 shrink-0 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer"
                   >
