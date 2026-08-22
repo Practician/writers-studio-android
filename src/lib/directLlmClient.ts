@@ -173,6 +173,14 @@ function finishReasonFor(payload: any): string | undefined {
   return typeof reason === "string" && reason.trim() ? reason.trim() : undefined;
 }
 
+function hasVisibleResponseText(payload: any): boolean {
+  try {
+    return responseText(payload).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function directGenerate(request: DirectRequest): Promise<string> {
   const requestedProvider = request.provider || "auto";
   const provider = selectProvider(requestedProvider, request.apiKeys || {}, request.model);
@@ -225,9 +233,25 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
 
     payload = await response.json().catch(() => ({}));
 
-    // При 402 Ox Alpha пробуем free-router всегда, а не только после успешного ответа:
-    // так журнал и UI фиксируют сам факт переключения и его фактический результат.
-    if (provider === "openrouter" && model === OX_ALPHA_MODEL && response.status === 402) {
+    // Ox Alpha может вернуть HTTP 200, но израсходовать лимит на рассуждение и не
+    // отдать видимый content (finish_reason=length). Для автора это такой же неуспех,
+    // как 402: пробуем free-router, а исходную диагностику оставляем в журнале.
+    const oxAlphaNeedsFallback = provider === "openrouter"
+      && model === OX_ALPHA_MODEL
+      && (response.status === 402 || (response.ok && !hasVisibleResponseText(payload)));
+    if (oxAlphaNeedsFallback) {
+      if (response.ok) {
+        emitApiTrace(traceFor(
+          provider,
+          OX_ALPHA_MODEL,
+          key,
+          index + 1,
+          keyPool.length,
+          response.status,
+          "Ox Alpha не передала видимый текст; переключение на openrouter/free.",
+          { chars: 0, finishReason: finishReasonFor(payload) },
+        ));
+      }
       effectiveModel = OPENROUTER_FREE_ROUTER;
       notifyOpenRouterFallback(OX_ALPHA_MODEL, OPENROUTER_FREE_ROUTER);
       response = await fetch(OPENROUTER_URL, {

@@ -190,3 +190,27 @@ test("autonomous writer applies a second humanize pass after drafting prose", as
   assert.equal(prompts[1].includes("ЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ"), true);
   assert.equal(prompts[1].includes("Черновик с ровным ритмом."), true);
 });
+
+test("OpenRouter falls back when Ox Alpha returns HTTP 200 without visible content", async () => {
+  const calls: string[] = [];
+  const text = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    calls.push(body.model);
+    if (body.model === "stealth/ox-alpha") {
+      return new Response(JSON.stringify({
+        choices: [{ finish_reason: "length", message: { content: null } }],
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { content: "Текст от free-router." } }],
+    }), { status: 200 });
+  }, () => directGenerate({
+    provider: "openrouter",
+    model: "stealth/ox-alpha",
+    apiKeys: { openrouter: "sk-or-test" },
+    prompt: "Проверь fallback пустого ответа.",
+  }));
+
+  assert.equal(text, "Текст от free-router.");
+  assert.deepEqual(calls, ["stealth/ox-alpha", "openrouter/free"]);
+});
