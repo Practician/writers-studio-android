@@ -12,15 +12,15 @@ async function withMockFetch<T>(handler: (url: string, init?: RequestInit) => Pr
   }
 }
 
-test("auto mode chooses NVIDIA and its compatible model despite stale OpenRouter model", async () => {
+test("auto mode chooses NVIDIA and its compatible model despite stale Gemini model", async () => {
   const calls: Array<{ url: string; body: any }> = [];
   const text = await withMockFetch(async (url, init) => {
     calls.push({ url, body: JSON.parse(String(init?.body || "{}")) });
     return new Response(JSON.stringify({ choices: [{ message: { content: "NVIDIA response" } }] }), { status: 200 });
   }, () => directGenerate({
     provider: "auto",
-    // Имитирует старое значение, которое было сохранено при выборе OpenRouter.
-    model: "stealth/ox-alpha",
+    // Имитирует модель, которую экран UI ранее подставлял для режима «Автовыбор».
+    model: "gemini-3.5-flash",
     apiKeys: { nvidia: "nvapi-test", openrouter: "sk-or-test" },
     prompt: "Тест.",
   }));
