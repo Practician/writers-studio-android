@@ -81,6 +81,7 @@ export default function App() {
   const [selectedText, setSelectedText] = useState("");
   const [textSelection, setTextSelection] = useState<TextSelection | null>(null);
   const [openAuthorRequest, setOpenAuthorRequest] = useState(0);
+  const [quickContinueRequest, setQuickContinueRequest] = useState(0);
   const [focusMode, setFocusMode] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showStoryDetailsModal, setShowStoryDetailsModal] = useState(false);
@@ -1783,14 +1784,8 @@ export default function App() {
                       setActiveTab("text");
                       setShowAgent(false);
                       setMobilePanel("assistant");
-                      // Мобильная панель рендерится отдельно от скрытой desktop-копии.
-                      // Поэтому фокусируем уникальное мобильное действие, а не первый ai-action-btn в DOM.
-                      requestAnimationFrame(() => requestAnimationFrame(() => {
-                        const btn = document.getElementById("ai-mobile-action-btn")
-                          ?? document.getElementById("ai-action-btn");
-                        btn?.scrollIntoView({ behavior: "smooth", block: "center" });
-                        if (btn instanceof HTMLElement) btn.focus({ preventScroll: true });
-                      }));
+                      // Открываем короткий режим продолжения напрямую: прокрутка на Android не нужна.
+                      setQuickContinueRequest((request) => request + 1);
                     }}
                     className="min-h-10 shrink-0 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer"
                   >
@@ -1881,6 +1876,7 @@ export default function App() {
                       llmProvider={llmProvider}
                       llmApiFields={llmApiFields}
                       openAuthorRequest={openAuthorRequest}
+                      quickContinueRequest={quickContinueRequest}
                       onOpenAuthorProfile={() => setShowAuthorProfile(true)}
                       onOpenAgent={() => setShowAgent(true)}
                     />
@@ -1945,7 +1941,7 @@ export default function App() {
                     </div>
                     <div className="min-h-0 flex-1 overflow-hidden p-3">
                       <React.Suspense fallback={<div className="p-4 text-sm text-slate-500">Загрузка…</div>}>
-                        {activeTab === "text" && (showAgent ? <AgentPanel story={activeStory} currentDraft={activeChapter?.content || ""} activeChapter={activeChapter} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onInsertText={handleInsertText} onClose={() => setShowAgent(false)} /> : <AIPanel story={activeStory} currentDraft={activeChapter?.content || ""} selectedText={selectedText} textSelection={textSelection} onInsertText={handleInsertText} onApplyAuthorEdit={handleApplyAuthorEdit} activeChapter={activeChapter} onUpdateStoryChapters={handleUpdateStoryChapters} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} openAuthorRequest={openAuthorRequest} onOpenAuthorProfile={() => setShowAuthorProfile(true)} onOpenAgent={() => setShowAgent(true)} />)}
+                        {activeTab === "text" && (showAgent ? <AgentPanel story={activeStory} currentDraft={activeChapter?.content || ""} activeChapter={activeChapter} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onInsertText={handleInsertText} onClose={() => setShowAgent(false)} /> : <AIPanel story={activeStory} currentDraft={activeChapter?.content || ""} selectedText={selectedText} textSelection={textSelection} onInsertText={handleInsertText} onApplyAuthorEdit={handleApplyAuthorEdit} activeChapter={activeChapter} onUpdateStoryChapters={handleUpdateStoryChapters} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} openAuthorRequest={openAuthorRequest} quickContinueRequest={quickContinueRequest} onOpenAuthorProfile={() => setShowAuthorProfile(true)} onOpenAgent={() => setShowAgent(true)} />)}
                         {activeTab === "book" && <BookPanel story={activeStory} onUpdateCharacters={handleUpdateCharacters} onUpdateWorldRules={handleUpdateWorldRules} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onOpenBookMaterials={() => setShowStoryDetailsModal(true)} />}
                         {activeTab === "muse" && <MuseChat story={activeStory} currentDraft={activeChapter?.content || ""} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} />}
                       </React.Suspense>

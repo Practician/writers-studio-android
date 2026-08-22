@@ -24,12 +24,14 @@ interface AIPanelProps {
   /** model + llmProvider + apiKeys из шапки */
   llmApiFields?: Record<string, unknown>;
   openAuthorRequest?: number;
+  /** Запрос с главного экрана: сразу открыть короткое продолжение без прокрутки. */
+  quickContinueRequest?: number;
   onOpenAuthorProfile?: () => void;
   /** Открывает углублённый маршрут агента после быстрой проверки главы. */
   onOpenAgent?: () => void;
 }
 
-export default function AIPanel({ story, currentDraft, selectedText, textSelection, onInsertText, onApplyAuthorEdit, activeChapter, onUpdateStoryChapters, selectedModel, llmProvider = "auto", llmApiFields, openAuthorRequest, onOpenAuthorProfile, onOpenAgent }: AIPanelProps) {
+export default function AIPanel({ story, currentDraft, selectedText, textSelection, onInsertText, onApplyAuthorEdit, activeChapter, onUpdateStoryChapters, selectedModel, llmProvider = "auto", llmApiFields, openAuthorRequest, quickContinueRequest, onOpenAuthorProfile, onOpenAgent }: AIPanelProps) {
   const [activeTool, setActiveTool] = useState<"continue" | "improve" | "author" | "readiness" | "brainstorm">("continue");
   useEffect(() => {
     if (openAuthorRequest) setActiveTool("author");
@@ -57,6 +59,13 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
 
   // Continuation States
   const [continueMode, setContinueMode] = useState<"paragraphs" | "whole_chapter" | "multi_chapters">("paragraphs");
+  useEffect(() => {
+    if (!quickContinueRequest) return;
+    setActiveTool("continue");
+    setContinueMode("paragraphs");
+    setResult("");
+    setError(null);
+  }, [quickContinueRequest]);
   const [continuePrompt, setContinuePrompt] = useState("");
   const [selectedBatchChapters, setSelectedBatchChapters] = useState<string[]>([]);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; status: string } | null>(null);
