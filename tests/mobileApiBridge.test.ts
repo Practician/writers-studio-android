@@ -328,3 +328,46 @@ test("NVIDIA falls through to Groq after all bounded NVIDIA model attempts fail"
   ]);
   assert.equal(calls.at(-1)?.url, "https://api.groq.com/openai/v1/chat/completions");
 });
+
+test("all NVIDIA 504 diagnostics show retry, model rotations, and Groq handoff", async () => {
+  const globals = globalThis as any;
+  const savedWindow = globals.window;
+  const savedCustomEvent = globals.CustomEvent;
+  const events: any[] = [];
+  class TestCustomEvent extends Event {
+    detail: any;
+    constructor(type: string, init?: { detail?: any }) {
+      super(type);
+      this.detail = init?.detail;
+    }
+  }
+  const eventTarget = new EventTarget();
+  globals.window = eventTarget;
+  globals.CustomEvent = TestCustomEvent;
+  eventTarget.addEventListener("writers-studio-api-trace", (event: Event) => events.push((event as any).detail));
+
+  try {
+    const result = await withMockFetch(async (url) => {
+      if (url.includes("integrate.api.nvidia.com")) {
+        return new Response(JSON.stringify({ error: { message: "Gateway unavailable" } }), { status: 504 });
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: "Groq завершил запрос." } }] }), { status: 200 });
+    }, () => directGenerate({
+      provider: "nvidia",
+      model: "meta/llama-3.3-70b-instruct",
+      apiKeys: { nvidia: "nvapi-test", groq: "gsk-test" },
+      prompt: "Тест журнала NVIDIA 504.",
+      maxTokens: 6_144,
+    }));
+    assert.equal(result, "Groq завершил запрос.");
+    assert.equal(events.some((trace) => trace.message?.includes("повтор с лимитом 4096")), true);
+    assert.equal(events.some((trace) => trace.message?.includes("meta/llama-3.3-70b-instruct → deepseek-ai/deepseek-v4-flash-0731")), true);
+    assert.equal(events.some((trace) => trace.message?.includes("deepseek-ai/deepseek-v4-flash-0731 → z-ai/glm-5.2")), true);
+    assert.equal(events.some((trace) => trace.message?.includes("переход к Groq")), true);
+    assert.equal(events.at(-1)?.provider, "groq");
+    assert.equal(events.at(-1)?.status, 200);
+  } finally {
+    if (savedWindow === undefined) delete globals.window; else globals.window = savedWindow;
+    if (savedCustomEvent === undefined) delete globals.CustomEvent; else globals.CustomEvent = savedCustomEvent;
+  }
+});
