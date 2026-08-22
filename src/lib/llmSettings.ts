@@ -149,12 +149,21 @@ export function saveGroqModel(model: string): void {
   saveProfile(GROQ_MODEL_LS, GROQ_LITERARY_MODELS, DEFAULT_GROQ_MODEL, model);
 }
 
+/** Модель выбирается из встроенного или публичного динамического каталога OpenRouter. */
+function normalizeOpenrouterModel(model: string): string {
+  const normalized = model.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)+$/.test(normalized)
+    && normalized.length <= 160
+    ? normalized
+    : "";
+}
+
 export function loadOpenrouterLiteraryModel(): string {
-  return loadProfile(OPENROUTER_MODEL_LS, OPENROUTER_LITERARY_MODELS, DEFAULT_OPENROUTER_MODEL);
+  return normalizeOpenrouterModel(localStorage.getItem(OPENROUTER_MODEL_LS) || "") || DEFAULT_OPENROUTER_MODEL;
 }
 
 export function saveOpenrouterLiteraryModel(model: string): void {
-  saveProfile(OPENROUTER_MODEL_LS, OPENROUTER_LITERARY_MODELS, DEFAULT_OPENROUTER_MODEL, model);
+  localStorage.setItem(OPENROUTER_MODEL_LS, normalizeOpenrouterModel(model) || DEFAULT_OPENROUTER_MODEL);
 }
 
 function normalizeKeys(value: Partial<StoredLlmKeys> | null | undefined): StoredLlmKeys {

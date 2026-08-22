@@ -590,7 +590,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             provider: credentials.provider,
             model: credentials.model,
             apiKeys: credentials.keys,
-            system: "Ты продолжаешь уже начатую художественную главу. Верни только новый фрагмент прозы на русском, без заголовка, повтора и комментариев.",
+            system: `Ты продолжаешь уже начатую художественную главу. Верни только новый фрагмент прозы на русском, без заголовка, повтора и комментариев.${humanizeDirective(body)}`,
             prompt: `${compactContext(body)}\n\nНАПИСАНО УЖЕ: около ${currentWords} слов. ЦЕЛЬ ГЛАВЫ: около ${CHAPTER_TARGET_WORDS} слов.\n\nХвост текущей главы:\n${text.slice(-6500)}\n\nПродолжи строго с этого места. Не пересказывай и не повторяй написанное. Напиши следующую законченную сцену или развитие сцены объёмом не менее ${Math.min(900, remaining)} слов; двигай сюжет к завершённому повороту главы.`,
           });
           const beforeWords = currentWords;

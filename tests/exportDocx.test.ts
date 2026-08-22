@@ -6,7 +6,7 @@ import type { Chapter, Story } from "../src/types";
 
 type DownloadCapture = { blob: Blob; filename: string };
 
-async function captureDocx(createDocument: () => Promise<void>): Promise<DownloadCapture> {
+async function captureDocx(createDocument: () => Promise<unknown>): Promise<DownloadCapture> {
   const documentDescriptor = Object.getOwnPropertyDescriptor(globalThis, "document");
   const urlDescriptor = Object.getOwnPropertyDescriptor(globalThis, "URL");
   const timeoutDescriptor = Object.getOwnPropertyDescriptor(globalThis, "setTimeout");

@@ -3,9 +3,16 @@
  * Раньше экспорт отдавал HTML с MIME application/msword и расширением .doc —
  * Word открывал, но это не современный .docx.
  */
+import { Capacitor } from "@capacitor/core";
 import type { Chapter, Story } from "../types";
 
-function downloadBlob(blob: Blob, filename: string) {
+export type DocxExportResult = {
+  filename: string;
+  savedNatively: boolean;
+  openedInDocumentApp: boolean;
+};
+
+function downloadBlob(blob: Blob, filename: string): DocxExportResult {
   const element = document.createElement("a");
   const url = URL.createObjectURL(blob);
   element.href = url;
@@ -14,6 +21,48 @@ function downloadBlob(blob: Blob, filename: string) {
   element.click();
   document.body.removeChild(element);
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return { filename, savedNatively: false, openedInDocumentApp: false };
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Ссылка <a download> не передаёт файл в Downloads/Documents из Android WebView.
+ * В APK сохраняем настоящий DOCX нативно в пользовательские документы и передаём его
+ * штатному приложению для просмотра. В браузере остаётся обычное скачивание.
+ */
+async function saveDocx(blob: Blob, filename: string): Promise<DocxExportResult> {
+  if (!Capacitor.isNativePlatform()) return downloadBlob(blob, filename);
+
+  const [{ Filesystem, Directory }, { FileOpener }] = await Promise.all([
+    import("@capacitor/filesystem"),
+    import("@capawesome-team/capacitor-file-opener"),
+  ]);
+  const file = await Filesystem.writeFile({
+    path: `Writers Studio/${filename}`,
+    directory: Directory.Documents,
+    data: await blobToBase64(blob),
+    recursive: true,
+  });
+
+  try {
+    await FileOpener.openFile({
+      path: file.uri,
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    return { filename, savedNatively: true, openedInDocumentApp: true };
+  } catch (error) {
+    console.warn("DOCX сохранён, но не удалось открыть его через системное приложение", error);
+    return { filename, savedNatively: true, openedInDocumentApp: false };
+  }
 }
 
 function sanitizeFilename(name: string): string {
@@ -61,7 +110,7 @@ function textToParagraphs(
   return out;
 }
 
-export async function exportChapterDocx(storyTitle: string, chapter: Chapter): Promise<void> {
+export async function exportChapterDocx(storyTitle: string, chapter: Chapter): Promise<DocxExportResult> {
   const docx = await import("docx");
   const { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, BorderStyle } = docx;
 
@@ -142,10 +191,10 @@ export async function exportChapterDocx(storyTitle: string, chapter: Chapter): P
   });
 
   const blob = await Packer.toBlob(doc);
-  downloadBlob(blob, sanitizeFilename(`${storyTitle} - ${chapter.title}.docx`));
+  return saveDocx(blob, sanitizeFilename(`${storyTitle} - ${chapter.title}.docx`));
 }
 
-export async function exportStoryDocx(story: Story): Promise<void> {
+export async function exportStoryDocx(story: Story): Promise<DocxExportResult> {
   const docx = await import("docx");
   const {
     Document,
@@ -355,5 +404,5 @@ export async function exportStoryDocx(story: Story): Promise<void> {
   });
 
   const blob = await Packer.toBlob(doc);
-  downloadBlob(blob, sanitizeFilename(`${story.title}.docx`));
+  return saveDocx(blob, sanitizeFilename(`${story.title}.docx`));
 }

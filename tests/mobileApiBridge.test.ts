@@ -478,3 +478,22 @@ test("a selected OpenRouter DeepSeek profile falls back to free-router when unav
   assert.equal(text, "Текст от free-router.");
   assert.deepEqual(calls, ["deepseek/deepseek-v3.2", "openrouter/free"]);
 });
+
+test("a dynamic OpenRouter catalog model is sent and falls back to free-router", async () => {
+  const calls: string[] = [];
+  const text = await withMockFetch(async (_url, init) => {
+    const model = JSON.parse(String(init?.body || "{}")).model;
+    calls.push(model);
+    if (model === "qwen/qwen3.5-397b-a17b") {
+      return new Response(JSON.stringify({ error: { message: "Temporary provider error" } }), { status: 503 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Текст от резервного OpenRouter." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "openrouter",
+    model: "qwen/qwen3.5-397b-a17b",
+    apiKeys: { openrouter: "sk-or-test" },
+    prompt: "Тест модели из каталога.",
+  }));
+  assert.equal(text, "Текст от резервного OpenRouter.");
+  assert.deepEqual(calls, ["qwen/qwen3.5-397b-a17b", "openrouter/free"]);
+});

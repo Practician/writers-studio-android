@@ -44,6 +44,7 @@ import {
 } from "./data/labyrinthCanon";
 import { loadGlobalAuthorProfile, saveGlobalAuthorProfile } from "./lib/authorStorage";
 import { isAutonomousApk } from "./lib/directLlmClient";
+import { fetchOpenRouterRoleplayModels, type OpenRouterCatalogModel } from "./lib/openrouterCatalog";
 import {
   defaultModelForProvider,
   GEMINI_LITERARY_MODELS,
@@ -110,6 +111,10 @@ export default function App() {
   const [groqModelDraft, setGroqModelDraft] = useState(() => loadGroqModel());
   const [openrouterModel, setOpenrouterModel] = useState(() => loadOpenrouterLiteraryModel());
   const [openrouterModelDraft, setOpenrouterModelDraft] = useState(() => loadOpenrouterLiteraryModel());
+  const [openrouterCatalog, setOpenrouterCatalog] = useState<OpenRouterCatalogModel[]>([]);
+  const [openrouterCatalogQuery, setOpenrouterCatalogQuery] = useState("");
+  const [openrouterCatalogState, setOpenrouterCatalogState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [openrouterCatalogError, setOpenrouterCatalogError] = useState("");
   const [openrouterFallbackNotice, setOpenrouterFallbackNotice] = useState<string | null>(null);
   const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [showAuthorProfile, setShowAuthorProfile] = useState(false);
@@ -296,13 +301,28 @@ export default function App() {
     return false;
   };
 
+  const loadOpenrouterCatalog = async () => {
+    setOpenrouterCatalogState("loading");
+    setOpenrouterCatalogError("");
+    try {
+      const catalog = await fetchOpenRouterRoleplayModels();
+      setOpenrouterCatalog(catalog);
+      setOpenrouterCatalogState("ready");
+    } catch (error: any) {
+      setOpenrouterCatalogState("error");
+      setOpenrouterCatalogError(error?.message || "Не удалось загрузить каталог OpenRouter.");
+    }
+  };
+
   const openLlmSettings = () => {
     setLlmKeysDraft({ ...llmKeys });
     setNvidiaModelDraft(nvidiaModel);
     setGeminiModelDraft(geminiModel);
     setGroqModelDraft(groqModel);
     setOpenrouterModelDraft(openrouterModel);
+    setOpenrouterCatalogQuery("");
     setShowLlmSettings(true);
+    void loadOpenrouterCatalog();
   };
 
   const saveLlmSettings = () => {
@@ -1456,7 +1476,10 @@ export default function App() {
     if (!activeStory) return;
     try {
       const { exportStoryDocx } = await import("./lib/exportDocx");
-      await exportStoryDocx(activeStory);
+      const result = await exportStoryDocx(activeStory);
+      if (result.savedNatively && !result.openedInDocumentApp) {
+        alert(`Word-файл сохранён: Documents/Writers Studio/${result.filename}. Установите Word или другой редактор DOCX, чтобы открыть его.`);
+      }
     } catch (err) {
       console.error(err);
       alert("Не удалось сформировать Word-файл (.docx). Попробуйте ещё раз.");
@@ -1477,7 +1500,10 @@ export default function App() {
     if (!activeStory) return;
     try {
       const { exportChapterDocx } = await import("./lib/exportDocx");
-      await exportChapterDocx(activeStory.title, ch);
+      const result = await exportChapterDocx(activeStory.title, ch);
+      if (result.savedNatively && !result.openedInDocumentApp) {
+        alert(`Word-файл сохранён: Documents/Writers Studio/${result.filename}. Установите Word или другой редактор DOCX, чтобы открыть его.`);
+      }
     } catch (err) {
       console.error(err);
       alert("Не удалось сформировать Word-файл (.docx). Попробуйте ещё раз.");
@@ -2309,9 +2335,20 @@ export default function App() {
               <div className="rounded-xl border border-violet-500/25 bg-violet-950/20 p-3.5 space-y-2.5">
                 <div className="flex items-center justify-between gap-2"><label className="font-semibold text-slate-100 text-[12px]">OpenRouter для русской прозы</label><span className="text-[9px] px-1.5 py-0.5 rounded-md border border-violet-800/40 bg-violet-950/50 text-violet-200">профиль модели</span></div>
                 <select value={openrouterModelDraft} onChange={(event) => setOpenrouterModelDraft(event.target.value)} className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-violet-500/70 focus:ring-1 focus:ring-violet-500/20 text-[11px]" id="openrouter-literary-model-select">
+                  {!OPENROUTER_LITERARY_MODELS.some((model) => model.id === openrouterModelDraft) && <option value={openrouterModelDraft}>Выбрано из каталога: {openrouterModelDraft}</option>}
                   {OPENROUTER_LITERARY_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
                 </select>
-                <p className="text-[10px] leading-relaxed text-slate-400">{OPENROUTER_LITERARY_MODELS.find((model) => model.id === openrouterModelDraft)?.description}</p>
+                <p className="text-[10px] leading-relaxed text-slate-400">{OPENROUTER_LITERARY_MODELS.find((model) => model.id === openrouterModelDraft)?.description || "Выбрана модель из актуального каталога OpenRouter."}</p>
+                <div className="pt-1 space-y-2">
+                  <div className="flex items-center justify-between gap-2"><label htmlFor="openrouter-catalog-search-input" className="text-[10px] font-medium text-violet-100">Актуальный каталог OpenRouter</label><button type="button" onClick={() => void loadOpenrouterCatalog()} disabled={openrouterCatalogState === "loading"} className="text-[10px] text-violet-300 hover:text-violet-100 disabled:opacity-40 underline underline-offset-2">{openrouterCatalogState === "loading" ? "Загрузка…" : "Обновить"}</button></div>
+                  <input id="openrouter-catalog-search-input" value={openrouterCatalogQuery} onChange={(event) => setOpenrouterCatalogQuery(event.target.value)} placeholder="Найти модель по названию или ID" className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 placeholder:text-slate-600 outline-none focus:border-violet-500/70 focus:ring-1 focus:ring-violet-500/20 text-[11px]" />
+                  {openrouterCatalogState === "error" && <p className="text-[10px] leading-relaxed text-rose-300">{openrouterCatalogError}</p>}
+                  {openrouterCatalogState === "ready" && <div className="max-h-44 overflow-y-auto overscroll-contain rounded-lg border border-violet-900/40 bg-slate-950/45 p-1.5 space-y-1">
+                    {openrouterCatalog.filter((model) => `${model.name} ${model.id}`.toLowerCase().includes(openrouterCatalogQuery.trim().toLowerCase())).slice(0, 12).map((model) => <button type="button" key={model.id} onClick={() => setOpenrouterModelDraft(model.id)} className={`w-full rounded-md px-2.5 py-2 text-left transition-colors ${openrouterModelDraft === model.id ? "bg-violet-500/20 text-violet-100" : "text-slate-300 hover:bg-violet-500/10"}`}><span className="block text-[10px] font-medium truncate">{model.name || model.id}</span><span className="block mt-0.5 text-[9px] text-slate-500 font-mono truncate">{model.id}{model.contextLength ? ` · ${Math.round(model.contextLength / 1000)}k контекст` : ""}</span></button>)}
+                    {!openrouterCatalog.filter((model) => `${model.name} ${model.id}`.toLowerCase().includes(openrouterCatalogQuery.trim().toLowerCase())).length && <p className="px-2 py-2 text-[10px] text-slate-500">Подходящие модели не найдены.</p>}
+                  </div>}
+                  {openrouterCatalogState === "idle" && <p className="text-[9px] leading-relaxed text-slate-500">Каталог загружается при открытии настроек. Ox Alpha остаётся первым профилем и значением по умолчанию.</p>}
+                </div>
               </div>
 
               <div className="rounded-xl border border-sky-500/25 bg-sky-950/20 p-3.5 space-y-2.5">

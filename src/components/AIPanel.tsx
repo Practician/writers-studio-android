@@ -8,6 +8,7 @@ import { loadAuthorProfile, onAuthorProfileUpdated } from "../lib/authorStorage"
 import { canonDossier, findPreviousCanonChapter } from "../lib/chapterContext";
 import { HUMANIZE_DEPTHS, VOICE_PRESETS, type HumanizeDepth } from "../../server/humanStyle";
 import { buildAdaptiveWritingGuidance, loadAdaptiveProfile } from "../lib/adaptiveDetector";
+import { generationFinished, generationStarted, type GenerationOutcome } from "../lib/generationFeedback";
 
 interface AIPanelProps {
   story: Story;
@@ -221,7 +222,9 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
     setError(null);
     setResult("");
     setBatchProgress({ current: 0, total: selectedBatchChapters.length, status: "Подготовка..." });
+    void generationStarted();
 
+    let outcome: GenerationOutcome = "success";
     let currentChapters = [...story.chapters];
     let completed = 0;
 
@@ -286,6 +289,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
       }
 
       if (controller.signal.aborted) {
+        outcome = "cancelled";
         setError(
           completed > 0
             ? `Генерация остановлена. Успешно сохранено глав: ${completed}.`
@@ -296,6 +300,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
         setSelectedBatchChapters([]);
       }
     } catch (err: any) {
+      outcome = err?.name === "AbortError" || controller.signal.aborted ? "cancelled" : "error";
       if (err?.name === "AbortError" || controller.signal.aborted) {
         setError(
           completed > 0
@@ -309,6 +314,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
       if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
       setBatchProgress(null);
+      void generationFinished(outcome);
     }
   };
 
@@ -341,7 +347,9 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
     setError(null);
     setResult("");
     setHumanizeReport(null);
+    void generationStarted();
 
+    let outcome: GenerationOutcome = "success";
     let payload: any = { action: activeTool, ...(llmApiFields || { model: selectedModel, llmProvider }) };
     if (activeTool === "continue" || activeTool === "improve") {
       applyHumanizePayload(payload, activeChapter?.id);
@@ -405,10 +413,14 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
       }
 
       const data = await response.json();
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        outcome = "cancelled";
+        return;
+      }
       setResult(data.result);
       setHumanizeReport(data.humanizeReport ?? null);
     } catch (err: any) {
+      outcome = err?.name === "AbortError" || controller.signal.aborted ? "cancelled" : "error";
       if (err?.name === "AbortError" || controller.signal.aborted) {
         setError("Генерация остановлена.");
       } else {
@@ -417,6 +429,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
+      void generationFinished(outcome);
     }
   };
 
