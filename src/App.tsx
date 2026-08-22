@@ -100,6 +100,14 @@ export default function App() {
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "assistant" | null>(null);
   const [llmKeysDraft, setLlmKeysDraft] = useState<StoredLlmKeys>(() => loadLlmKeys());
   const [openrouterModelDraft, setOpenrouterModelDraft] = useState(() => loadOpenrouterModel());
+  const [openrouterKeyCheck, setOpenrouterKeyCheck] = useState<{
+    state: "idle" | "loading" | "success" | "error";
+    message?: string;
+    label?: string;
+    limit?: number | null;
+    remaining?: number | null;
+    isFreeTier?: boolean;
+  }>({ state: "idle" });
   const [llmStatus, setLlmStatus] = useState<{
     geminiKeys: number;
     nvidiaConfigured: boolean;
@@ -191,6 +199,33 @@ export default function App() {
     setLlmKeys({ ...llmKeysDraft });
     setOpenrouterModel(openrouterModelDraft.trim() || "stealth/ox-alpha");
     setShowLlmSettings(false);
+  };
+
+  const checkOpenRouterKey = async () => {
+    const key = llmKeysDraft.openrouter.trim();
+    if (!key) {
+      setOpenrouterKeyCheck({ state: "error", message: "Сначала вставьте ключ OpenRouter в поле выше." });
+      return;
+    }
+
+    setOpenrouterKeyCheck({ state: "loading" });
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/key", {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error?.message || `OpenRouter вернул ошибку ${response.status}`);
+      const data = payload?.data || payload || {};
+      setOpenrouterKeyCheck({
+        state: "success",
+        label: data.label || "без названия",
+        limit: data.limit ?? null,
+        remaining: data.limit_remaining ?? null,
+        isFreeTier: Boolean(data.is_free_tier),
+      });
+    } catch (error: any) {
+      setOpenrouterKeyCheck({ state: "error", message: error?.message || "Не удалось проверить ключ OpenRouter." });
+    }
   };
 
   // Chapter Publishing states
@@ -2107,6 +2142,19 @@ export default function App() {
                 <p className="text-[10px] text-slate-500">
                   Ox Alpha задана по умолчанию. Если временный preview закончится, укажите здесь другой доступный идентификатор модели из OpenRouter и сохраните настройки.
                 </p>
+              </div>
+
+              <div className="rounded-xl border border-sky-500/25 bg-sky-950/20 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div><p className="text-[12px] font-semibold text-slate-100">Проверка доступа OpenRouter</p><p className="mt-0.5 text-[10px] text-slate-400">Ключ не показывается и не сохраняется из этой проверки.</p></div>
+                  <button type="button" onClick={checkOpenRouterKey} disabled={openrouterKeyCheck.state === "loading"} className="min-h-10 shrink-0 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 text-xs font-semibold text-sky-200 disabled:opacity-50">{openrouterKeyCheck.state === "loading" ? "Проверка…" : "Проверить"}</button>
+                </div>
+                {openrouterKeyCheck.state === "success" && (
+                  <div className="rounded-lg border border-emerald-500/25 bg-emerald-950/20 p-2.5 text-[10px] leading-relaxed text-emerald-100">
+                    Ключ действителен: <b>{openrouterKeyCheck.label}</b>. Лимит ключа: <b>{openrouterKeyCheck.limit === null ? "не задан" : `$${openrouterKeyCheck.limit}`}</b>; остаток: <b>{openrouterKeyCheck.remaining === null ? "не ограничен" : `$${openrouterKeyCheck.remaining}`}</b>. Тариф без покупок: <b>{openrouterKeyCheck.isFreeTier ? "да" : "нет"}</b>.
+                  </div>
+                )}
+                {openrouterKeyCheck.state === "error" && <div className="rounded-lg border border-red-500/25 bg-red-950/20 p-2.5 text-[10px] leading-relaxed text-red-200">{openrouterKeyCheck.message}</div>}
               </div>
 
               <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-3.5 py-3 text-[10px] text-slate-500 leading-relaxed">
