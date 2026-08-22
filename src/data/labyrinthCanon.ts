@@ -11,12 +11,23 @@ import chapter5Text from "./labyrinth/chapter-5.content";
 import chapter6Text from "./labyrinth/chapter-6.content";
 import chapter7Text from "./labyrinth/chapter-7.content";
 import chapter8Text from "./labyrinth/chapter-8.content";
+import fb2Chapter1 from "./labyrinth/fb2-import/chapter-1.fb2.content";
+import fb2Chapter2 from "./labyrinth/fb2-import/chapter-2.fb2.content";
+import fb2Chapter3 from "./labyrinth/fb2-import/chapter-3.fb2.content";
+import fb2Chapter4 from "./labyrinth/fb2-import/chapter-4.fb2.content";
+import fb2Chapter5 from "./labyrinth/fb2-import/chapter-5.fb2.content";
+import fb2Chapter6 from "./labyrinth/fb2-import/chapter-6.fb2.content";
+import fb2Chapter7 from "./labyrinth/fb2-import/chapter-7.fb2.content";
+import fb2Chapter8 from "./labyrinth/fb2-import/chapter-8.fb2.content";
+import fb2Chapter9 from "./labyrinth/fb2-import/chapter-9.fb2.content";
+import fb2Chapter10 from "./labyrinth/fb2-import/chapter-10.fb2.content";
+import fb2Chapter11 from "./labyrinth/fb2-import/chapter-11.fb2.content";
 import USER_WORLD_BIBLE from "./labyrinth/world-bible-user.content";
 import USER_BOOK_PLAN from "./labyrinth/book-plan-20-user.content";
 
 export const LABYRINTH_STORY_ID = "story-labyrinth";
-/** v12: встроен пользовательский план на 20 глав и Библия мира по секторам. */
-export const LABYRINTH_CANON_VERSION = 12;
+/** v13: встроен пользовательский план на 20 глав, Библия мира и готовые тексты глав 1–11 из FB2. */
+export const LABYRINTH_CANON_VERSION = 13;
 export const LABYRINTH_CANON_MARKER = `CANON_V${LABYRINTH_CANON_VERSION}_USER_PLAN20_SECTORS`;
 /** Маркер образца автора: при смене версии канона профиль перезапишется, если не помечен user: */
 export const LABYRINTH_AUTHOR_SAMPLE_MARKER = `labyrinth-canon-ch1-v${LABYRINTH_CANON_VERSION}`;
@@ -297,17 +308,17 @@ function chapter(
 /** Точные синопсисы 1–20 из пользовательского плана; каждый уходит в generate как currentChapterSummary. */
 export function buildLabyrinthChapters(): Chapter[] {
   return [
-    chapter("lab-ch-1", "Глава 1. Загрузка завершена", "Герой возвращается с вечернего отделения ВУЗа. Гроза, дождь, молния, вибрация телефона. На экране: «Загрузка завершена». Вспышка. Темнота."),
-    chapter("lab-ch-2", "Глава 2. Сектор 1", "Герой приходит в себя в абсолютной темноте. Ощупывает себя: футболка, джинсы, кроссовки, ключи, телефон. Телефон показывает «Сектор 1». Обычные функции не работают."),
-    chapter("lab-ch-3", "Глава 3. Тепловизор", "Герой открывает единственную функцию телефона — тепловизор. Видит коридоры, мягкие дымчатые стены, тупик за спиной. Понимает, что надо двигаться. Заряд телефона низкий."),
-    chapter("lab-ch-4", "Глава 4. Правило левой руки", "Герой решает идти вдоль левой стены. Делает первую метку ключом. Начинает понимать, что лабиринт двумерный только на первый взгляд."),
-    chapter("lab-ch-5", "Глава 5. Первый круг", "Герой возвращается к своему ключу и понимает, что ходит кругами. У него растёт жажда, голод и тревога. Он выбирает последний неисследованный коридор.", chapter5Text.trim()),
-    chapter("lab-ch-6", "Глава 6. Число 20", "Герой находит тупик с зелёным числом 20 и странной питательной массой. Масса пахнет мятой и мёдом. Он ест её и восстанавливает силы. Затем понимает, что это ещё и источник заряда.", chapter6Text.trim()),
-    chapter("lab-ch-7", "Глава 7. Отпечаток ладони", "Герой заряжает телефон до 20%, находит отпечаток ладони на стене. Прикладывает руку. Тупик освещается кольцами и линиями. Переход на Сектор 2.", chapter7Text.trim()),
-    chapter("lab-ch-8", "Глава 8. Сектор 2", "Герой просыпается от вибрации телефона. На экране появляется надпись «Сектор 2». Открываются карта, шагомер и набор датчиков. Он замечает число 32765 и скрытую область на карте; выход из сектора ещё не означает победу.", chapter8Text.trim()),
-    chapter("lab-ch-9", "Глава 9. Лабиринт отвечает", "Полосы на стенах реагируют на свет и движение. Магнитометр и барометр подают противоречивые сигналы, герой проходит связанные ловушки, находит синий узел и открывает «Журнал» с записью: «Ты уже выбирал не туда»."),
-    chapter("lab-ch-10", "Глава 10. Комната отдыха", "За деревянной дверью герой находит кресло, еду, зарядку и окно со звёздами. Телефон предупреждает: «Ресурс совместный». Записка и сообщение другого участника превращают передышку в новую тревогу."),
-    chapter("lab-ch-11", "Глава 11. Первый попутчик", "Герой находит кровь, клочок ткани и чужие метки, а затем встречает попутчицу. Их телефоны обладают разными функциями, поэтому Лабиринт намеренно вынуждает людей сотрудничать."),
+    chapter("lab-ch-1", "Глава 1. Загрузка завершена", "Герой возвращается с вечернего отделения ВУЗа. Гроза, дождь, молния, вибрация телефона. На экране: «Загрузка завершена». Вспышка. Темнота.", fb2Chapter1.trim()),
+    chapter("lab-ch-2", "Глава 2. Сектор 1", "Герой приходит в себя в абсолютной темноте. Ощупывает себя: футболка, джинсы, кроссовки, ключи, телефон. Телефон показывает «Сектор 1». Обычные функции не работают.", fb2Chapter2.trim()),
+    chapter("lab-ch-3", "Глава 3. Тепловизор", "Герой открывает единственную функцию телефона — тепловизор. Видит коридоры, мягкие дымчатые стены, тупик за спиной. Понимает, что надо двигаться. Заряд телефона низкий.", fb2Chapter3.trim()),
+    chapter("lab-ch-4", "Глава 4. Правило левой руки", "Герой решает идти вдоль левой стены. Делает первую метку ключом. Начинает понимать, что лабиринт двумерный только на первый взгляд.", fb2Chapter4.trim()),
+    chapter("lab-ch-5", "Глава 5. Первый круг", "Герой возвращается к своему ключу и понимает, что ходит кругами. У него растёт жажда, голод и тревога. Он выбирает последний неисследованный коридор.", fb2Chapter5.trim()),
+    chapter("lab-ch-6", "Глава 6. Число 20", "Герой находит тупик с зелёным числом 20 и странной питательной массой. Масса пахнет мятой и мёдом. Он ест её и восстанавливает силы. Затем понимает, что это ещё и источник заряда.", fb2Chapter6.trim()),
+    chapter("lab-ch-7", "Глава 7. Отпечаток ладони", "Герой заряжает телефон до 20%, находит отпечаток ладони на стене. Прикладывает руку. Тупик освещается кольцами и линиями. Переход на Сектор 2.", fb2Chapter7.trim()),
+    chapter("lab-ch-8", "Глава 8. Сектор 2", "Герой просыпается от вибрации телефона. На экране появляется надпись «Сектор 2». Открываются карта, шагомер и набор датчиков. Он замечает число 32765 и скрытую область на карте; выход из сектора ещё не означает победу.", fb2Chapter8.trim()),
+    chapter("lab-ch-9", "Глава 9. Лабиринт отвечает", "Полосы на стенах реагируют на свет и движение. Магнитометр и барометр подают противоречивые сигналы, герой проходит связанные ловушки, находит синий узел и открывает «Журнал» с записью: «Ты уже выбирал не туда».", fb2Chapter9.trim()),
+    chapter("lab-ch-10", "Глава 10. Комната отдыха", "За деревянной дверью герой находит кресло, еду, зарядку и окно со звёздами. Телефон предупреждает: «Ресурс совместный». Записка и сообщение другого участника превращают передышку в новую тревогу.", fb2Chapter10.trim()),
+    chapter("lab-ch-11", "Глава 11. Первый попутчик", "Герой находит кровь, клочок ткани и чужие метки, а затем встречает попутчицу. Их телефоны обладают разными функциями, поэтому Лабиринт намеренно вынуждает людей сотрудничать.", fb2Chapter11.trim()),
     chapter("lab-ch-12", "Глава 12. Цена доверия", "Чтобы пройти участок, героям приходится передать почти весь заряд на один телефон. Чужие метки ведут и к ресурсам, и к ловушкам; союз держится на необходимости, а не на симпатии."),
     chapter("lab-ch-13", "Глава 13. Сделка", "Герои встречают группу участников, которые предлагают еду и часть карты в обмен на сведения. Карта оказывается неполной, а от конкурентов приходит первая история об Охотнике, отбирающем чужие телефоны."),
     chapter("lab-ch-14", "Глава 14. Точка зафиксирована", "Участок реагирует на шум и перестраивает коридоры. Из-за ловушки герой или попутчица погибает, но телефон возвращает героя к точке сохранения с потерянным зарядом и изменёнными воспоминаниями спутницы."),
@@ -361,50 +372,34 @@ export function shouldKeepUserChapterContent(
   return true;
 }
 
+const legacySeedByOrdinal = new Map<number, string>([
+  [5, chapter5Text.trim()],
+  [6, chapter6Text.trim()],
+  [7, chapter7Text.trim()],
+  [8, chapter8Text.trim()],
+]);
+
 function applyCanonChapter(existing: Chapter | undefined, canon: Chapter, n: number): Chapter {
   if (!existing) {
     return { ...canon };
   }
 
-  // 5–6: title/summary из канона. Content: substantive user KEEP; empty/stub → seed.
-  if (n === 5 || n === 6) {
-    const keep = shouldKeepUserChapterContent(existing.content, canon.content);
-    return {
-      ...existing,
-      id: existing.id || canon.id,
-      title: canon.title,
-      summary: canon.summary,
-      content: keep ? (existing.content || "") : (canon.content || existing.content || ""),
-    };
-  }
-  // 7–8: title/summary канона; пустой content → seed; legacy seed endings → refresh;
-  // любая иная непустая правка KEEP (в т.ч. короткий черновик).
-  // ВАЖНО: проверяем КОНЕЦ текста, а не начало — иначе затирает правки пользователя.
-  if (n === 7 || n === 8) {
+  // Главы 1–11 перенесены из FB2. Пустые, короткие и старые встроенные seed-тексты
+  // обновляем из импорта; содержательные ручные правки пользователя сохраняем.
+  if (n <= 11) {
     const user = (existing.content || "").trim();
-    const seed = (canon.content || "").trim();
-    // Legacy endings: старые seed-версии, которые нужно обновить
-    const legacyEndings = [
-      "Мужики направо не ходят!",
-      "Мужики направо не ходят)))",
-      "Хоть что-то своё.",
-    ];
-    const looksLikeLegacySeed = legacyEndings.some((ending) => user.endsWith(ending))
-      && user.length < seed.length * 1.2; // не затираем, если пользователь сильно расширил
-    let content = user;
-    if (!user) content = seed;
-    else if (user === seed) content = seed;
-    else if (looksLikeLegacySeed) content = seed; // v9→v10: обновить seed в приложении
+    const legacy = legacySeedByOrdinal.get(n);
+    const keep = user !== legacy && shouldKeepUserChapterContent(user, canon.content);
     return {
       ...existing,
       id: existing.id || canon.id,
       title: canon.title,
       summary: canon.summary,
-      content: content || seed || "",
+      content: keep ? user : (canon.content || user || ""),
     };
   }
 
-  // 1–4, 9+: title/summary канона если пусто; content не трогаем
+  // Главы 12–20: title/summary берутся из плана; текст не генерируется автоматически.
   return {
     ...existing,
     id: existing.id || canon.id,
