@@ -52,11 +52,12 @@ function selectProvider(provider: DirectProvider, keys: ApiKeys, model?: string)
     if (!keys[provider]) throw new Error(`Добавьте ключ ${providerLabel(provider)} в настройках ИИ.`);
     return provider;
   }
-  if (model?.includes("/" ) && keys.openrouter) return "openrouter";
-  if (keys.openrouter) return "openrouter";
+  // В режиме «Автовыбор» не привязываемся к модели другого провайдера:
+  // каждый API получает собственный корректный defaultModel().
   if (keys.gemini) return "gemini";
   if (keys.groq) return "groq";
   if (keys.nvidia) return "nvidia";
+  if (keys.openrouter) return "openrouter";
   throw new Error("Добавьте API-ключ Gemini, OpenRouter, Groq или NVIDIA в настройках ИИ.");
 }
 
@@ -81,8 +82,11 @@ function responseText(payload: any): string {
 }
 
 export async function directGenerate(request: DirectRequest): Promise<string> {
-  const provider = selectProvider(request.provider || "auto", request.apiKeys || {}, request.model);
-  const model = request.model || defaultModel(provider);
+  const requestedProvider = request.provider || "auto";
+  const provider = selectProvider(requestedProvider, request.apiKeys || {}, request.model);
+  // Автовыбор определяет и провайдера, и совместимую с ним модель.
+  // Это защищает APK от старого model id, сохранённого для другого API.
+  const model = requestedProvider === "auto" ? defaultModel(provider) : request.model || defaultModel(provider);
   const system = request.system || "Ты внимательный литературный помощник. Отвечай по-русски.";
 
   let response: Response;

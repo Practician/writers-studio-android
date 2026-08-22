@@ -91,6 +91,7 @@ export default function App() {
   // LLM: в Android APK ключи загружаются из зашифрованного device storage.
   const [llmProvider, setLlmProvider] = useState<LlmProviderChoice>(() => loadLlmProvider());
   const [llmKeys, setLlmKeys] = useState<StoredLlmKeys>(() => loadLlmKeys());
+  const [llmKeysReady, setLlmKeysReady] = useState(() => !isAutonomousApk());
   const [openrouterModel, setOpenrouterModel] = useState(() => loadOpenrouterModel());
   const [openrouterFallbackNotice, setOpenrouterFallbackNotice] = useState<string | null>(null);
   const [showLlmSettings, setShowLlmSettings] = useState(false);
@@ -123,12 +124,17 @@ export default function App() {
     saveLlmProvider(llmProvider);
   }, [llmProvider]);
 
+  // В APK ключи намеренно не остаются в localStorage. Восстанавливаем их из
+  // Android Keystore до первого запроса, иначе после перезапуска API получал пустые ключи.
   useEffect(() => {
     let cancelled = false;
     void loadStoredLlmKeys().then((keys) => {
       if (cancelled) return;
       setLlmKeys(keys);
       setLlmKeysDraft(keys);
+      setLlmKeysReady(true);
+    }).catch(() => {
+      if (!cancelled) setLlmKeysReady(true);
     });
     return () => { cancelled = true; };
   }, []);
@@ -174,11 +180,12 @@ export default function App() {
     ? openrouterModel
     : defaultModelForProvider(llmProvider, llmStatus);
   const llmApiFields = useMemo(
-    () => llmRequestFields(llmProvider, llmKeys, selectedModel),
+    () => llmRequestFields(llmProvider, llmKeys, llmProvider === "auto" ? undefined : selectedModel),
     [llmProvider, llmKeys, selectedModel],
   );
 
   const providerHasKey = (id: LlmProviderChoice): boolean => {
+    if (!llmKeysReady) return false;
     if (id === "auto") return true;
     if (id === "gemini") return Boolean(llmKeys.gemini.trim()) || Boolean(llmStatus?.keysFromEnv?.gemini) || (llmStatus?.geminiKeys ?? 0) > 0;
     if (id === "nvidia") return Boolean(llmKeys.nvidia.trim()) || Boolean(llmStatus?.keysFromEnv?.nvidia) || Boolean(llmStatus?.nvidiaConfigured);
