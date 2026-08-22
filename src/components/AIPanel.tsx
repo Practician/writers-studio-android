@@ -416,9 +416,9 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
   const planSummary = getPlanSummary();
 
   return (
-    <div className="flex flex-col h-full bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden" id="ai-panel-container">
+    <div className="flex flex-col h-full min-h-0 bg-slate-900/50 border border-slate-800 rounded-xl overflow-y-auto" id="ai-panel-container">
       {/* Один результат автора — одна точка входа. Детали раскрываются только после выбора действия. */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 border-b border-slate-800 bg-slate-950/40 p-1 text-[11px] font-semibold">
+      <div className="sticky top-0 z-20 grid grid-cols-2 sm:grid-cols-4 gap-1 border-b border-slate-800 bg-slate-950/95 p-1 text-[11px] font-semibold">
         <button
           type="button"
           onClick={() => { setActiveTool("continue"); setContinueMode("whole_chapter"); setResult(""); }}
@@ -466,7 +466,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
       </div>
 
       {/* Main Form Fields */}
-      <div className="p-4 flex-1 overflow-y-auto space-y-4">
+      <div className="min-h-0 p-4 space-y-4">
         {activeTool === "continue" && (
           <div className="space-y-4">
             {/* Mode Switcher */}
@@ -952,7 +952,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
 
         {/* Action / Stop buttons */}
         {activeTool === "author" || activeTool === "readiness" ? null : loading ? (
-          <div className="space-y-2">
+          <div className="sticky bottom-0 z-20 space-y-2 border-t border-slate-800 bg-slate-950/95 px-4 py-3">
             <div className="w-full py-2.5 bg-slate-800/80 border border-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center justify-center gap-2">
               <div className="w-3.5 h-3.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
               <span>
@@ -978,7 +978,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
           <button
             onClick={handleBatchGenerate}
             disabled={selectedBatchChapters.length === 0}
-            className="w-full py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg"
+            className="sticky bottom-0 z-20 w-full border-t border-slate-800 bg-gradient-to-r from-indigo-600 to-purple-600 px-3 py-2.5 hover:from-indigo-500 hover:to-purple-500 disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg"
           >
             <Wand2 className="w-4 h-4" />
             <span>Сгенерировать выбранные главы ({selectedBatchChapters.length})</span>
@@ -987,7 +987,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
           <button
             onClick={handleAction}
             disabled={activeTool === "improve" && !selectedText && !currentDraft}
-            className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg"
+            className="sticky bottom-0 z-20 w-full border-t border-slate-800 bg-gradient-to-r from-blue-600 to-purple-600 px-3 py-2.5 hover:from-blue-500 hover:to-purple-500 disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg"
             id="ai-action-btn"
           >
             <Wand2 className="w-4 h-4" />

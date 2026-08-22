@@ -1781,6 +1781,7 @@ export default function App() {
                   <button
                     onClick={() => {
                       setActiveTab("text");
+                      setShowAgent(false);
                       setMobilePanel("assistant");
                       // Switch focus to AI continuation
                       setTimeout(() => {
