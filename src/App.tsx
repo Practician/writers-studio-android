@@ -170,7 +170,7 @@ export default function App() {
       saveOpenrouterModel(detail.to);
       setOpenrouterModel(detail.to);
       setOpenrouterModelDraft(detail.to);
-      setOpenrouterFallbackNotice(`Ox Alpha недоступна для этого ключа. Приложение автоматически выбрало бесплатную модель OpenRouter.`);
+      setOpenrouterFallbackNotice(`Ox Alpha вернула отказ по квоте. Приложение переключилось на ${detail.to}; итог запроса виден в журнале ИИ.`);
     };
     window.addEventListener("writers-studio-openrouter-fallback", handleOpenRouterFallback);
     return () => window.removeEventListener("writers-studio-openrouter-fallback", handleOpenRouterFallback);
@@ -183,10 +183,12 @@ export default function App() {
     const handleApiTrace = (event: Event) => {
       const detail = (event as CustomEvent<{
         provider?: string; model?: string; endpoint?: string; keyPresent?: boolean;
-        keySuffix?: string; status?: number; message?: string;
+        keySuffix?: string; keyIndex?: number; keyCount?: number; status?: number; message?: string;
       }>).detail;
       if (!detail?.provider || !detail.model || !detail.endpoint) return;
-      const key = detail.keyPresent ? `ключ есть (…${detail.keySuffix || "????"})` : "ключ не передан";
+      const key = detail.keyPresent
+        ? `ключ ${detail.keyIndex || 1}/${detail.keyCount || 1} (…${detail.keySuffix || "????"})`
+        : "ключ не передан";
       const status = detail.status ? `HTTP ${detail.status}` : "без HTTP-статуса";
       const message = [detail.endpoint, `модель ${detail.model}`, key, status, detail.message].filter(Boolean).join(" · ");
       setLlmLogs((prev) => [...prev, {
@@ -199,6 +201,23 @@ export default function App() {
     };
     window.addEventListener("writers-studio-api-trace", handleApiTrace);
     return () => window.removeEventListener("writers-studio-api-trace", handleApiTrace);
+  }, []);
+
+  useEffect(() => {
+    if (!isAutonomousApk()) return;
+    const handleKeyRotation = (event: Event) => {
+      const detail = (event as CustomEvent<{ provider?: string; from?: number; to?: number; total?: number; status?: number }>).detail;
+      if (!detail?.provider || !detail.from || !detail.to || !detail.total) return;
+      setLlmLogs((prev) => [...prev, {
+        level: "warn",
+        provider: detail.provider,
+        message: `Лимит HTTP ${detail.status || 0}: переключение ключа ${detail.from}/${detail.total} → ${detail.to}/${detail.total}.`,
+        ts: Date.now(),
+      }].slice(-40));
+      setShowLlmLog(true);
+    };
+    window.addEventListener("writers-studio-api-key-rotation", handleKeyRotation);
+    return () => window.removeEventListener("writers-studio-api-key-rotation", handleKeyRotation);
   }, []);
 
   const selectedModel = llmProvider === "openrouter"
@@ -234,7 +253,7 @@ export default function App() {
   };
 
   const checkOpenRouterKey = async () => {
-    const key = llmKeysDraft.openrouter.trim();
+    const key = llmKeysDraft.openrouter.split(/[\n,;]/).map((item) => item.trim()).find(Boolean) || "";
     if (!key) {
       setOpenrouterKeyCheck({ state: "error", message: "Сначала вставьте ключ OpenRouter в поле выше." });
       return;
@@ -2076,7 +2095,7 @@ export default function App() {
                     Ключи API
                   </h2>
                   <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed max-w-md">
-                    Вставьте свой ключ ниже. В Android APK он хранится <strong className="text-slate-300">только на этом устройстве в защищённом хранилище</strong> и уходит напрямую выбранному ИИ-провайдеру. Ключ не добавляется в сборку и GitHub.
+                    Вставьте один или несколько ключей ниже. Несколько ключей отделяйте символом <strong className="text-slate-300">;</strong>. В Android APK они хранятся <strong className="text-slate-300">только на этом устройстве в защищённом хранилище</strong> и уходят напрямую выбранному ИИ-провайдеру. Ключи не добавляются в сборку и GitHub.
                   </p>
                 </div>
               </div>
@@ -2123,7 +2142,8 @@ export default function App() {
                   },
                 ]
               ).map((row) => {
-                const hasBrowserKey = Boolean(llmKeysDraft[row.key]?.trim());
+                const keyCount = llmKeysDraft[row.key].split(/[\n,;]/).map((key) => key.trim()).filter(Boolean).length;
+                const hasBrowserKey = keyCount > 0;
                 return (
                   <div
                     key={row.key}
@@ -2134,7 +2154,7 @@ export default function App() {
                       <div className="flex items-center gap-1.5 shrink-0">
                         {hasBrowserKey ? (
                           <span className="text-[9px] px-1.5 py-0.5 rounded-md border border-emerald-700/50 bg-emerald-950/40 text-emerald-300">
-                            ключ добавлен
+                            {keyCount === 1 ? "ключ добавлен" : `ключей: ${keyCount}`}
                           </span>
                         ) : (
                           <span className={`text-[9px] px-1.5 py-0.5 rounded-md border ${row.badge}`}>
@@ -2146,13 +2166,13 @@ export default function App() {
                     <input
                       type="password"
                       autoComplete="off"
-                      placeholder={`Ключ · ${row.hint}`}
+                      placeholder={`Ключ или несколько через ; · ${row.hint}`}
                       value={llmKeysDraft[row.key]}
                       onChange={(e) => setLlmKeysDraft((prev) => ({ ...prev, [row.key]: e.target.value }))}
                       className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-amber-500/70 focus:ring-1 focus:ring-amber-500/20 font-mono text-[11px] placeholder:text-slate-600"
                     />
                     <p className="text-[10px] text-slate-500">
-                      Ключ остаётся на устройстве и передаётся только при запросе к этому провайдеру.
+                      При одном ключе он используется всегда. При нескольких APK переключится на следующий только при HTTP 402/429 (квота или лимит), но не при 401/404.
                     </p>
                   </div>
                 );

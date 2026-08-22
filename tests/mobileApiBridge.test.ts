@@ -35,6 +35,7 @@ test("auto mode chooses NVIDIA and its compatible model despite stale Gemini mod
         { role: "user", content: "Тест." },
       ],
       temperature: 0.75,
+      max_tokens: 2048,
     },
   }]);
 });
@@ -70,8 +71,60 @@ test("direct bridge preserves provider HTTP status and returns non-secret diagno
     endpoint: "integrate.api.nvidia.com/v1/chat/completions",
     keyPresent: true,
     keySuffix: "1234",
+    keyIndex: 1,
+    keyCount: 1,
     status: 404,
     message: "Маршрут не найден",
   });
   assert.equal(JSON.stringify(payload).includes("very-secret"), false);
+});
+
+test("OpenRouter switches Ox Alpha to free-router and rotates to the next key after quota errors", async () => {
+  const calls: Array<{ model: string; authorization: string }> = [];
+  const result = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    const headers = init?.headers as Record<string, string>;
+    calls.push({ model: body.model, authorization: headers.Authorization });
+    const isSecondKeyFreeRouter = headers.Authorization === "Bearer second-key" && body.model === "openrouter/free";
+    return isSecondKeyFreeRouter
+      ? new Response(JSON.stringify({ choices: [{ message: { content: "Ответ после ротации" } }] }), { status: 200 })
+      : new Response(JSON.stringify({ error: { message: "Недостаточно квоты" } }), { status: 402 });
+  }, () => directGenerate({
+    provider: "openrouter",
+    model: "stealth/ox-alpha",
+    apiKeys: { openrouter: "first-key; second-key" },
+    prompt: "Тест fallback.",
+  }));
+
+  assert.equal(result, "Ответ после ротации");
+  assert.deepEqual(calls, [
+    { model: "stealth/ox-alpha", authorization: "Bearer first-key" },
+    { model: "openrouter/free", authorization: "Bearer first-key" },
+    { model: "stealth/ox-alpha", authorization: "Bearer second-key" },
+    { model: "openrouter/free", authorization: "Bearer second-key" },
+  ]);
+});
+
+test("direct bridge forwards AbortSignal to the provider request", async () => {
+  const controller = new AbortController();
+  let wasAborted = false;
+  const pending = withMockFetch(async (_url, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => {
+      wasAborted = true;
+      reject(new DOMException("Cancelled", "AbortError"));
+    }, { once: true });
+  }), () => directApi("/api/writer/ai", {
+    method: "POST",
+    signal: controller.signal,
+    body: JSON.stringify({
+      action: "continue",
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  controller.abort();
+  const response = await pending;
+  const payload = await response.json();
+  assert.equal(wasAborted, true);
+  assert.equal(response.status, 400);
+  assert.equal(payload.error, "Cancelled");
 });
