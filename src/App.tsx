@@ -218,6 +218,24 @@ export default function App() {
 
   useEffect(() => {
     if (!isAutonomousApk()) return;
+    const handleChapterVolume = (event: Event) => {
+      const detail = (event as CustomEvent<{ words?: number; segments?: number; target?: number; complete?: boolean }>).detail;
+      if (typeof detail?.words !== "number" || typeof detail?.segments !== "number" || typeof detail?.target !== "number") return;
+      setLlmLogs((prev) => [...prev, {
+        level: detail.complete ? "success" : "warn",
+        message: detail.complete
+          ? `Глава собрана: ${detail.words}/${detail.target} слов, фрагментов: ${detail.segments}.`
+          : `Глава короче цели: ${detail.words}/${detail.target} слов после ${detail.segments} фрагментов.`,
+        ts: Date.now(),
+      }].slice(-40));
+      setShowLlmLog(true);
+    };
+    window.addEventListener("writers-studio-chapter-volume", handleChapterVolume);
+    return () => window.removeEventListener("writers-studio-chapter-volume", handleChapterVolume);
+  }, []);
+
+  useEffect(() => {
+    if (!isAutonomousApk()) return;
     const handleKeyRotation = (event: Event) => {
       const detail = (event as CustomEvent<{ provider?: string; from?: number; to?: number; total?: number; status?: number }>).detail;
       if (!detail?.provider || !detail.from || !detail.to || !detail.total) return;
@@ -1779,6 +1797,18 @@ export default function App() {
                     <Wand2 className="w-3.5 h-3.5" />
                     <span>В бережную редактуру</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={handleClearActiveChapterContent}
+                    disabled={!activeChapter.content?.trim()}
+                    className="min-h-10 px-3 py-1.5 bg-red-950/30 hover:bg-red-900/50 border border-red-900/50 hover:border-red-700/70 text-red-300 hover:text-red-100 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Стереть текст текущей главы, сохранив её название и место в оглавлении"
+                    id="clear-chapter-content-btn"
+                  >
+                    <Eraser className="w-3.5 h-3.5" />
+                    <span>Стереть главу</span>
+                  </button>
+
                   {/* Words metric tag */}
                   <div className={`px-2.5 py-1 rounded-lg text-[10px] font-mono border ${
                     getWordCount(activeChapter.content) >= 1500

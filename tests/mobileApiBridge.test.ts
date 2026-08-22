@@ -250,9 +250,10 @@ test("NVIDIA retries once with a smaller output budget after HTTP 504", async ()
 });
 
 test("full chapter request targets 3300 words", async () => {
-  let body: any = null;
+  const bodies: any[] = [];
   await withMockFetch(async (_url, init) => {
-    body = JSON.parse(String(init?.body || "{}"));
+    const body = JSON.parse(String(init?.body || "{}"));
+    bodies.push(body);
     return new Response(JSON.stringify({ choices: [{ message: { content: "Готовая глава." } }] }), { status: 200 });
   }, () => directApi("/api/writer/ai", {
     method: "POST",
@@ -261,8 +262,8 @@ test("full chapter request targets 3300 words", async () => {
       llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
     }),
   }));
-  assert.equal(body.max_tokens, 6_144);
-  assert.equal(body.messages[1].content.includes("около 3 300 слов"), true);
+  assert.equal(bodies[0].max_tokens, 6_144);
+  assert.equal(bodies.some((body) => body.messages[1].content.includes("около 3 300 слов")), true);
 });
 
 test("single OpenRouter key reports that rotation cannot run after quota error", async () => {
@@ -370,4 +371,49 @@ test("all NVIDIA 504 diagnostics show retry, model rotations, and Groq handoff",
     if (savedWindow === undefined) delete globals.window; else globals.window = savedWindow;
     if (savedCustomEvent === undefined) delete globals.CustomEvent; else globals.CustomEvent = savedCustomEvent;
   }
+});
+
+test("full chapter is extended in segments until it reaches the 3300-word target", async () => {
+  const chunk = Array.from({ length: 600 }, () => "слово").join(" ");
+  let calls = 0;
+  const response = await withMockFetch(async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ choices: [{ message: { content: chunk } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "generate_full_chapter",
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(calls, 6);
+  assert.equal(payload.chapterTargetWords, 3300);
+  assert.equal(payload.chapterWords, 3600);
+  assert.equal(payload.chapterSegments, 6);
+});
+
+test("full chapter keeps the assembled draft when humanize pass is much shorter", async () => {
+  const chunk = Array.from({ length: 700 }, () => "фрагмент").join(" ");
+  let calls = 0;
+  const response = await withMockFetch(async () => {
+    calls += 1;
+    const content = calls <= 5 ? chunk : "Слишком короткая редактура.";
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "generate_full_chapter",
+      humanize: true,
+      humanizeDepth: "maximum",
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(calls, 6);
+  assert.equal(payload.chapterWords, 3500);
+  assert.equal(payload.result.includes("фрагмент"), true);
+  assert.equal(payload.result.includes("Слишком короткая редактура."), false);
 });

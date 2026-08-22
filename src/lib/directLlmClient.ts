@@ -457,6 +457,18 @@ function needsHumanizePass(action: string, body: any): boolean {
   return Boolean(body?.humanize) && ["continue", "generate_full_chapter", "improve", "rewrite_detector_segments"].includes(action);
 }
 
+const CHAPTER_TARGET_WORDS = 3_300;
+const MAX_CHAPTER_CONTINUATIONS = 6;
+
+function countGeneratedWords(text: string): number {
+  return (text.match(/[A-Za-zА-Яа-яЁё0-9]+(?:[-'][A-Za-zА-Яа-яЁё0-9]+)*/gu) || []).length;
+}
+
+function notifyChapterVolume(words: number, segments: number, target: number, complete: boolean): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("writers-studio-chapter-volume", { detail: { words, segments, target, complete } }));
+}
+
 function promptForAction(action: string, body: any): { system: string; prompt: string; json?: boolean } {
   const context = compactContext(body);
   const text = body?.text || body?.currentDraft || body?.sourceText || "";
@@ -568,6 +580,28 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
       let text = await generate({ provider: credentials.provider, model: credentials.model, apiKeys: credentials.keys, prompt: setup.prompt, system: setup.system, json: setup.json });
       if (action === "editorial_review") return json({ review: safeJson(text, { readiness: "Проверка готова", summary: text, checks: [], risks: [], nextStep: "Откройте результат и внесите правки." }) });
 
+      // Модели могут поставить finish_reason=stop после короткого фрагмента, игнорируя
+      // указанный объём. Для полной главы измеряем фактические слова и дописываем сцены.
+      let chapterSegments = 1;
+      if (action === "generate_full_chapter") {
+        for (let continuation = 0; continuation < MAX_CHAPTER_CONTINUATIONS && countGeneratedWords(text) < CHAPTER_TARGET_WORDS; continuation += 1) {
+          const currentWords = countGeneratedWords(text);
+          const remaining = Math.max(1, CHAPTER_TARGET_WORDS - currentWords);
+          const next = await generate({
+            provider: credentials.provider,
+            model: credentials.model,
+            apiKeys: credentials.keys,
+            system: "Ты продолжаешь уже начатую художественную главу. Верни только новый фрагмент прозы на русском, без заголовка, повтора и комментариев.",
+            prompt: `${compactContext(body)}\n\nНАПИСАНО УЖЕ: около ${currentWords} слов. ЦЕЛЬ ГЛАВЫ: около ${CHAPTER_TARGET_WORDS} слов.\n\nХвост текущей главы:\n${text.slice(-6500)}\n\nПродолжи строго с этого места. Не пересказывай и не повторяй написанное. Напиши следующую законченную сцену или развитие сцены объёмом не менее ${Math.min(900, remaining)} слов; двигай сюжет к завершённому повороту главы.`,
+          });
+          const beforeWords = currentWords;
+          text = `${text.trim()}\n\n${next.trim()}`;
+          chapterSegments += 1;
+          if (countGeneratedWords(text) <= beforeWords) break;
+        }
+        notifyChapterVolume(countGeneratedWords(text), chapterSegments, CHAPTER_TARGET_WORDS, countGeneratedWords(text) >= CHAPTER_TARGET_WORDS);
+      }
+
       const humanizeApplied = needsHumanizePass(action, body);
       if (humanizeApplied) {
         const depth = body?.humanizeDepth === "fast" || body?.humanizeDepth === "balanced" || body?.humanizeDepth === "maximum"
@@ -575,16 +609,23 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           : "balanced";
         const minWords = action === "generate_full_chapter" ? "3 000 слов и ориентир около 3 300 слов" : "исходный объём";
         const beforeChars = text.length;
-        text = await generate({
+        const beforeWords = countGeneratedWords(text);
+        const humanizedText = await generate({
           provider: credentials.provider,
           model: credentials.model,
           apiKeys: credentials.keys,
           system: "Ты финальный литературный редактор. Верни только готовый русский художественный текст без комментариев.",
           prompt: `${compactContext(body)}${humanizeDirective(body)}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости. Верни только готовую версию.`,
         });
-        notifyHumanizePass(depth, beforeChars, text.length);
+        // Полный постпроход иногда самовольно сокращает длинный черновик. В таком
+        // случае сохраняем объёмную версию, а не выдаём пользователю короткий текст.
+        const humanizedWords = countGeneratedWords(humanizedText);
+        const acceptHumanized = action !== "generate_full_chapter" || humanizedWords >= Math.floor(beforeWords * 0.9);
+        if (acceptHumanized) text = humanizedText;
+        notifyHumanizePass(depth, beforeChars, humanizedText.length);
       }
-      return json({ result: text, humanizeReport: null, humanizeApplied });
+      const chapterWords = action === "generate_full_chapter" ? countGeneratedWords(text) : undefined;
+      return json({ result: text, humanizeReport: null, humanizeApplied, ...(chapterWords !== undefined ? { chapterWords, chapterTargetWords: CHAPTER_TARGET_WORDS, chapterSegments } : {}) });
     }
     if (path.startsWith("/api/dev/load-labirint")) return json({ bible: "", plan: "" });
     return json({ error: `Автономный APK не поддерживает маршрут ${path}` }, 404);
