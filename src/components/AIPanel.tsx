@@ -416,9 +416,9 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
   const planSummary = getPlanSummary();
 
   return (
-    <div className="flex flex-col h-full min-h-0 bg-slate-900/50 border border-slate-800 rounded-xl overflow-y-auto" id="ai-panel-container">
+    <div className="flex flex-col h-full min-h-0 bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden" id="ai-panel-container">
       {/* Один результат автора — одна точка входа. Детали раскрываются только после выбора действия. */}
-      <div className="sticky top-0 z-20 grid grid-cols-2 sm:grid-cols-4 gap-1 border-b border-slate-800 bg-slate-950/95 p-1 text-[11px] font-semibold">
+      <div className="grid shrink-0 grid-cols-2 sm:grid-cols-4 gap-1 border-b border-slate-800 bg-slate-950/95 p-1 text-[11px] font-semibold">
         <button
           type="button"
           onClick={() => { setActiveTool("continue"); setContinueMode("whole_chapter"); setResult(""); }}
@@ -465,8 +465,30 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
         </button>
       </div>
 
+      {/* Отдельная мобильная панель запуска: всегда видна, даже если длинная форма прокручивается. */}
+      {activeTool !== "author" && activeTool !== "readiness" && (
+        <div className="lg:hidden shrink-0 border-b border-slate-800 bg-slate-950/95 p-2">
+          {loading ? (
+            <button type="button" onClick={handleStopGeneration} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-red-800/60 bg-red-950/50 px-3 text-xs font-semibold text-red-200">
+              <Square className="h-4 w-4 fill-current" /> Остановить генерацию
+            </button>
+          ) : activeTool === "continue" && continueMode === "multi_chapters" ? (
+            <button type="button" onClick={handleBatchGenerate} disabled={selectedBatchChapters.length === 0} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 px-3 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-60">
+              <Wand2 className="h-4 w-4" /> Сгенерировать главы ({selectedBatchChapters.length})
+            </button>
+          ) : (
+            <button type="button" onClick={handleAction} disabled={activeTool === "improve" && !selectedText && !currentDraft} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-3 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-60" id="ai-mobile-action-btn">
+              <Wand2 className="h-4 w-4" />
+              {activeTool === "continue" && (continueMode === "whole_chapter" ? "Написать главу" : "Сгенерировать продолжение")}
+              {activeTool === "improve" && "Отполировать текст"}
+              {activeTool === "brainstorm" && "Устроить мозговой штурм"}
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Main Form Fields */}
-      <div className="min-h-0 p-4 space-y-4">
+      <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
         {activeTool === "continue" && (
           <div className="space-y-4">
             {/* Mode Switcher */}
@@ -952,7 +974,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
 
         {/* Action / Stop buttons */}
         {activeTool === "author" || activeTool === "readiness" ? null : loading ? (
-          <div className="sticky bottom-0 z-20 space-y-2 border-t border-slate-800 bg-slate-950/95 px-4 py-3">
+          <div className="space-y-2 border-t border-slate-800 bg-slate-950/95 px-4 py-3">
             <div className="w-full py-2.5 bg-slate-800/80 border border-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center justify-center gap-2">
               <div className="w-3.5 h-3.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
               <span>
@@ -978,7 +1000,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
           <button
             onClick={handleBatchGenerate}
             disabled={selectedBatchChapters.length === 0}
-            className="sticky bottom-0 z-20 w-full border-t border-slate-800 bg-gradient-to-r from-indigo-600 to-purple-600 px-3 py-2.5 hover:from-indigo-500 hover:to-purple-500 disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg"
+            className="w-full border-t border-slate-800 bg-gradient-to-r from-indigo-600 to-purple-600 px-3 py-2.5 hover:from-indigo-500 hover:to-purple-500 disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg"
           >
             <Wand2 className="w-4 h-4" />
             <span>Сгенерировать выбранные главы ({selectedBatchChapters.length})</span>
@@ -987,7 +1009,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
           <button
             onClick={handleAction}
             disabled={activeTool === "improve" && !selectedText && !currentDraft}
-            className="sticky bottom-0 z-20 w-full border-t border-slate-800 bg-gradient-to-r from-blue-600 to-purple-600 px-3 py-2.5 hover:from-blue-500 hover:to-purple-500 disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg"
+            className="w-full border-t border-slate-800 bg-gradient-to-r from-blue-600 to-purple-600 px-3 py-2.5 hover:from-blue-500 hover:to-purple-500 disabled:from-slate-800 disabled:to-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg"
             id="ai-action-btn"
           >
             <Wand2 className="w-4 h-4" />
