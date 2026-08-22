@@ -1914,7 +1914,7 @@ export default function App() {
           {mobilePanel && (
             <div className="lg:hidden fixed inset-0 z-40">
               <button type="button" aria-label="Закрыть панель" onClick={() => setMobilePanel(null)} className="absolute inset-0 bg-slate-950/75 backdrop-blur-sm" />
-              <section className="absolute inset-x-0 bottom-0 flex max-h-[82dvh] flex-col rounded-t-3xl border-t border-slate-700 bg-[#0e1424] shadow-2xl shadow-black/60" role="dialog" aria-modal="true">
+              <section className="absolute inset-x-0 bottom-0 flex h-[82dvh] min-h-0 max-h-[82dvh] flex-col rounded-t-3xl border-t border-slate-700 bg-[#0e1424] shadow-2xl shadow-black/60" role="dialog" aria-modal="true">
                 {mobilePanel === "chapters" ? (
                   <>
                     <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
@@ -1939,7 +1939,7 @@ export default function App() {
                     <div className="flex border-b border-slate-800 bg-slate-950/50 p-1 gap-1 shrink-0 text-xs font-semibold">
                       {([ ["text", "Текст"], ["book", "Книга"], ["muse", "Муза"] ] as const).map(([tab, label]) => <button key={tab} type="button" onClick={() => { setActiveTab(tab); setShowAgent(false); }} className={`min-h-10 flex-1 rounded-lg ${activeTab === tab ? "bg-slate-800 text-slate-100" : "text-slate-400"}`}>{label}</button>)}
                     </div>
-                    <div className="min-h-0 flex-1 overflow-hidden p-3">
+                    <div className="min-h-0 flex-1 overflow-y-auto touch-pan-y overscroll-contain p-3">
                       <React.Suspense fallback={<div className="p-4 text-sm text-slate-500">Загрузка…</div>}>
                         {activeTab === "text" && (showAgent ? <AgentPanel story={activeStory} currentDraft={activeChapter?.content || ""} activeChapter={activeChapter} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onInsertText={handleInsertText} onClose={() => setShowAgent(false)} /> : <AIPanel story={activeStory} currentDraft={activeChapter?.content || ""} selectedText={selectedText} textSelection={textSelection} onInsertText={handleInsertText} onApplyAuthorEdit={handleApplyAuthorEdit} activeChapter={activeChapter} onUpdateStoryChapters={handleUpdateStoryChapters} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} openAuthorRequest={openAuthorRequest} quickContinueRequest={quickContinueRequest} onOpenAuthorProfile={() => setShowAuthorProfile(true)} onOpenAgent={() => setShowAgent(true)} />)}
                         {activeTab === "book" && <BookPanel story={activeStory} onUpdateCharacters={handleUpdateCharacters} onUpdateWorldRules={handleUpdateWorldRules} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onOpenBookMaterials={() => setShowStoryDetailsModal(true)} />}

@@ -425,7 +425,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
   const planSummary = getPlanSummary();
 
   return (
-    <div className="flex flex-col h-full min-h-0 bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden" id="ai-panel-container">
+    <div className="flex min-h-0 flex-col bg-slate-900/50 border border-slate-800 rounded-xl overflow-visible lg:h-full lg:overflow-hidden" id="ai-panel-container">
       {/* Один результат автора — одна точка входа. Детали раскрываются только после выбора действия. */}
       <div className="grid shrink-0 grid-cols-2 sm:grid-cols-4 gap-1 border-b border-slate-800 bg-slate-950/95 p-1 text-[11px] font-semibold">
         <button
@@ -497,7 +497,7 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
       )}
 
       {/* Main Form Fields */}
-      <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+      <div className="min-h-0 p-4 space-y-4 lg:flex-1 lg:overflow-y-auto">
         {activeTool === "continue" && (
           <div className="space-y-4">
             {/* Mode Switcher */}
