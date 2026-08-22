@@ -229,18 +229,18 @@ test("OpenRouter falls back when Ox Alpha returns HTTP 200 without visible conte
   assert.deepEqual(calls, ["stealth/ox-alpha", "openrouter/free"]);
 });
 
-test("OpenRouter ignores a stale manual model and always begins with Ox Alpha", async () => {
+test("OpenRouter sends the selected literary profile instead of a hidden default", async () => {
   let requestedModel = "";
   await withMockFetch(async (_url, init) => {
     requestedModel = JSON.parse(String(init?.body || "{}")).model;
     return new Response(JSON.stringify({ choices: [{ message: { content: "Автоматический выбор." } }] }), { status: 200 });
   }, () => directGenerate({
     provider: "openrouter",
-    model: "vendor/obsolete-manual-model",
+    model: "mistralai/mistral-small-creative",
     apiKeys: { openrouter: "sk-or-test" },
     prompt: "Тест автоматической модели.",
   }));
-  assert.equal(requestedModel, "stealth/ox-alpha");
+  assert.equal(requestedModel, "mistralai/mistral-small-creative");
 });
 
 test("NVIDIA retries once with a smaller output budget after HTTP 504", async () => {
@@ -339,7 +339,7 @@ test("NVIDIA falls through to Groq after all bounded NVIDIA model attempts fail"
     "meta/llama-3.3-70b-instruct",
     "deepseek-ai/deepseek-v4-flash-0731",
     "z-ai/glm-5.2",
-    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
   ]);
   assert.equal(calls.at(-1)?.url, "https://api.groq.com/openai/v1/chat/completions");
 });
@@ -430,4 +430,51 @@ test("full chapter keeps the assembled draft when humanize pass is much shorter"
   assert.equal(payload.chapterWords, 3500);
   assert.equal(payload.result.includes("фрагмент"), true);
   assert.equal(payload.result.includes("Слишком короткая редактура."), false);
+});
+
+test("Gemini sends the selected literary profile to its matching endpoint", async () => {
+  let requestedUrl = "";
+  await withMockFetch(async (url) => {
+    requestedUrl = url;
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Текст Gemini." }] } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "gemini",
+    model: "gemini-3.1-pro-preview",
+    apiKeys: { gemini: "AIza-test" },
+    prompt: "Тест профиля Gemini.",
+  }));
+  assert.equal(requestedUrl.includes("models/gemini-3.1-pro-preview:generateContent"), true);
+});
+
+test("Groq sends the selected literary profile to its OpenAI-compatible endpoint", async () => {
+  let requestedModel = "";
+  await withMockFetch(async (_url, init) => {
+    requestedModel = JSON.parse(String(init?.body || "{}")).model;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Текст Groq." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "groq",
+    model: "qwen/qwen3.6-27b",
+    apiKeys: { groq: "gsk-test" },
+    prompt: "Тест профиля Groq.",
+  }));
+  assert.equal(requestedModel, "qwen/qwen3.6-27b");
+});
+
+test("a selected OpenRouter literary profile falls back to free-router when unavailable", async () => {
+  const calls: string[] = [];
+  const text = await withMockFetch(async (_url, init) => {
+    const model = JSON.parse(String(init?.body || "{}")).model;
+    calls.push(model);
+    if (model === "mistralai/mistral-small-creative") {
+      return new Response(JSON.stringify({ error: { message: "Model unavailable" } }), { status: 404 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Текст от free-router." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "openrouter",
+    model: "mistralai/mistral-small-creative",
+    apiKeys: { openrouter: "sk-or-test" },
+    prompt: "Тест fallback профиля.",
+  }));
+  assert.equal(text, "Текст от free-router.");
+  assert.deepEqual(calls, ["mistralai/mistral-small-creative", "openrouter/free"]);
 });

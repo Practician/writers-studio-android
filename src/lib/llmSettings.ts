@@ -16,9 +16,33 @@ const PROVIDER_LS = "writers_studio_llm_provider";
 const KEYS_LS = "writers_studio_llm_keys_v1";
 const OPENROUTER_MODEL_LS = "writers_studio_openrouter_model_v1";
 const NVIDIA_MODEL_LS = "writers_studio_nvidia_model_v1";
+const GEMINI_MODEL_LS = "writers_studio_gemini_model_v1";
+const GROQ_MODEL_LS = "writers_studio_groq_model_v1";
 export const DEFAULT_OPENROUTER_MODEL = "stealth/ox-alpha";
+export const DEFAULT_GEMINI_MODEL = "gemini-3.7-flash";
+export const DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b";
 /** Литературный профиль: первый в цепочке локального RU-бенчмарка основного приложения. */
 export const DEFAULT_NVIDIA_MODEL = "deepseek-ai/deepseek-v4-flash-0731";
+export type LiteraryModelProfile = { id: string; label: string; description: string };
+
+export const GEMINI_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
+  { id: DEFAULT_GEMINI_MODEL, label: "Литературный авто — Gemini 3.7 Flash", description: "Рекомендуемый быстрый профиль для русской прозы и продолжения сцен." },
+  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro — глубокая редактура", description: "Вариант для сложной композиции; preview-модель может иметь отдельные лимиты." },
+  { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash — баланс", description: "Стабильный баланс между темпом, связностью и стоимостью." },
+];
+
+export const GROQ_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
+  { id: DEFAULT_GROQ_MODEL, label: "Литературный авто — GPT-OSS 120B", description: "Рекомендуемый мощный текстовый профиль Groq для русской прозы." },
+  { id: "qwen/qwen3.6-27b", label: "Qwen 3.6 27B — диалоги и стиль", description: "Альтернатива для вариативных диалогов; preview-модель может иметь отдельные лимиты." },
+  { id: "openai/gpt-oss-20b", label: "GPT-OSS 20B — быстрые правки", description: "Быстрый вариант для продолжений, редакторских и коротких задач." },
+];
+
+export const OPENROUTER_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
+  { id: DEFAULT_OPENROUTER_MODEL, label: "Авто — Ox Alpha", description: "Текущий профиль OpenRouter; при пустом ответе или квоте APK сам перейдёт на бесплатный router." },
+  { id: "mistralai/mistral-small-creative", label: "Mistral Small Creative — художественный", description: "Специализированный вариант для повествования, диалогов и ролевого текста." },
+  { id: "openrouter/free", label: "Бесплатный router — OpenRouter", description: "OpenRouter сам выбирает доступную бесплатную текстовую модель; состав пула меняется." },
+];
+
 export const NVIDIA_LITERARY_MODELS = [
   {
     id: DEFAULT_NVIDIA_MODEL,
@@ -90,17 +114,46 @@ export function saveOpenrouterModel(model: string): void {
 }
 
 /** Идентификатор NVIDIA-модели не секретен; ключи по-прежнему находятся в Keystore. */
+function loadProfile(storageKey: string, profiles: readonly LiteraryModelProfile[], fallback: string): string {
+  const saved = localStorage.getItem(storageKey)?.trim();
+  return profiles.some((profile) => profile.id === saved) ? saved! : fallback;
+}
+
+function saveProfile(storageKey: string, profiles: readonly LiteraryModelProfile[], fallback: string, model: string): void {
+  const normalized = model.trim();
+  localStorage.setItem(storageKey, profiles.some((profile) => profile.id === normalized) ? normalized : fallback);
+}
+
 export function loadNvidiaModel(): string {
-  const saved = localStorage.getItem(NVIDIA_MODEL_LS)?.trim();
-  return NVIDIA_LITERARY_MODELS.some((model) => model.id === saved) ? saved! : DEFAULT_NVIDIA_MODEL;
+  return loadProfile(NVIDIA_MODEL_LS, NVIDIA_LITERARY_MODELS, DEFAULT_NVIDIA_MODEL);
 }
 
 export function saveNvidiaModel(model: string): void {
-  const normalized = model.trim();
-  const selected = NVIDIA_LITERARY_MODELS.some((item) => item.id === normalized)
-    ? normalized
-    : DEFAULT_NVIDIA_MODEL;
-  localStorage.setItem(NVIDIA_MODEL_LS, selected);
+  saveProfile(NVIDIA_MODEL_LS, NVIDIA_LITERARY_MODELS, DEFAULT_NVIDIA_MODEL, model);
+}
+
+export function loadGeminiModel(): string {
+  return loadProfile(GEMINI_MODEL_LS, GEMINI_LITERARY_MODELS, DEFAULT_GEMINI_MODEL);
+}
+
+export function saveGeminiModel(model: string): void {
+  saveProfile(GEMINI_MODEL_LS, GEMINI_LITERARY_MODELS, DEFAULT_GEMINI_MODEL, model);
+}
+
+export function loadGroqModel(): string {
+  return loadProfile(GROQ_MODEL_LS, GROQ_LITERARY_MODELS, DEFAULT_GROQ_MODEL);
+}
+
+export function saveGroqModel(model: string): void {
+  saveProfile(GROQ_MODEL_LS, GROQ_LITERARY_MODELS, DEFAULT_GROQ_MODEL, model);
+}
+
+export function loadOpenrouterLiteraryModel(): string {
+  return loadProfile(OPENROUTER_MODEL_LS, OPENROUTER_LITERARY_MODELS, DEFAULT_OPENROUTER_MODEL);
+}
+
+export function saveOpenrouterLiteraryModel(model: string): void {
+  saveProfile(OPENROUTER_MODEL_LS, OPENROUTER_LITERARY_MODELS, DEFAULT_OPENROUTER_MODEL, model);
 }
 
 function normalizeKeys(value: Partial<StoredLlmKeys> | null | undefined): StoredLlmKeys {
@@ -205,14 +258,14 @@ export function defaultModelForProvider(
     return status?.nvidiaDefaultModel || DEFAULT_NVIDIA_MODEL;
   }
   if (provider === "groq") {
-    return status?.groqDefaultModel || "llama-3.3-70b-versatile";
+    return status?.groqDefaultModel || DEFAULT_GROQ_MODEL;
   }
   if (provider === "openrouter") {
     return status?.openrouterDefaultModel || DEFAULT_OPENROUTER_MODEL;
   }
-  if (provider === "gemini") return "gemini-3.5-flash";
-  // auto — Gemini первым: лучший результат максимального humanize-бенчмарка.
-  return "gemini-3.5-flash";
+  if (provider === "gemini") return DEFAULT_GEMINI_MODEL;
+  // Автовыбор использует актуальный литературный профиль Gemini, если он выбран первым.
+  return DEFAULT_GEMINI_MODEL;
 }
 
 export function providerLabel(provider: LlmProviderChoice): string {

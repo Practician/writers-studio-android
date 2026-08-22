@@ -46,8 +46,14 @@ import { loadGlobalAuthorProfile, saveGlobalAuthorProfile } from "./lib/authorSt
 import { isAutonomousApk } from "./lib/directLlmClient";
 import {
   defaultModelForProvider,
+  GEMINI_LITERARY_MODELS,
+  GROQ_LITERARY_MODELS,
+  loadGeminiModel,
+  loadGroqModel,
   loadNvidiaModel,
+  loadOpenrouterLiteraryModel,
   NVIDIA_LITERARY_MODELS,
+  OPENROUTER_LITERARY_MODELS,
   loadLlmKeys,
   loadStoredLlmKeys,
   loadLlmProvider,
@@ -55,7 +61,10 @@ import {
   providerLabel,
   saveLlmKeys,
   saveLlmProvider,
+  saveGeminiModel,
+  saveGroqModel,
   saveNvidiaModel,
+  saveOpenrouterLiteraryModel,
   type LlmProviderChoice,
   type StoredLlmKeys,
 } from "./lib/llmSettings";
@@ -95,6 +104,12 @@ export default function App() {
   const [llmKeysReady, setLlmKeysReady] = useState(() => !isAutonomousApk());
   const [nvidiaModel, setNvidiaModel] = useState(() => loadNvidiaModel());
   const [nvidiaModelDraft, setNvidiaModelDraft] = useState(() => loadNvidiaModel());
+  const [geminiModel, setGeminiModel] = useState(() => loadGeminiModel());
+  const [geminiModelDraft, setGeminiModelDraft] = useState(() => loadGeminiModel());
+  const [groqModel, setGroqModel] = useState(() => loadGroqModel());
+  const [groqModelDraft, setGroqModelDraft] = useState(() => loadGroqModel());
+  const [openrouterModel, setOpenrouterModel] = useState(() => loadOpenrouterLiteraryModel());
+  const [openrouterModelDraft, setOpenrouterModelDraft] = useState(() => loadOpenrouterLiteraryModel());
   const [openrouterFallbackNotice, setOpenrouterFallbackNotice] = useState<string | null>(null);
   const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [showAuthorProfile, setShowAuthorProfile] = useState(false);
@@ -256,13 +271,16 @@ export default function App() {
     return () => window.removeEventListener("writers-studio-api-key-rotation", handleKeyRotation);
   }, []);
 
-  // OpenRouter не требует ручного model id: стартуем с Ox Alpha, а мост сам
-  // использует openrouter/free, если Ox Alpha вернёт квоту или пустой ответ.
+  // Модели выбираются только из встроенных литературных профилей, без ручного model id.
   const selectedModel = llmProvider === "openrouter"
-    ? "stealth/ox-alpha"
+    ? openrouterModel
     : llmProvider === "nvidia"
       ? nvidiaModel
-      : defaultModelForProvider(llmProvider, llmStatus);
+      : llmProvider === "gemini"
+        ? geminiModel
+        : llmProvider === "groq"
+          ? groqModel
+          : defaultModelForProvider(llmProvider, llmStatus);
   const llmApiFields = useMemo(
     () => llmRequestFields(llmProvider, llmKeys, llmProvider === "auto" ? undefined : selectedModel),
     [llmProvider, llmKeys, selectedModel],
@@ -281,14 +299,23 @@ export default function App() {
   const openLlmSettings = () => {
     setLlmKeysDraft({ ...llmKeys });
     setNvidiaModelDraft(nvidiaModel);
+    setGeminiModelDraft(geminiModel);
+    setGroqModelDraft(groqModel);
+    setOpenrouterModelDraft(openrouterModel);
     setShowLlmSettings(true);
   };
 
   const saveLlmSettings = () => {
     saveLlmKeys(llmKeysDraft);
     saveNvidiaModel(nvidiaModelDraft);
+    saveGeminiModel(geminiModelDraft);
+    saveGroqModel(groqModelDraft);
+    saveOpenrouterLiteraryModel(openrouterModelDraft);
     setLlmKeys({ ...llmKeysDraft });
     setNvidiaModel(nvidiaModelDraft);
+    setGeminiModel(geminiModelDraft);
+    setGroqModel(groqModelDraft);
+    setOpenrouterModel(openrouterModelDraft);
     setShowLlmSettings(false);
   };
 
@@ -1701,7 +1728,7 @@ export default function App() {
           id="mobile-export-chapter-doc-btn"
         >
           <FileText className="h-4 w-4" />
-          <span>Глава Word</span>
+          <span>Глава в Word</span>
         </button>
         <button
           type="button"
@@ -1712,7 +1739,7 @@ export default function App() {
           id="mobile-export-book-doc-btn"
         >
           <Download className="h-4 w-4" />
-          <span>Вся книга Word</span>
+          <span>Вся книга в Word</span>
         </button>
       </div>
 
@@ -2255,26 +2282,36 @@ export default function App() {
                 );
               })}
 
-              <div className="rounded-xl border border-orange-500/25 bg-orange-950/20 p-3.5 space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <label className="font-semibold text-slate-100 text-[12px]">NVIDIA для русской прозы</label>
-                  <span className="text-[9px] px-1.5 py-0.5 rounded-md border border-orange-800/40 bg-orange-950/50 text-orange-200">профиль модели</span>
-                </div>
-                <select
-                  value={nvidiaModelDraft}
-                  onChange={(event) => setNvidiaModelDraft(event.target.value)}
-                  className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-orange-500/70 focus:ring-1 focus:ring-orange-500/20 text-[11px]"
-                  id="nvidia-literary-model-select"
-                >
-                  {NVIDIA_LITERARY_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+              <div className="rounded-xl border border-blue-500/25 bg-blue-950/20 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2"><label className="font-semibold text-slate-100 text-[12px]">Gemini для русской прозы</label><span className="text-[9px] px-1.5 py-0.5 rounded-md border border-blue-800/40 bg-blue-950/50 text-blue-200">профиль модели</span></div>
+                <select value={geminiModelDraft} onChange={(event) => setGeminiModelDraft(event.target.value)} className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-blue-500/70 focus:ring-1 focus:ring-blue-500/20 text-[11px]" id="gemini-literary-model-select">
+                  {GEMINI_LITERARY_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
                 </select>
-                <p className="text-[10px] leading-relaxed text-slate-400">
-                  {NVIDIA_LITERARY_MODELS.find((model) => model.id === nvidiaModelDraft)?.description} При ошибке 502/503/504 APK по-прежнему переберёт резервные NVIDIA-модели.
-                </p>
+                <p className="text-[10px] leading-relaxed text-slate-400">{GEMINI_LITERARY_MODELS.find((model) => model.id === geminiModelDraft)?.description}</p>
               </div>
 
-              <div className="rounded-xl border border-violet-500/25 bg-violet-950/20 p-3.5 text-[10px] leading-relaxed text-violet-100">
-                <strong>Модель OpenRouter выбирается автоматически.</strong> Приложение сначала использует Ox Alpha. Если она вернёт ошибку квоты или пустой ответ, запрос автоматически повторяется через <code className="text-violet-200">openrouter/free</code>. Вручную ничего вводить не нужно.
+              <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/20 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2"><label className="font-semibold text-slate-100 text-[12px]">Groq для русской прозы</label><span className="text-[9px] px-1.5 py-0.5 rounded-md border border-emerald-800/40 bg-emerald-950/50 text-emerald-200">профиль модели</span></div>
+                <select value={groqModelDraft} onChange={(event) => setGroqModelDraft(event.target.value)} className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-emerald-500/70 focus:ring-1 focus:ring-emerald-500/20 text-[11px]" id="groq-literary-model-select">
+                  {GROQ_LITERARY_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+                </select>
+                <p className="text-[10px] leading-relaxed text-slate-400">{GROQ_LITERARY_MODELS.find((model) => model.id === groqModelDraft)?.description}</p>
+              </div>
+
+              <div className="rounded-xl border border-orange-500/25 bg-orange-950/20 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2"><label className="font-semibold text-slate-100 text-[12px]">NVIDIA для русской прозы</label><span className="text-[9px] px-1.5 py-0.5 rounded-md border border-orange-800/40 bg-orange-950/50 text-orange-200">профиль модели</span></div>
+                <select value={nvidiaModelDraft} onChange={(event) => setNvidiaModelDraft(event.target.value)} className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-orange-500/70 focus:ring-1 focus:ring-orange-500/20 text-[11px]" id="nvidia-literary-model-select">
+                  {NVIDIA_LITERARY_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+                </select>
+                <p className="text-[10px] leading-relaxed text-slate-400">{NVIDIA_LITERARY_MODELS.find((model) => model.id === nvidiaModelDraft)?.description} При ошибке 502/503/504 APK по-прежнему переберёт резервные NVIDIA-модели.</p>
+              </div>
+
+              <div className="rounded-xl border border-violet-500/25 bg-violet-950/20 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2"><label className="font-semibold text-slate-100 text-[12px]">OpenRouter для русской прозы</label><span className="text-[9px] px-1.5 py-0.5 rounded-md border border-violet-800/40 bg-violet-950/50 text-violet-200">профиль модели</span></div>
+                <select value={openrouterModelDraft} onChange={(event) => setOpenrouterModelDraft(event.target.value)} className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-violet-500/70 focus:ring-1 focus:ring-violet-500/20 text-[11px]" id="openrouter-literary-model-select">
+                  {OPENROUTER_LITERARY_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+                </select>
+                <p className="text-[10px] leading-relaxed text-slate-400">{OPENROUTER_LITERARY_MODELS.find((model) => model.id === openrouterModelDraft)?.description}</p>
               </div>
 
               <div className="rounded-xl border border-sky-500/25 bg-sky-950/20 p-3.5 space-y-2.5">

@@ -172,8 +172,8 @@ function providerLabel(provider: Exclude<DirectProvider, "auto">): string {
 }
 
 function defaultModel(provider: Exclude<DirectProvider, "auto">): string {
-  if (provider === "gemini") return "gemini-3.5-flash";
-  if (provider === "groq") return "llama-3.3-70b-versatile";
+  if (provider === "gemini") return "gemini-3.7-flash";
+  if (provider === "groq") return "openai/gpt-oss-120b";
   if (provider === "nvidia") return "deepseek-ai/deepseek-v4-flash-0731";
   return "stealth/ox-alpha";
 }
@@ -215,10 +215,8 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   const requestedProvider = request.provider || "auto";
   const provider = selectProvider(requestedProvider, request.apiKeys || {}, request.model);
   // Автовыбор определяет и провайдера, и совместимую с ним модель.
-  // Это защищает APK от старого model id, сохранённого для другого API.
-  // Идентификатор OpenRouter не вводится пользователем: всегда начинаем с Ox Alpha.
-  // Старые сохранённые model id намеренно игнорируются, а fallback выполняется внутри моста.
-  const model = requestedProvider === "auto" || provider === "openrouter"
+  // Явно выбранный провайдер получает только один из встроенных литературных профилей.
+  const model = requestedProvider === "auto"
     ? defaultModel(provider)
     : request.model || defaultModel(provider);
   const system = request.system || "Ты внимательный литературный помощник. Отвечай по-русски.";
@@ -331,27 +329,28 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       }
     }
 
-    // Ox Alpha может вернуть HTTP 200, но израсходовать лимит на рассуждение и не
-    // отдать видимый content (finish_reason=length). Для автора это такой же неуспех,
-    // как 402: пробуем free-router, а исходную диагностику оставляем в журнале.
-    const oxAlphaNeedsFallback = provider === "openrouter"
-      && model === OX_ALPHA_MODEL
-      && (response.status === 402 || (response.ok && !hasVisibleResponseText(payload)));
-    if (oxAlphaNeedsFallback) {
-      if (response.ok) {
-        emitApiTrace(traceFor(
-          provider,
-          OX_ALPHA_MODEL,
-          key,
-          index + 1,
-          keyPool.length,
-          response.status,
-          "Ox Alpha не передала видимый текст; переключение на openrouter/free.",
-          { chars: 0, finishReason: finishReasonFor(payload) },
-        ));
-      }
+    // Выбранный профиль OpenRouter может вернуть 200 без видимого content или быть
+    // временно недоступным. Для автора это неуспех: пробуем free-router и оставляем
+    // исходную диагностику в журнале. Сам free-router повторно не переключаем.
+    const openrouterNeedsFallback = provider === "openrouter"
+      && model !== OPENROUTER_FREE_ROUTER
+      && (response.status === 402 || response.status === 404 || response.status === 502 || response.status === 503 || response.status === 504 || (response.ok && !hasVisibleResponseText(payload)));
+    if (openrouterNeedsFallback) {
+      const reason = response.ok
+        ? `${model} не передала видимый текст; переключение на openrouter/free.`
+        : `${model} недоступна (HTTP ${response.status}); переключение на openrouter/free.`;
+      emitApiTrace(traceFor(
+        provider,
+        model,
+        key,
+        index + 1,
+        keyPool.length,
+        response.status,
+        reason,
+        { chars: 0, finishReason: finishReasonFor(payload) },
+      ));
       effectiveModel = OPENROUTER_FREE_ROUTER;
-      notifyOpenRouterFallback(OX_ALPHA_MODEL, OPENROUTER_FREE_ROUTER);
+      notifyOpenRouterFallback(model, OPENROUTER_FREE_ROUTER);
       response = await fetch(OPENROUTER_URL, {
         method: "POST",
         signal: request.signal,
