@@ -20,6 +20,13 @@ const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+const OX_ALPHA_MODEL = "stealth/ox-alpha";
+const OPENROUTER_FREE_ROUTER = "openrouter/free";
+
+function notifyOpenRouterFallback(from: string, to: string): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("writers-studio-openrouter-fallback", { detail: { from, to } }));
+}
 
 export function isAutonomousApk(): boolean {
   return Capacitor.isNativePlatform() || import.meta.env.VITE_AUTONOMOUS === "true";
@@ -79,6 +86,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   const system = request.system || "Ты внимательный литературный помощник. Отвечай по-русски.";
 
   let response: Response;
+  let payload: any;
   if (provider === "gemini") {
     response = await fetch(`${GEMINI_URL}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(request.apiKeys?.gemini || "")}`, {
       method: "POST",
@@ -110,7 +118,35 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     });
   }
 
-  const payload = await response.json().catch(() => ({}));
+  payload = await response.json().catch(() => ({}));
+
+  // Ox Alpha отмечена OpenRouter как временно бесплатная, но часть ключей может
+  // получить общий 402. В этом случае автоматически пробуем официальный free-router.
+  if (
+    provider === "openrouter"
+    && model === OX_ALPHA_MODEL
+    && response.status === 402
+  ) {
+    response = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      signal: request.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${request.apiKeys?.openrouter || ""}`,
+        "HTTP-Referer": "https://github.com/Practician/writers-studio-android",
+        "X-OpenRouter-Title": "Writers Studio Android",
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_FREE_ROUTER,
+        messages: [{ role: "system", content: system }, { role: "user", content: request.prompt }],
+        temperature: request.temperature ?? 0.75,
+        ...(request.json ? { response_format: { type: "json_object" } } : {}),
+      }),
+    });
+    payload = await response.json().catch(() => ({}));
+    if (response.ok) notifyOpenRouterFallback(OX_ALPHA_MODEL, OPENROUTER_FREE_ROUTER);
+  }
+
   if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Ошибка ${providerLabel(provider)} (${response.status})`);
   return responseText(payload);
 }

@@ -92,6 +92,7 @@ export default function App() {
   const [llmProvider, setLlmProvider] = useState<LlmProviderChoice>(() => loadLlmProvider());
   const [llmKeys, setLlmKeys] = useState<StoredLlmKeys>(() => loadLlmKeys());
   const [openrouterModel, setOpenrouterModel] = useState(() => loadOpenrouterModel());
+  const [openrouterFallbackNotice, setOpenrouterFallbackNotice] = useState<string | null>(null);
   const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [showAuthorProfile, setShowAuthorProfile] = useState(false);
   const [showAgent, setShowAgent] = useState(false);
@@ -146,6 +147,19 @@ export default function App() {
         if (!cancelled) setLlmStatus(null);
       });
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const handleOpenRouterFallback = (event: Event) => {
+      const detail = (event as CustomEvent<{ from?: string; to?: string }>).detail;
+      if (!detail?.to) return;
+      saveOpenrouterModel(detail.to);
+      setOpenrouterModel(detail.to);
+      setOpenrouterModelDraft(detail.to);
+      setOpenrouterFallbackNotice(`Ox Alpha недоступна для этого ключа. Приложение автоматически выбрало бесплатную модель OpenRouter.`);
+    };
+    window.addEventListener("writers-studio-openrouter-fallback", handleOpenRouterFallback);
+    return () => window.removeEventListener("writers-studio-openrouter-fallback", handleOpenRouterFallback);
   }, []);
 
   const selectedModel = llmProvider === "openrouter"
@@ -1550,6 +1564,14 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {openrouterFallbackNotice && (
+        <div role="status" className="fixed inset-x-3 top-3 z-[70] mx-auto flex max-w-lg items-start gap-3 rounded-xl border border-amber-500/40 bg-slate-950/95 p-3 text-xs text-amber-100 shadow-2xl">
+          <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+          <p className="flex-1 leading-relaxed">{openrouterFallbackNotice}</p>
+          <button type="button" onClick={() => setOpenrouterFallbackNotice(null)} className="min-h-8 min-w-8 rounded-lg text-amber-200 hover:bg-amber-500/15" aria-label="Закрыть уведомление"><X className="h-4 w-4" /></button>
+        </div>
+      )}
 
       {/* Main Workspace Frame */}
       <div className="flex flex-1 overflow-hidden w-full relative pb-[4.5rem] lg:pb-0">
