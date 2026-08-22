@@ -74,6 +74,7 @@ test("direct bridge preserves provider HTTP status and returns non-secret diagno
     keyIndex: 1,
     keyCount: 1,
     status: 404,
+    outputChars: 0,
     message: "Маршрут не найден",
   });
   assert.equal(JSON.stringify(payload).includes("very-secret"), false);
@@ -127,4 +128,65 @@ test("direct bridge forwards AbortSignal to the provider request", async () => {
   assert.equal(wasAborted, true);
   assert.equal(response.status, 400);
   assert.equal(payload.error, "Cancelled");
+});
+
+test("OpenRouter accepts an array-shaped message content and returns its text", async () => {
+  const text = await withMockFetch(async () => new Response(JSON.stringify({
+    choices: [{
+      finish_reason: "stop",
+      message: { content: [{ type: "text", text: "Первая часть. " }, { type: "text", text: "Вторая часть." }] },
+    }],
+  }), { status: 200 }), () => directGenerate({
+    provider: "openrouter",
+    model: "stealth/ox-alpha",
+    apiKeys: { openrouter: "sk-or-test" },
+    prompt: "Тест составного content.",
+  }));
+  assert.equal(text, "Первая часть. Вторая часть.");
+});
+
+test("HTTP 200 without a text field becomes a visible local error with zero-output diagnostics", async () => {
+  const response = await withMockFetch(async () => new Response(JSON.stringify({
+    choices: [{ finish_reason: "stop", message: { content: null } }],
+  }), { status: 200 }), () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "continue",
+      llmApiFields: { llmProvider: "openrouter", apiKeys: { openrouter: "sk-or-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(response.status, 502);
+  assert.equal(payload.diagnostics.status, 200);
+  assert.equal(payload.diagnostics.outputChars, 0);
+  assert.equal(payload.error.includes("не передал текст"), true);
+});
+
+test("autonomous writer applies a second humanize pass after drafting prose", async () => {
+  const prompts: string[] = [];
+  const response = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    prompts.push(body.messages?.[1]?.content || "");
+    const text = prompts.length === 1 ? "Черновик с ровным ритмом." : "Живой текст с неровным ритмом и деталью.";
+    return new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "continue",
+      text: "Начало сцены.",
+      humanize: true,
+      humanizeDepth: "maximum",
+      authorSample: "Авторский образец с конкретной интонацией. ".repeat(20),
+      voiceSheet: { summary: "Первое лицо, сухая наблюдательность.", voiceRules: ["Больше предметной конкретики"], avoid: ["Не делать выводов за читателя"] },
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.result, "Живой текст с неровным ритмом и деталью.");
+  assert.equal(payload.humanizeApplied, true);
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[0].includes("РЕЖИМ ОЧЕЛОВЕЧИВАНИЯ (MAXIMUM)"), true);
+  assert.equal(prompts[1].includes("ЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ"), true);
+  assert.equal(prompts[1].includes("Черновик с ровным ритмом."), true);
 });

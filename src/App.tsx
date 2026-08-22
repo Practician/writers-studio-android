@@ -183,16 +183,19 @@ export default function App() {
     const handleApiTrace = (event: Event) => {
       const detail = (event as CustomEvent<{
         provider?: string; model?: string; endpoint?: string; keyPresent?: boolean;
-        keySuffix?: string; keyIndex?: number; keyCount?: number; status?: number; message?: string;
+        keySuffix?: string; keyIndex?: number; keyCount?: number; status?: number;
+        outputChars?: number; finishReason?: string; message?: string;
       }>).detail;
       if (!detail?.provider || !detail.model || !detail.endpoint) return;
       const key = detail.keyPresent
         ? `ключ ${detail.keyIndex || 1}/${detail.keyCount || 1} (…${detail.keySuffix || "????"})`
         : "ключ не передан";
       const status = detail.status ? `HTTP ${detail.status}` : "без HTTP-статуса";
-      const message = [detail.endpoint, `модель ${detail.model}`, key, status, detail.message].filter(Boolean).join(" · ");
+      const output = typeof detail.outputChars === "number" ? `ответ ${detail.outputChars} символов` : null;
+      const finish = detail.finishReason ? `завершение ${detail.finishReason}` : null;
+      const message = [detail.endpoint, `модель ${detail.model}`, key, status, output, finish, detail.message].filter(Boolean).join(" · ");
       setLlmLogs((prev) => [...prev, {
-        level: detail.status && detail.status >= 400 ? "error" : "success",
+        level: detail.status && (detail.status >= 400 || detail.outputChars === 0) ? "error" : "success",
         provider: detail.provider,
         message,
         ts: Date.now(),
@@ -202,6 +205,23 @@ export default function App() {
     window.addEventListener("writers-studio-api-trace", handleApiTrace);
     return () => window.removeEventListener("writers-studio-api-trace", handleApiTrace);
   }, []);
+
+  useEffect(() => {
+    if (!isAutonomousApk()) return;
+    const handleHumanizePass = (event: Event) => {
+      const detail = (event as CustomEvent<{ depth?: string; beforeChars?: number; afterChars?: number }>).detail;
+      if (!detail?.depth || typeof detail.beforeChars !== "number" || typeof detail.afterChars !== "number") return;
+      setLlmLogs((prev) => [...prev, {
+        level: "success",
+        provider: llmProvider === "auto" ? undefined : llmProvider,
+        message: `Очеловечивание ${detail.depth}: отдельный литературный проход выполнен (${detail.beforeChars} → ${detail.afterChars} символов).`,
+        ts: Date.now(),
+      }].slice(-40));
+      setShowLlmLog(true);
+    };
+    window.addEventListener("writers-studio-humanize-pass", handleHumanizePass);
+    return () => window.removeEventListener("writers-studio-humanize-pass", handleHumanizePass);
+  }, [llmProvider]);
 
   useEffect(() => {
     if (!isAutonomousApk()) return;

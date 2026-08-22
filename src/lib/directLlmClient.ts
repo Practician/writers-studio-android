@@ -34,6 +34,8 @@ type ApiTrace = {
   keyIndex?: number;
   keyCount?: number;
   status?: number;
+  outputChars?: number;
+  finishReason?: string;
   message?: string;
 };
 
@@ -66,7 +68,7 @@ function emitApiTrace(trace: ApiTrace): void {
   window.dispatchEvent(new CustomEvent("writers-studio-api-trace", { detail: trace }));
 }
 
-function traceFor(provider: Exclude<DirectProvider, "auto">, model: string, key: string, keyIndex: number, keyCount: number, status?: number, message?: string): ApiTrace {
+function traceFor(provider: Exclude<DirectProvider, "auto">, model: string, key: string, keyIndex: number, keyCount: number, status?: number, message?: string, output?: { chars: number; finishReason?: string }): ApiTrace {
   const url = new URL(endpointFor(provider, model, key));
   return {
     provider,
@@ -77,6 +79,7 @@ function traceFor(provider: Exclude<DirectProvider, "auto">, model: string, key:
     keyIndex,
     keyCount,
     ...(status !== undefined ? { status } : {}),
+    ...(output ? { outputChars: output.chars, ...(output.finishReason ? { finishReason: output.finishReason } : {}) } : {}),
     ...(message ? { message: String(message).slice(0, 300) } : {}),
   };
 }
@@ -89,6 +92,11 @@ function notifyOpenRouterFallback(from: string, to: string): void {
 function notifyApiKeyRotation(provider: Exclude<DirectProvider, "auto">, from: number, to: number, total: number, status: number): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent("writers-studio-api-key-rotation", { detail: { provider, from, to, total, status } }));
+}
+
+function notifyHumanizePass(depth: string, beforeChars: number, afterChars: number): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("writers-studio-humanize-pass", { detail: { depth, beforeChars, afterChars } }));
 }
 
 function shouldRotateKey(status: number): boolean {
@@ -140,13 +148,29 @@ function defaultModel(provider: Exclude<DirectProvider, "auto">): string {
   return "stealth/ox-alpha";
 }
 
+function contentToText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(contentToText).join("");
+  if (content && typeof content === "object") {
+    const value = content as { text?: unknown; content?: unknown };
+    return contentToText(value.text ?? value.content);
+  }
+  return "";
+}
+
 function responseText(payload: any): string {
-  const text = payload?.choices?.[0]?.message?.content
-    || payload?.candidates?.[0]?.content?.parts?.map((part: any) => part.text || "").join("")
-    || payload?.output_text
-    || "";
-  if (!text.trim()) throw new Error("Провайдер вернул пустой ответ.");
+  const choice = payload?.choices?.[0];
+  const text = contentToText(choice?.message?.content)
+    || contentToText(choice?.text)
+    || contentToText(payload?.candidates?.[0]?.content?.parts)
+    || contentToText(payload?.output_text);
+  if (!text.trim()) throw new Error("Провайдер вернул HTTP 200, но не передал текст ответа.");
   return text.trim();
+}
+
+function finishReasonFor(payload: any): string | undefined {
+  const reason = payload?.choices?.[0]?.finish_reason || payload?.candidates?.[0]?.finishReason;
+  return typeof reason === "string" && reason.trim() ? reason.trim() : undefined;
 }
 
 export async function directGenerate(request: DirectRequest): Promise<string> {
@@ -156,7 +180,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   // Это защищает APK от старого model id, сохранённого для другого API.
   const model = requestedProvider === "auto" ? defaultModel(provider) : request.model || defaultModel(provider);
   const system = request.system || "Ты внимательный литературный помощник. Отвечай по-русски.";
-  const maxTokens = Math.max(128, Math.min(request.maxTokens ?? 2_048, 4_096));
+  const maxTokens = Math.max(128, Math.min(request.maxTokens ?? 2_048, 6_144));
   const keyPool = splitApiKeyPool(request.apiKeys?.[provider]);
 
   for (let index = 0; index < keyPool.length; index += 1) {
@@ -227,9 +251,29 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     }
 
     const providerMessage = payload?.error?.message || payload?.error || `Ошибка ${providerLabel(provider)} (${response.status})`;
-    const trace = traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, response.ok ? undefined : providerMessage);
+    if (response.ok) {
+      try {
+        const text = responseText(payload);
+        emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, undefined, { chars: text.length, finishReason: finishReasonFor(payload) }));
+        return text;
+      } catch (error: any) {
+        const trace = traceFor(
+          provider,
+          effectiveModel,
+          key,
+          index + 1,
+          keyPool.length,
+          response.status,
+          error?.message || "Успешный ответ без текста.",
+          { chars: 0, finishReason: finishReasonFor(payload) },
+        );
+        emitApiTrace(trace);
+        // У провайдера HTTP 200, но для UI это должна быть явная ошибка, а не пустой результат.
+        throw new DirectProviderError(String(trace.message), 502, trace);
+      }
+    }
+    const trace = traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, providerMessage, { chars: 0, finishReason: finishReasonFor(payload) });
     emitApiTrace(trace);
-    if (response.ok) return responseText(payload);
 
     if (index + 1 < keyPool.length && shouldRotateKey(response.status)) {
       notifyApiKeyRotation(provider, index + 1, index + 2, keyPool.length, response.status);
@@ -253,13 +297,35 @@ function compactContext(body: any): string {
     body?.canonDossier && `Канон: ${String(body.canonDossier).slice(0, 6000)}`,
     body?.authorSample && `Образец голоса: ${String(body.authorSample).slice(0, 8000)}`,
     body?.voiceSheet?.summary && `Паспорт голоса: ${body.voiceSheet.summary}`,
+    Array.isArray(body?.voiceSheet?.voiceRules) && `Правила голоса: ${body.voiceSheet.voiceRules.join("; ")}`,
+    Array.isArray(body?.voiceSheet?.avoid) && `Избегать в голосе: ${body.voiceSheet.avoid.join("; ")}`,
+    body?.adaptiveStyleGuidance && `Адаптивные правила стиля: ${String(body.adaptiveStyleGuidance).slice(0, 4000)}`,
   ].filter(Boolean);
   return parts.join("\n\n");
+}
+
+function humanizeDirective(body: any): string {
+  if (!body?.humanize) return "";
+  const depth = body?.humanizeDepth === "fast" || body?.humanizeDepth === "balanced" || body?.humanizeDepth === "maximum"
+    ? body.humanizeDepth
+    : "balanced";
+  const preset = body?.voicePreset ? `Ориентир голоса: ${body.voicePreset}.` : "";
+  return `\n\nРЕЖИМ ОЧЕЛОВЕЧИВАНИЯ (${depth.toUpperCase()}):
+- Пиши живой, неровный человеческий текст: чередуй короткие и длинные фразы, не делай абзацы одинаковыми.
+- Показывай эмоции через выбор, жест, предмет, телесное ощущение и действие; не называй эмоцию вместо сцены.
+- Убирай канцелярит, универсальные выводы, повторяющиеся зачины и шаблонные связки.
+- Сохраняй канон, факты, имена, точку зрения и события. Не объясняй применённые приёмы.
+- Образец автора и паспорт голоса выше важнее общих шаблонов. ${preset}`;
+}
+
+function needsHumanizePass(action: string, body: any): boolean {
+  return Boolean(body?.humanize) && ["continue", "generate_full_chapter", "improve", "rewrite_detector_segments"].includes(action);
 }
 
 function promptForAction(action: string, body: any): { system: string; prompt: string; json?: boolean } {
   const context = compactContext(body);
   const text = body?.text || body?.currentDraft || body?.sourceText || "";
+  const humanize = humanizeDirective(body);
   if (action === "editorial_review") {
     return {
       system: "Ты литературный редактор. Верни только JSON без markdown.",
@@ -279,8 +345,8 @@ function promptForAction(action: string, body: any): { system: string; prompt: s
   if (action === "evaluate_idea") return { system: "Ты опытный литературный редактор.", prompt: `${context}\n\nДай практическую оценку идеи: сильные стороны, риски, конкретные улучшения.` };
   if (action === "brainstorm") return { system: "Ты творческий соавтор.", prompt: `${context}\n\nПредложи свежие варианты для темы: ${body?.topic || body?.customPrompt || "следующей сцены"}. Дай несколько конкретных идей.` };
   if (action === "muse") return { system: "Ты Муза — бережный соавтор писателя.", prompt: `${context}\n\nОтветь на вопрос автора: ${body?.customPrompt || body?.prompt || "Помоги со следующей сценой."}` };
-  if (action === "improve" || action === "rewrite_detector_segments") return { system: "Ты бережный литературный редактор. Сохраняй события, имена и факты.", prompt: `${context}\n\nПерепиши текст по задаче «${body?.stylePreset || body?.customPrompt || "улучшить стиль"}». Верни только готовый текст.\n\nТекст:\n${text}` };
-  if (action === "continue" || action === "generate_full_chapter") return { system: "Ты пишешь художественную прозу по канону автора. Не объясняй свои действия.", prompt: `${context}\n\n${action === "continue" ? "Продолжи текущую сцену 4–7 содержательными абзацами, с действием, деталями и завершённым микроповоротом" : "Напиши полноценную художественную главу объёмом не менее 1 200 слов, со сценами, диалогами, конкретными деталями и завершённым поворотом"}. Учти пожелание: ${body?.customPrompt || "сохрани тон и канон"}.\n\nТекущий текст:\n${text}` };
+  if (action === "improve" || action === "rewrite_detector_segments") return { system: "Ты бережный литературный редактор. Сохраняй события, имена и факты.", prompt: `${context}${humanize}\n\nПерепиши текст по задаче «${body?.stylePreset || body?.customPrompt || "улучшить стиль"}». Верни только готовый текст.\n\nТекст:\n${text}` };
+  if (action === "continue" || action === "generate_full_chapter") return { system: "Ты пишешь художественную прозу по канону автора. Не объясняй свои действия.", prompt: `${context}${humanize}\n\n${action === "continue" ? "Продолжи текущую сцену 4–7 содержательными абзацами, с действием, деталями и завершённым микроповоротом" : "Напиши полноценную художественную главу объёмом 3 000–4 500 слов, с несколькими сценами, диалогами, конкретными деталями и завершённым поворотом. Не обрывай текст до достижения минимального объёма"}. Учти пожелание: ${body?.customPrompt || "сохрани тон и канон"}.\n\nТекущий текст:\n${text}` };
   return { system: "Ты литературный помощник.", prompt: `${context}\n\n${body?.customPrompt || "Помоги автору с текстом."}\n\n${text}` };
 }
 
@@ -313,8 +379,8 @@ function createVoiceSheet(text: string): AuthorVoiceSheet {
 }
 
 function maxTokensForAction(action?: string): number {
-  if (action === "generate_full_chapter") return 4_096;
-  if (action === "continue") return 2_048;
+  if (action === "generate_full_chapter") return 6_144;
+  if (action === "continue") return 2_560;
   if (action === "parse_import") return 3_072;
   return 2_048;
 }
@@ -362,10 +428,28 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
       return json({ result });
     }
     if (path.startsWith("/api/writer/ai")) {
-      const setup = promptForAction(body.action || "muse", body);
-      const text = await generate({ provider: credentials.provider, model: credentials.model, apiKeys: credentials.keys, prompt: setup.prompt, system: setup.system, json: setup.json });
-      if (body.action === "editorial_review") return json({ review: safeJson(text, { readiness: "Проверка готова", summary: text, checks: [], risks: [], nextStep: "Откройте результат и внесите правки." }) });
-      return json({ result: text, humanizeReport: null });
+      const action = body.action || "muse";
+      const setup = promptForAction(action, body);
+      let text = await generate({ provider: credentials.provider, model: credentials.model, apiKeys: credentials.keys, prompt: setup.prompt, system: setup.system, json: setup.json });
+      if (action === "editorial_review") return json({ review: safeJson(text, { readiness: "Проверка готова", summary: text, checks: [], risks: [], nextStep: "Откройте результат и внесите правки." }) });
+
+      const humanizeApplied = needsHumanizePass(action, body);
+      if (humanizeApplied) {
+        const depth = body?.humanizeDepth === "fast" || body?.humanizeDepth === "balanced" || body?.humanizeDepth === "maximum"
+          ? body.humanizeDepth
+          : "balanced";
+        const minWords = action === "generate_full_chapter" ? "3 000 слов" : "исходный объём";
+        const beforeChars = text.length;
+        text = await generate({
+          provider: credentials.provider,
+          model: credentials.model,
+          apiKeys: credentials.keys,
+          system: "Ты финальный литературный редактор. Верни только готовый русский художественный текст без комментариев.",
+          prompt: `${compactContext(body)}${humanizeDirective(body)}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости. Верни только готовую версию.`,
+        });
+        notifyHumanizePass(depth, beforeChars, text.length);
+      }
+      return json({ result: text, humanizeReport: null, humanizeApplied });
     }
     if (path.startsWith("/api/dev/load-labirint")) return json({ bible: "", plan: "" });
     return json({ error: `Автономный APK не поддерживает маршрут ${path}` }, 404);
