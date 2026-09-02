@@ -842,3 +842,49 @@ export function positiveVoiceFewShots(sample: string, maximum = 3): string {
   const picked = paragraphs.slice(0, maximum);
   return `Эталонные абзацы манеры автора (ритм и лексика; события и имена из образца НЕ переносить в новую главу):\n${picked.map((paragraph, index) => `${index + 1}) """${paragraph}"""`).join("\n")}`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// РАСШИРЕННАЯ СИСТЕМА ОЧЕЛОВЕЧИВАНИЯ v2
+// Re-export из humanStyleEnhanced.ts для обратной совместимости.
+// Все новые функции доступны через этот файл без изменения импортов в server.ts
+// ─────────────────────────────────────────────────────────────────────────────
+export {
+  // Расширенный каталог паттернов (+50 новых)
+  AI_TELL_CATALOG_EXTENDED,
+  // Детектор с контекстными весами (жанр / позиция / плотность)
+  detectAiTellsEnhanced,
+  aiTellScoreEnhanced,
+  // Новые метрики стиля
+  paragraphLengthCV,
+  passiveVoiceShare,
+  uniqueWordRatio200,
+  connectorDiversity,
+  computeExtendedMetrics,
+  // 3-фазный humanizer pipeline
+  buildRhythmBreakerPrompt,
+  buildLexicalDiversifierPrompt,
+  buildMicroImperfectionsPrompt,
+  DEFAULT_HUMANIZER_CONFIG,
+  // Negative Voice Profile
+  buildNegativeVoiceProfile,
+  negativeVoiceGuidanceBlock,
+  // Multi-detector gate
+  runMultiDetectorGate,
+  // Конфигурационный объект
+  HUMANIZER_V2,
+} from "./humanStyleEnhanced";
+
+/** Объединённый каталог: оригинальные 80+ паттернов + 50 новых */
+export { AI_TELL_CATALOG_EXTENDED as AI_TELL_CATALOG_V2_EXTRA } from "./humanStyleEnhanced";
+
+/**
+ * aiTellScoreFull — расширенная версия aiTellScore(), использующая
+ * объединённый каталог (130+ паттернов) с контекстными весами.
+ * Drop-in замена aiTellScore() для новых вызовов.
+ */
+import { AI_TELL_CATALOG_EXTENDED as _EXT_CATALOG, aiTellScoreEnhanced as _scoreEnh } from "./humanStyleEnhanced";
+
+export function aiTellScoreFull(text: string, genre = "general"): number {
+  const combined = [...AI_TELL_CATALOG, ..._EXT_CATALOG];
+  return _scoreEnh(text, combined, genre as Parameters<typeof _scoreEnh>[2]);
+}

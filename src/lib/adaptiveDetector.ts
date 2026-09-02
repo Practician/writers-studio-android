@@ -378,3 +378,26 @@ export function resetAdaptiveProfile(storyId: string): AdaptiveDetectorProfile {
   if (typeof localStorage !== "undefined") localStorage.removeItem(`${STORAGE_PREFIX}${storyId}`);
   return resolveSeedAdaptiveProfile(storyId) ?? createAdaptiveProfile(storyId);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// РАСШИРЕННЫЙ АДАПТИВНЫЙ ДЕТЕКТОР v2 (12-МЕРНЫЙ)
+// Re-export из adaptiveDetectorEnhanced.ts
+// ─────────────────────────────────────────────────────────────────────────────
+export {
+  EXTENDED_FEATURES,
+  EXTENDED_SCALES,
+  emptyExtendedCentroid,
+  addExtendedObservation,
+  mahalanobisDistance,
+  aggregateImplicitFeedback,
+  mergeWithDonorProfile,
+  computeEnsembleScore,
+  DETECTOR_V2,
+  type ExtendedFeature,
+  type ExtendedVector,
+  type ExtendedCentroid,
+  type ImplicitFeedbackRecord,
+  type FeedbackAggregation,
+  type CrossChapterTransferConfig,
+  type EnsembleScore,
+} from "./adaptiveDetectorEnhanced";
