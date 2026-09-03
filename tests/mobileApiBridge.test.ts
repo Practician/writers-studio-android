@@ -94,7 +94,7 @@ test("direct bridge preserves provider HTTP status and returns non-secret diagno
   assert.equal(JSON.stringify(payload).includes("very-secret"), false);
 });
 
-test("OpenRouter switches Ox Alpha to free-router and rotates to the next key after quota errors", async () => {
+test("OpenRouter switches the selected model to free-router and rotates to the next key after quota errors", async () => {
   const calls: Array<{ model: string; authorization: string }> = [];
   const result = await withMockFetch(async (_url, init) => {
     const body = JSON.parse(String(init?.body || "{}"));
@@ -106,16 +106,16 @@ test("OpenRouter switches Ox Alpha to free-router and rotates to the next key af
       : new Response(JSON.stringify({ error: { message: "Недостаточно квоты" } }), { status: 402 });
   }, () => directGenerate({
     provider: "openrouter",
-    model: "stealth/ox-alpha",
+    model: "openrouter/example-primary",
     apiKeys: { openrouter: "first-key; second-key" },
     prompt: "Тест fallback.",
   }));
 
   assert.equal(result, "Ответ после ротации");
   assert.deepEqual(calls, [
-    { model: "stealth/ox-alpha", authorization: "Bearer first-key" },
+    { model: "openrouter/example-primary", authorization: "Bearer first-key" },
     { model: "openrouter/free", authorization: "Bearer first-key" },
-    { model: "stealth/ox-alpha", authorization: "Bearer second-key" },
+    { model: "openrouter/example-primary", authorization: "Bearer second-key" },
     { model: "openrouter/free", authorization: "Bearer second-key" },
   ]);
 });
@@ -152,7 +152,7 @@ test("OpenRouter accepts an array-shaped message content and returns its text", 
     }],
   }), { status: 200 }), () => directGenerate({
     provider: "openrouter",
-    model: "stealth/ox-alpha",
+    model: "openrouter/example-primary",
     apiKeys: { openrouter: "sk-or-test" },
     prompt: "Тест составного content.",
   }));
@@ -203,14 +203,45 @@ test("autonomous writer applies a second humanize pass after drafting prose", as
   assert.equal(prompts[0].includes("РЕЖИМ ОЧЕЛОВЕЧИВАНИЯ (MAXIMUM)"), true);
   assert.equal(prompts[1].includes("ЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ"), true);
   assert.equal(prompts[1].includes("Черновик с ровным ритмом."), true);
+  assert.equal(typeof payload.humanizeReport?.scoreBefore, "number");
+  assert.equal(typeof payload.humanizeReport?.scoreAfter, "number");
+  assert.equal(payload.humanizeReport?.depth, "maximum");
 });
 
-test("OpenRouter falls back when Ox Alpha returns HTTP 200 without visible content", async () => {
+test("humanize local audit runs a corrective ratchet pass when the gate fails, but rejects a too-short correction", async () => {
+  const stampyDraft = "Не просто шёл, а словно нехотя. Не просто шёл, а словно нехотя. Не просто шёл, а словно нехотя. Не просто шёл, а словно нехотя.";
+  const calls: string[] = [];
+  const response = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    calls.push(body.messages?.[1]?.content || "");
+    // Первый вызов (humanize-проход) и корректирующий ратчет-проход оба
+    // возвращают тот же перегруженный штампами текст без улучшения.
+    return new Response(JSON.stringify({ choices: [{ message: { content: stampyDraft } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "continue",
+      text: "Начало сцены.",
+      humanize: true,
+      humanizeDepth: "maximum",
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 3); // черновик + humanize-проход + один корректирующий ратчет-проход
+  assert.equal(payload.humanizeReport.gatePassed, false);
+  assert.equal(payload.humanizeReport.passesRun, 2); // корректирующий проход принят (не короче, score не хуже), но сам gate так и не пройден
+  assert.equal(payload.humanizeReport.unresolvedLabels.length > 0, true);
+  assert.equal(calls[2].includes("Локальный аудит нашёл проблемы"), true);
+});
+
+test("OpenRouter falls back when the selected model returns HTTP 200 without visible content", async () => {
   const calls: string[] = [];
   const text = await withMockFetch(async (_url, init) => {
     const body = JSON.parse(String(init?.body || "{}"));
     calls.push(body.model);
-    if (body.model === "stealth/ox-alpha") {
+    if (body.model === "openrouter/example-primary") {
       return new Response(JSON.stringify({
         choices: [{ finish_reason: "length", message: { content: null } }],
       }), { status: 200 });
@@ -220,13 +251,13 @@ test("OpenRouter falls back when Ox Alpha returns HTTP 200 without visible conte
     }), { status: 200 });
   }, () => directGenerate({
     provider: "openrouter",
-    model: "stealth/ox-alpha",
+    model: "openrouter/example-primary",
     apiKeys: { openrouter: "sk-or-test" },
     prompt: "Проверь fallback пустого ответа.",
   }));
 
   assert.equal(text, "Текст от free-router.");
-  assert.deepEqual(calls, ["stealth/ox-alpha", "openrouter/free"]);
+  assert.deepEqual(calls, ["openrouter/example-primary", "openrouter/free"]);
 });
 
 test("OpenRouter sends the selected literary profile instead of a hidden default", async () => {
@@ -426,7 +457,7 @@ test("full chapter keeps the assembled draft when humanize pass is much shorter"
   }));
   const payload = await response.json();
   assert.equal(response.status, 200);
-  assert.equal(calls, 6);
+  assert.equal(calls, 7);
   assert.equal(payload.chapterWords, 3500);
   assert.equal(payload.result.includes("фрагмент"), true);
   assert.equal(payload.result.includes("Слишком короткая редактура."), false);

@@ -18,7 +18,9 @@ const OPENROUTER_MODEL_LS = "writers_studio_openrouter_model_v1";
 const NVIDIA_MODEL_LS = "writers_studio_nvidia_model_v1";
 const GEMINI_MODEL_LS = "writers_studio_gemini_model_v1";
 const GROQ_MODEL_LS = "writers_studio_groq_model_v1";
-export const DEFAULT_OPENROUTER_MODEL = "stealth/ox-alpha";
+export const DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v3.2";
+/** Больше не существует у провайдера; используется только для одноразовой миграции сохранённого выбора. */
+const REMOVED_OPENROUTER_MODEL = "stealth/ox-alpha";
 export const DEFAULT_GEMINI_MODEL = "gemini-3.7-flash";
 export const DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b";
 /** Литературный профиль: первый в цепочке локального RU-бенчмарка основного приложения. */
@@ -38,8 +40,7 @@ export const GROQ_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
 ];
 
 export const OPENROUTER_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
-  { id: DEFAULT_OPENROUTER_MODEL, label: "Авто — Ox Alpha", description: "Текущий профиль OpenRouter; при пустом ответе, недоступности или квоте APK сам перейдёт на бесплатный router." },
-  { id: "deepseek/deepseek-v3.2", label: "DeepSeek V3.2 — связная проза", description: "Актуальная текстовая модель для последовательного повествования, сцен и диалогов." },
+  { id: DEFAULT_OPENROUTER_MODEL, label: "Авто — DeepSeek V3.2", description: "Рекомендуемый профиль OpenRouter для связной прозы; при пустом ответе, недоступности или квоте APK сам перейдёт на бесплатный router." },
   { id: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash — длинная глава", description: "Актуальная текстовая модель с длинным контекстом для большой главы и сохранения канона." },
   { id: "openrouter/free", label: "Бесплатный router — OpenRouter", description: "OpenRouter сам выбирает доступную бесплатную текстовую модель; состав пула меняется." },
 ];
@@ -106,7 +107,8 @@ export function saveLlmProvider(provider: LlmProviderChoice): void {
 
 /** Идентификатор модели OpenRouter хранится отдельно от ключа и не является секретом. */
 export function loadOpenrouterModel(): string {
-  return localStorage.getItem(OPENROUTER_MODEL_LS)?.trim() || DEFAULT_OPENROUTER_MODEL;
+  const saved = localStorage.getItem(OPENROUTER_MODEL_LS)?.trim();
+  return saved && saved !== REMOVED_OPENROUTER_MODEL ? saved : DEFAULT_OPENROUTER_MODEL;
 }
 
 export function saveOpenrouterModel(model: string): void {
@@ -159,7 +161,8 @@ function normalizeOpenrouterModel(model: string): string {
 }
 
 export function loadOpenrouterLiteraryModel(): string {
-  return normalizeOpenrouterModel(localStorage.getItem(OPENROUTER_MODEL_LS) || "") || DEFAULT_OPENROUTER_MODEL;
+  const normalized = normalizeOpenrouterModel(localStorage.getItem(OPENROUTER_MODEL_LS) || "");
+  return normalized && normalized !== REMOVED_OPENROUTER_MODEL ? normalized : DEFAULT_OPENROUTER_MODEL;
 }
 
 export function saveOpenrouterLiteraryModel(model: string): void {

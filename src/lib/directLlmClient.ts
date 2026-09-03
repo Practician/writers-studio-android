@@ -1,5 +1,15 @@
 import { Capacitor } from "@capacitor/core";
-import type { AuthorEditAudit, AuthorVoiceSheet } from "../types";
+import type { AuthorEditAudit, AuthorVoiceSheet, HumanizeReport } from "../types";
+import {
+  AI_TELL_CATALOG,
+  AI_TELL_CATALOG_EXTENDED,
+  aiTellScore,
+  detectAiTellsEnhanced,
+  resolveHumanizeDepth,
+  runMultiDetectorGate,
+} from "../../server/humanStyle";
+import type { GenreContext } from "../../server/humanStyleEnhanced";
+import { sanitizeGeneratedText } from "../../server/textHygiene";
 
 export type DirectProvider = "auto" | "gemini" | "nvidia" | "groq" | "openrouter";
 
@@ -22,7 +32,6 @@ const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-const OX_ALPHA_MODEL = "stealth/ox-alpha";
 const OPENROUTER_FREE_ROUTER = "openrouter/free";
 
 // Та же проверенная цепочка, что использует серверная версия. В APK пробуем
@@ -109,9 +118,50 @@ function notifyApiKeyRotation(provider: Exclude<DirectProvider, "auto">, from: n
   window.dispatchEvent(new CustomEvent("writers-studio-api-key-rotation", { detail: { provider, from, to, total, status } }));
 }
 
-function notifyHumanizePass(depth: string, beforeChars: number, afterChars: number): void {
+function notifyHumanizePass(depth: string, beforeChars: number, afterChars: number, audit?: { scoreBefore: number; scoreAfter: number; gatePassed: boolean; passesRun: number }): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent("writers-studio-humanize-pass", { detail: { depth, beforeChars, afterChars } }));
+  window.dispatchEvent(new CustomEvent("writers-studio-humanize-pass", { detail: { depth, beforeChars, afterChars, ...audit } }));
+}
+
+// Полный каталог локального аудита: базовые ~80 паттернов + расширенные ~50
+// (те же признаки, что использует human-touch-max.html для очеловечивания).
+const COMBINED_AI_TELL_CATALOG = [...AI_TELL_CATALOG, ...AI_TELL_CATALOG_EXTENDED];
+
+function mapGenreContext(genre?: string): GenreContext {
+  const value = String(genre || "").toLowerCase();
+  if (/фэнтези|фентези|fantasy/.test(value)) return "fantasy";
+  if (/фантастик|sci-?fi|космоопер/.test(value)) return "scifi";
+  if (/триллер|детектив|thriller/.test(value)) return "thriller";
+  if (/любовн|романтик|romance/.test(value)) return "romance";
+  if (/ужас|хоррор|horror/.test(value)) return "horror";
+  if (/литератур|literary|проза/.test(value)) return "literary";
+  return "general";
+}
+
+interface LocalAudit {
+  score: number;
+  burstiness: number;
+  openerRepetition: number;
+  patternDensity: number;
+  labels: string[];
+  gatePassed: boolean;
+  gateDetails: string[];
+}
+
+/** Локальный аудит текста расширенным каталогом human-touch-max — без сетевых вызовов. */
+function auditHumanizedText(candidate: string, genre: GenreContext, scoreGate: number): LocalAudit {
+  const base = aiTellScore(candidate);
+  const gate = runMultiDetectorGate(candidate, COMBINED_AI_TELL_CATALOG, genre, { maxAiTellScore: scoreGate });
+  const hits = detectAiTellsEnhanced(candidate, COMBINED_AI_TELL_CATALOG, genre);
+  return {
+    score: gate.aiTellScore,
+    burstiness: base.burstiness,
+    openerRepetition: base.openerRepetition,
+    patternDensity: base.patternDensity,
+    labels: [...new Set(hits.map((hit) => hit.label))].slice(0, 12),
+    gatePassed: gate.verdict === "PASS",
+    gateDetails: gate.details,
+  };
 }
 
 function shouldRotateKey(status: number): boolean {
@@ -175,7 +225,7 @@ function defaultModel(provider: Exclude<DirectProvider, "auto">): string {
   if (provider === "gemini") return "gemini-3.7-flash";
   if (provider === "groq") return "openai/gpt-oss-120b";
   if (provider === "nvidia") return "deepseek-ai/deepseek-v4-flash-0731";
-  return "stealth/ox-alpha";
+  return "deepseek/deepseek-v3.2";
 }
 
 function contentToText(content: unknown): string {
@@ -602,13 +652,17 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
       }
 
       const humanizeApplied = needsHumanizePass(action, body);
+      let humanizeReport: HumanizeReport | null = null;
       if (humanizeApplied) {
         const depth = body?.humanizeDepth === "fast" || body?.humanizeDepth === "balanced" || body?.humanizeDepth === "maximum"
           ? body.humanizeDepth
           : "balanced";
+        const depthConfig = resolveHumanizeDepth(depth);
+        const genre = mapGenreContext(body?.genre);
         const minWords = action === "generate_full_chapter" ? "3 000 слов и ориентир около 3 300 слов" : "исходный объём";
         const beforeChars = text.length;
         const beforeWords = countGeneratedWords(text);
+        const beforeAudit = auditHumanizedText(text, genre, depthConfig.scoreGate);
         const humanizedText = await generate({
           provider: credentials.provider,
           model: credentials.model,
@@ -621,10 +675,61 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         const humanizedWords = countGeneratedWords(humanizedText);
         const acceptHumanized = action !== "generate_full_chapter" || humanizedWords >= Math.floor(beforeWords * 0.9);
         if (acceptHumanized) text = humanizedText;
-        notifyHumanizePass(depth, beforeChars, humanizedText.length);
+
+        // Локальный аудит (каталог human-touch-max: базовые + расширенные ~130 паттернов,
+        // ритм, пассивный залог, разнообразие словаря и связок) — без сетевых вызовов.
+        const hygiene = sanitizeGeneratedText(text);
+        text = hygiene.text;
+        let finalAudit = auditHumanizedText(text, genre, depthConfig.scoreGate);
+        let passesRun = 1;
+
+        // «Ратчет»: если gate не пройден и глубина не «Быстро», делаем один точечный
+        // корректирующий проход по конкретным замечаниям аудита, не переписывая всё заново.
+        if (depth !== "fast" && !finalAudit.gatePassed) {
+          const correction = await generate({
+            provider: credentials.provider,
+            model: credentials.model,
+            apiKeys: credentials.keys,
+            system: "Ты точечный литературный редактор. Правишь только отмеченные проблемы, не переписывая текст заново.",
+            prompt: `ТЕКСТ:\n${text}\n\nЛокальный аудит нашёл проблемы:\n${finalAudit.gateDetails.join("\n") || "признаки ИИ-текста выше порога"}\n${finalAudit.labels.length ? `Замеченные штампы: ${finalAudit.labels.join(", ")}.` : ""}\n\nТочечно исправь только эти места (ритм фраз, лексику, штампы), не меняя события, имена, канон, точку зрения и объём текста. Верни только исправленный текст целиком.`,
+          });
+          const correctedHygiene = sanitizeGeneratedText(correction);
+          const correctedAudit = auditHumanizedText(correctedHygiene.text, genre, depthConfig.scoreGate);
+          const correctedWords = countGeneratedWords(correctedHygiene.text);
+          const acceptCorrection = correctedWords >= Math.floor(countGeneratedWords(text) * 0.85)
+            && correctedAudit.score <= finalAudit.score;
+          if (acceptCorrection) {
+            text = correctedHygiene.text;
+            finalAudit = correctedAudit;
+            passesRun = 2;
+          }
+        }
+
+        humanizeReport = {
+          scoreBefore: beforeAudit.score,
+          scoreAfter: finalAudit.score,
+          refinedBlocks: 0,
+          flaggedLabels: beforeAudit.labels,
+          unresolvedLabels: finalAudit.gatePassed ? [] : finalAudit.labels,
+          burstiness: finalAudit.burstiness,
+          openerRepetition: finalAudit.openerRepetition,
+          patternDensity: finalAudit.patternDensity,
+          gatePassed: finalAudit.gatePassed,
+          passesRun,
+          scenesGenerated: 0,
+          depth: depthConfig.id,
+          mode: "single",
+          textHygiene: hygiene.report,
+        };
+        notifyHumanizePass(depth, beforeChars, text.length, {
+          scoreBefore: beforeAudit.score,
+          scoreAfter: finalAudit.score,
+          gatePassed: finalAudit.gatePassed,
+          passesRun,
+        });
       }
       const chapterWords = action === "generate_full_chapter" ? countGeneratedWords(text) : undefined;
-      return json({ result: text, humanizeReport: null, humanizeApplied, ...(chapterWords !== undefined ? { chapterWords, chapterTargetWords: CHAPTER_TARGET_WORDS, chapterSegments } : {}) });
+      return json({ result: text, humanizeReport, humanizeApplied, ...(chapterWords !== undefined ? { chapterWords, chapterTargetWords: CHAPTER_TARGET_WORDS, chapterSegments } : {}) });
     }
     if (path.startsWith("/api/dev/load-labirint")) return json({ bible: "", plan: "" });
     return json({ error: `Автономный APK не поддерживает маршрут ${path}` }, 404);

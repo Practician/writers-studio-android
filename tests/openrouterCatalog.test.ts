@@ -3,8 +3,8 @@ import test from "node:test";
 import { DEFAULT_OPENROUTER_MODEL } from "../src/lib/llmSettings";
 import { isOpenRouterModelId, normalizeOpenRouterCatalog } from "../src/lib/openrouterCatalog";
 
-test("Ox Alpha remains the default OpenRouter profile", () => {
-  assert.equal(DEFAULT_OPENROUTER_MODEL, "stealth/ox-alpha");
+test("DeepSeek V3.2 is the default OpenRouter profile", () => {
+  assert.equal(DEFAULT_OPENROUTER_MODEL, "deepseek/deepseek-v3.2");
 });
 
 test("OpenRouter catalog keeps only valid text model IDs and removes duplicates", () => {

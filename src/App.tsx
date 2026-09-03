@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 // mammoth (~400 КБ) загружается динамически только при импорте .docx — см. extractDocxText
 const extractDocxText = async (arrayBuffer: ArrayBuffer): Promise<string> => {
   const mammoth = (await import("mammoth")).default;
@@ -188,7 +188,7 @@ export default function App() {
     const handleOpenRouterFallback = (event: Event) => {
       const detail = (event as CustomEvent<{ from?: string; to?: string }>).detail;
       if (!detail?.to) return;
-      setOpenrouterFallbackNotice(`Ox Alpha недоступна или не вернула текст. Для этого запроса использован ${detail.to}; итог виден в журнале ИИ.`);
+      setOpenrouterFallbackNotice(`${detail.from || "Выбранная модель"} недоступна или не вернула текст. Для этого запроса использован ${detail.to}; итог виден в журнале ИИ.`);
     };
     window.addEventListener("writers-studio-openrouter-fallback", handleOpenRouterFallback);
     return () => window.removeEventListener("writers-studio-openrouter-fallback", handleOpenRouterFallback);
@@ -227,12 +227,16 @@ export default function App() {
   useEffect(() => {
     if (!isAutonomousApk()) return;
     const handleHumanizePass = (event: Event) => {
-      const detail = (event as CustomEvent<{ depth?: string; beforeChars?: number; afterChars?: number }>).detail;
+      const detail = (event as CustomEvent<{ depth?: string; beforeChars?: number; afterChars?: number; scoreBefore?: number; scoreAfter?: number; gatePassed?: boolean; passesRun?: number }>).detail;
       if (!detail?.depth || typeof detail.beforeChars !== "number" || typeof detail.afterChars !== "number") return;
+      const hasAudit = typeof detail.scoreBefore === "number" && typeof detail.scoreAfter === "number";
+      const auditPart = hasAudit
+        ? ` · локальный аудит: ${detail.scoreBefore} → ${detail.scoreAfter} (${detail.gatePassed ? "gate пройден" : "gate не пройден"}${detail.passesRun && detail.passesRun > 1 ? `, проходов: ${detail.passesRun}` : ""})`
+        : "";
       setLlmLogs((prev) => [...prev, {
-        level: "success",
+        level: hasAudit && !detail.gatePassed ? "warn" : "success",
         provider: llmProvider === "auto" ? undefined : llmProvider,
-        message: `Очеловечивание ${detail.depth}: отдельный литературный проход выполнен (${detail.beforeChars} → ${detail.afterChars} символов).`,
+        message: `Очеловечивание ${detail.depth}: отдельный литературный проход выполнен (${detail.beforeChars} → ${detail.afterChars} символов)${auditPart}.`,
         ts: Date.now(),
       }].slice(-40));
       setShowLlmLog(true);
@@ -375,7 +379,33 @@ export default function App() {
   const [llmLogs, setLlmLogs] = useState<Array<{ level: string; provider?: string; message: string; ts: number }>>([]);
   const [showLlmLog, setShowLlmLog] = useState(false);
   const [llmLogCollapsed, setLlmLogCollapsed] = useState(false);
+  const [llmLogCopied, setLlmLogCopied] = useState(false);
   const llmLogEndRef = useRef<HTMLDivElement>(null);
+
+  const copyLlmLog = useCallback(async () => {
+    const text = llmLogs
+      .map((entry) => {
+        const time = new Date(entry.ts).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const provider = entry.provider ? `[${entry.provider}] ` : "";
+        return `${time} ${provider}${entry.message}`;
+      })
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Фолбэк для окружений без Clipboard API (старые WebView).
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try { document.execCommand("copy"); } catch {}
+      document.body.removeChild(textarea);
+    }
+    setLlmLogCopied(true);
+    setTimeout(() => setLlmLogCopied(false), 1_500);
+  }, [llmLogs]);
 
   useEffect(() => {
     if (isAutonomousApk()) return;
@@ -2347,7 +2377,7 @@ export default function App() {
                     {openrouterCatalog.filter((model) => `${model.name} ${model.id}`.toLowerCase().includes(openrouterCatalogQuery.trim().toLowerCase())).slice(0, 12).map((model) => <button type="button" key={model.id} onClick={() => setOpenrouterModelDraft(model.id)} className={`w-full rounded-md px-2.5 py-2 text-left transition-colors ${openrouterModelDraft === model.id ? "bg-violet-500/20 text-violet-100" : "text-slate-300 hover:bg-violet-500/10"}`}><span className="block text-[10px] font-medium truncate">{model.name || model.id}</span><span className="block mt-0.5 text-[9px] text-slate-500 font-mono truncate">{model.id}{model.contextLength ? ` · ${Math.round(model.contextLength / 1000)}k контекст` : ""}</span></button>)}
                     {!openrouterCatalog.filter((model) => `${model.name} ${model.id}`.toLowerCase().includes(openrouterCatalogQuery.trim().toLowerCase())).length && <p className="px-2 py-2 text-[10px] text-slate-500">Подходящие модели не найдены.</p>}
                   </div>}
-                  {openrouterCatalogState === "idle" && <p className="text-[9px] leading-relaxed text-slate-500">Каталог загружается при открытии настроек. Ox Alpha остаётся первым профилем и значением по умолчанию.</p>}
+                  {openrouterCatalogState === "idle" && <p className="text-[9px] leading-relaxed text-slate-500">Каталог загружается при открытии настроек. DeepSeek V3.2 остаётся первым профилем и значением по умолчанию.</p>}
                 </div>
               </div>
 
@@ -3207,6 +3237,12 @@ export default function App() {
               <span style={{ fontSize: "11px", fontWeight: 600, color: "#a5b4fc", letterSpacing: "0.05em", textTransform: "uppercase" }}>LLM Activity</span>
             </div>
             <div style={{ display: "flex", gap: "4px" }}>
+              <button
+                onClick={(e) => { e.stopPropagation(); void copyLlmLog(); }}
+                disabled={!llmLogs.length}
+                style={{ background: "none", border: "none", cursor: llmLogs.length ? "pointer" : "default", color: llmLogCopied ? "#34d399" : "#64748b", padding: "2px 4px", borderRadius: "4px", fontSize: "12px", opacity: llmLogs.length ? 1 : 0.4 }}
+                title="Копировать журнал"
+              >{llmLogCopied ? "✓" : "⧉"}</button>
               <button
                 onClick={(e) => { e.stopPropagation(); setLlmLogCollapsed((v) => !v); }}
                 style={{ background: "none", border: "none", cursor: "pointer", color: "#64748b", padding: "2px 4px", borderRadius: "4px", fontSize: "12px" }}

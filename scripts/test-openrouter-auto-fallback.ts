@@ -15,7 +15,7 @@ globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit): Pr
   const body = JSON.parse(String(init?.body || "{}"));
   requestedModels.push(body.model);
 
-  if (body.model === "stealth/ox-alpha") {
+  if (body.model === "openrouter/example-primary") {
     return new Response(JSON.stringify({
       error: { code: 402, message: "Insufficient credits" },
     }), { status: 402, headers: { "Content-Type": "application/json" } });
@@ -33,15 +33,15 @@ globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit): Pr
 try {
   const result = await directGenerate({
     provider: "openrouter",
-    model: "stealth/ox-alpha",
+    model: "openrouter/example-primary",
     apiKeys: { openrouter: "test-key" },
     prompt: "Продолжи сцену.",
   });
 
   assert.equal(result, "Fallback generated text.");
-  assert.deepEqual(requestedModels, ["stealth/ox-alpha", "openrouter/free"]);
-  assert.deepEqual(fallbackEvents, [{ from: "stealth/ox-alpha", to: "openrouter/free" }]);
-  console.log("PASS: 402 Ox Alpha → openrouter/free → successful generated text; fallback event emitted.");
+  assert.deepEqual(requestedModels, ["openrouter/example-primary", "openrouter/free"]);
+  assert.deepEqual(fallbackEvents, [{ from: "openrouter/example-primary", to: "openrouter/free" }]);
+  console.log("PASS: 402 primary model → openrouter/free → successful generated text; fallback event emitted.");
 } finally {
   globalThis.fetch = originalFetch;
 }
