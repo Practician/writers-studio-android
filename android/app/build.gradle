@@ -18,12 +18,13 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
-    def releaseStoreFilePath = System.getenv("RELEASE_STORE_FILE")
-    def releaseStorePassword = System.getenv("RELEASE_STORE_PASSWORD")
-    def releaseKeyAlias = System.getenv("RELEASE_KEY_ALIAS")
-    // Для ключа Bookstore пароль ключа совпадает с паролем keystore; отдельный секрет не требуется.
+    def bundledKeystore = file("${project.rootDir}/keystore/release-key.jks")
+    def releaseStoreFilePath = System.getenv("RELEASE_STORE_FILE") ?: (bundledKeystore.exists() ? bundledKeystore.absolutePath : null)
+    def releaseStorePassword = System.getenv("RELEASE_STORE_PASSWORD") ?: (bundledKeystore.exists() ? "BookStore-Release-2026-Secure" : null)
+    def releaseKeyAlias = System.getenv("RELEASE_KEY_ALIAS") ?: (bundledKeystore.exists() ? "bookstore-key" : null)
+    // Для постоянной подписи пароль ключа совпадает с паролем keystore.
     def releaseKeyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: releaseStorePassword
-    def releaseSigningReady = releaseStoreFilePath && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+    def releaseSigningReady = releaseStoreFilePath && file(releaseStoreFilePath).exists() && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
 
     signingConfigs {
         release {
@@ -39,7 +40,7 @@ android {
     def requestedTasks = gradle.startParameter.taskNames.collect { it.toLowerCase() }
     def releaseTaskRequested = requestedTasks.any { it.contains("release") }
     if (releaseTaskRequested && !releaseSigningReady) {
-        throw new GradleException("Release signing requires RELEASE_STORE_FILE, RELEASE_STORE_PASSWORD and RELEASE_KEY_ALIAS from GitHub Actions Secrets.")
+        throw new GradleException("Release signing requires a valid keystore in android/keystore/release-key.jks or RELEASE_STORE_FILE/RELEASE_STORE_PASSWORD/RELEASE_KEY_ALIAS environment variables.")
     }
 
     buildTypes {
