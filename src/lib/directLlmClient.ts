@@ -37,9 +37,10 @@ const OPENROUTER_FREE_ROUTER = "openrouter/free";
 
 // Та же проверенная цепочка, что использует серверная версия. В APK пробуем
 // максимум три модели за запрос, чтобы не превращать один сбой в долгий цикл.
+// `z-ai/glm-5.2` снята NVIDIA с прода (стабильно отвечает HTTP 410 Gone) и
+// исключена из цепочки, чтобы не тратить впустую раунд-трип на каждой ротации.
 const NVIDIA_FALLBACK_MODELS = [
   "deepseek-ai/deepseek-v4-flash-0731",
-  "z-ai/glm-5.2",
   "minimaxai/minimax-m3",
   "stepfun-ai/step-3.7-flash",
   "qwen/qwen3-235b-a22b-instruct-2507",
@@ -182,8 +183,9 @@ function nvidiaModelChain(primary: string): string[] {
 
 function shouldRotateNvidiaModel(status: number): boolean {
   // Для лимитов аккаунта первична ротация личных ключей; модели меняем при
-  // недоступности маршрута/модели или тайм-ауте gateway.
-  return status === 404 || status === 502 || status === 503 || status === 504;
+  // недоступности маршрута/модели (404/410 — модель снята с прода), перегрузке
+  // или тайм-ауте gateway.
+  return status === 404 || status === 410 || status === 502 || status === 503 || status === 504;
 }
 
 function geminiModelChain(primary: string): string[] {
@@ -192,8 +194,9 @@ function geminiModelChain(primary: string): string[] {
 
 function shouldRotateGeminiModel(status: number): boolean {
   // Аналогично NVIDIA: 429 — личный лимит ключа/проекта, для него первична
-  // ротация ключей ниже. Модель меняем при её недоступности или перегрузке.
-  return status === 404 || status === 500 || status === 502 || status === 503 || status === 504;
+  // ротация ключей ниже. Модель меняем при её недоступности (404/410),
+  // внутренней ошибке или перегрузке.
+  return status === 404 || status === 410 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
 
@@ -291,8 +294,34 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     ? defaultModel(provider)
     : request.model || defaultModel(provider);
   const system = request.system || "Ты внимательный литературный помощник. Отвечай по-русски.";
-  const maxTokens = Math.max(128, Math.min(request.maxTokens ?? 2_048, 6_144));
+  // Общий потолок поднят с 6 144 до 16 000: очеловечивание целой главы (а не
+  // одного фрагмента) кириллицей нуждается в заметно большем бюджете вывода.
+  const maxTokens = Math.max(128, Math.min(request.maxTokens ?? 2_048, 16_000));
   const keyPool = splitApiKeyPool(request.apiKeys?.[provider]);
+  // Шлюз NVIDIA при перегрузке может держать соединение открытым по 4-5 минут,
+  // прежде чем сам вернёт 504 — это удваивает простой при повторе на том же ключе.
+  // Обрываем раньше и обрабатываем как штатный таймаут шлюза (тот же код 504),
+  // чтобы вся существующая логика ретраев/ротации/фолбэка сработала без изменений.
+  const CLIENT_TIMEOUT_MS = 90_000;
+  async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const onUserAbort = () => controller.abort(request.signal?.reason);
+    if (request.signal?.aborted) controller.abort(request.signal.reason);
+    else request.signal?.addEventListener("abort", onUserAbort);
+    const timeoutId = setTimeout(() => controller.abort(new DOMException("client-timeout", "TimeoutError")), CLIENT_TIMEOUT_MS);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      const isOurTimeout = err instanceof Error && err.name === "TimeoutError" && !request.signal?.aborted;
+      if (isOurTimeout) {
+        return new Response(JSON.stringify({ error: { message: "Клиентский таймаут: провайдер не ответил вовремя." } }), { status: 504 });
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+      request.signal?.removeEventListener("abort", onUserAbort);
+    }
+  }
 
   for (let index = 0; index < keyPool.length; index += 1) {
     const key = keyPool[index];
@@ -301,9 +330,8 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     let payload: any;
 
     if (provider === "gemini") {
-      response = await fetch(`${GEMINI_URL}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
+      response = await fetchWithTimeout(`${GEMINI_URL}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
         method: "POST",
-        signal: request.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: system }] },
@@ -316,9 +344,8 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         }),
       });
     } else {
-      response = await fetch(endpointFor(provider, model, key), {
+      response = await fetchWithTimeout(endpointFor(provider, model, key), {
         method: "POST",
-        signal: request.signal,
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${key}`,
@@ -356,9 +383,8 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
           { chars: 0, finishReason: finishReasonFor(payload) },
         ));
         effectiveModel = nextModel;
-        response = await fetch(`${GEMINI_URL}/${encodeURIComponent(effectiveModel)}:generateContent?key=${encodeURIComponent(key)}`, {
+        response = await fetchWithTimeout(`${GEMINI_URL}/${encodeURIComponent(effectiveModel)}:generateContent?key=${encodeURIComponent(key)}`, {
           method: "POST",
-          signal: request.signal,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             systemInstruction: { parts: [{ text: system }] },
@@ -388,9 +414,8 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         `NVIDIA не ответила вовремя; повтор с лимитом ${retryMaxTokens} токенов.`,
         { chars: 0 },
       ));
-      response = await fetch(NVIDIA_URL, {
+      response = await fetchWithTimeout(NVIDIA_URL, {
         method: "POST",
-        signal: request.signal,
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
           model,
@@ -422,9 +447,8 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
           { chars: 0, finishReason: finishReasonFor(payload) },
         ));
         effectiveModel = nextModel;
-        response = await fetch(NVIDIA_URL, {
+        response = await fetchWithTimeout(NVIDIA_URL, {
           method: "POST",
-          signal: request.signal,
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
           body: JSON.stringify({
             model: effectiveModel,
@@ -443,7 +467,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     // исходную диагностику в журнале. Сам free-router повторно не переключаем.
     const openrouterNeedsFallback = provider === "openrouter"
       && model !== OPENROUTER_FREE_ROUTER
-      && (response.status === 402 || response.status === 404 || response.status === 502 || response.status === 503 || response.status === 504 || (response.ok && !hasVisibleResponseText(payload)));
+      && (response.status === 402 || response.status === 404 || response.status === 410 || response.status === 502 || response.status === 503 || response.status === 504 || (response.ok && !hasVisibleResponseText(payload)));
     if (openrouterNeedsFallback) {
       const reason = response.ok
         ? `${model} не передала видимый текст; переключение на openrouter/free.`
@@ -460,9 +484,8 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       ));
       effectiveModel = OPENROUTER_FREE_ROUTER;
       notifyOpenRouterFallback(model, OPENROUTER_FREE_ROUTER);
-      response = await fetch(OPENROUTER_URL, {
+      response = await fetchWithTimeout(OPENROUTER_URL, {
         method: "POST",
-        signal: request.signal,
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${key}`,
@@ -642,15 +665,23 @@ function maxTokensForAction(action?: string): number {
   return 2_048;
 }
 
+// Лимит для чанка главы (6 144) рассчитан на один фрагмент ~700-1000 слов, а не
+// на переписывание всей уже собранной главы целиком — на кириллице это давало
+// стабильную обрезку (`завершение length`) и проваленный локальный аудит.
+// Оцениваем нужный бюджет от фактической длины текста, консервативно (~2 симв./токен).
+function humanizeMaxTokens(charLength: number): number {
+  return Math.max(6_144, Math.min(16_000, Math.ceil(charLength / 2) + 1_024));
+}
+
 export async function directApi(path: string, init?: RequestInit): Promise<Response> {
   const body = typeof init?.body === "string" ? JSON.parse(init.body || "{}") : init?.body || {};
   const credentials = requestCredentials(body);
   const json = (value: any, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
   // Даже после перехвата /api/* в APK сигнал должен дойти до нативного запроса провайдера.
-  const generate = (request: Omit<DirectRequest, "signal" | "maxTokens">) => directGenerate({
+  const generate = (request: Omit<DirectRequest, "signal">) => directGenerate({
     ...request,
     signal: init?.signal,
-    maxTokens: maxTokensForAction(body?.action),
+    maxTokens: request.maxTokens ?? maxTokensForAction(body?.action),
   });
 
   try {
@@ -724,10 +755,12 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         const beforeChars = text.length;
         const beforeWords = countGeneratedWords(text);
         const beforeAudit = auditHumanizedText(text, genre, depthConfig.scoreGate);
+        const rewriteMaxTokens = humanizeMaxTokens(beforeChars);
         const humanizedText = await generate({
           provider: credentials.provider,
           model: credentials.model,
           apiKeys: credentials.keys,
+          maxTokens: rewriteMaxTokens,
           system: "Ты финальный литературный редактор. Верни только готовый русский художественный текст без комментариев.",
           prompt: `${compactContext(body)}${humanizeDirective(body)}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости. Верни только готовую версию.`,
         });
@@ -751,6 +784,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             provider: credentials.provider,
             model: credentials.model,
             apiKeys: credentials.keys,
+            maxTokens: humanizeMaxTokens(text.length),
             system: "Ты точечный литературный редактор. Правишь только отмеченные проблемы, не переписывая текст заново.",
             prompt: `ТЕКСТ:\n${text}\n\nЛокальный аудит нашёл проблемы:\n${finalAudit.gateDetails.join("\n") || "признаки ИИ-текста выше порога"}\n${finalAudit.labels.length ? `Замеченные штампы: ${finalAudit.labels.join(", ")}.` : ""}\n\nТочечно исправь только эти места (ритм фраз, лексику, штампы), не меняя события, имена, канон, точку зрения и объём текста. Верни только исправленный текст целиком.`,
           });

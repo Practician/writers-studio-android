@@ -47,11 +47,11 @@ test("explicit NVIDIA literary profile is sent to the NVIDIA endpoint", async ()
     return new Response(JSON.stringify({ choices: [{ message: { content: "Проза." } }] }), { status: 200 });
   }, () => directGenerate({
     provider: "nvidia",
-    model: "z-ai/glm-5.2",
+    model: "minimaxai/minimax-m3",
     apiKeys: { nvidia: "nvapi-test" },
     prompt: "Тест выбора профиля.",
   }));
-  assert.equal(requestedModel, "z-ai/glm-5.2");
+  assert.equal(requestedModel, "minimaxai/minimax-m3");
 });
 
 test("auto mode does not include model field in UI request fields", async () => {
@@ -81,7 +81,7 @@ test("direct bridge preserves provider HTTP status and returns non-secret diagno
   assert.equal(payload.error, "Маршрут не найден");
   assert.deepEqual(payload.diagnostics, {
     provider: "nvidia",
-    model: "minimaxai/minimax-m3",
+    model: "stepfun-ai/step-3.7-flash",
     endpoint: "integrate.api.nvidia.com/v1/chat/completions",
     keyPresent: true,
     keySuffix: "1234",
@@ -369,7 +369,7 @@ test("NVIDIA falls through to Groq after all bounded NVIDIA model attempts fail"
     "meta/llama-3.3-70b-instruct",
     "meta/llama-3.3-70b-instruct",
     "deepseek-ai/deepseek-v4-flash-0731",
-    "z-ai/glm-5.2",
+    "minimaxai/minimax-m3",
     "openai/gpt-oss-120b",
   ]);
   assert.equal(calls.at(-1)?.url, "https://api.groq.com/openai/v1/chat/completions");
@@ -453,7 +453,7 @@ test("all NVIDIA 504 diagnostics show retry, model rotations, and Groq handoff",
     assert.equal(result, "Groq завершил запрос.");
     assert.equal(events.some((trace) => trace.message?.includes("повтор с лимитом 4096")), true);
     assert.equal(events.some((trace) => trace.message?.includes("meta/llama-3.3-70b-instruct → deepseek-ai/deepseek-v4-flash-0731")), true);
-    assert.equal(events.some((trace) => trace.message?.includes("deepseek-ai/deepseek-v4-flash-0731 → z-ai/glm-5.2")), true);
+    assert.equal(events.some((trace) => trace.message?.includes("deepseek-ai/deepseek-v4-flash-0731 → minimaxai/minimax-m3")), true);
     assert.equal(events.some((trace) => trace.message?.includes("переход к Groq")), true);
     assert.equal(events.at(-1)?.provider, "groq");
     assert.equal(events.at(-1)?.status, 200);
@@ -572,4 +572,69 @@ test("a dynamic OpenRouter catalog model is sent and falls back to free-router",
   }));
   assert.equal(text, "Текст от резервного OpenRouter.");
   assert.deepEqual(calls, ["qwen/qwen3.5-397b-a17b", "openrouter/free"]);
+});
+
+test("NVIDIA HTTP 410 (retired model) continues rotating to the next model instead of giving up", async () => {
+  const models: string[] = [];
+  const text = await withMockFetch(async (_url, init) => {
+    const model = JSON.parse(String(init?.body || "{}")).model;
+    models.push(model);
+    if (model === "deepseek-ai/deepseek-v4-flash-0731") {
+      return new Response(JSON.stringify({ error: { message: "Model not found" } }), { status: 410 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ от следующей модели после 410." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "nvidia",
+    model: "deepseek-ai/deepseek-v4-flash-0731",
+    apiKeys: { nvidia: "nvapi-test" },
+    prompt: "Тест ротации после 410.",
+  }));
+  assert.equal(text, "Ответ от следующей модели после 410.");
+  assert.deepEqual(models, ["deepseek-ai/deepseek-v4-flash-0731", "minimaxai/minimax-m3"]);
+});
+
+test("a hanging NVIDIA request is aborted client-side and rotates instead of waiting for the real gateway", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const calls: string[] = [];
+  const resultPromise = withMockFetch(async (url, init) => {
+    calls.push(url);
+    if (calls.length === 1) {
+      // Первый запрос "виснет" бесконечно — как реальный шлюз NVIDIA при перегрузке,
+      // который может не отвечать по 4-5 минут. Разрешается только по abort-сигналу.
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ после клиентского таймаута." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "nvidia",
+    model: "deepseek-ai/deepseek-v4-flash-0731",
+    apiKeys: { nvidia: "nvapi-test" },
+    prompt: "Тест клиентского таймаута.",
+  }));
+  t.mock.timers.tick(90_000);
+  const text = await resultPromise;
+  assert.equal(text, "Ответ после клиентского таймаута.");
+  assert.equal(calls.length, 2);
+});
+
+test("full-chapter humanize pass requests a token budget scaled to the draft length, not the per-chunk cap", async () => {
+  const requestedMaxTokens: number[] = [];
+  const longDraft = "Слово ".repeat(4_100).trim(); // ~26 000 символов, как собранная глава.
+  await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    requestedMaxTokens.push(body.max_tokens);
+    return new Response(JSON.stringify({ choices: [{ message: { content: longDraft } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "improve",
+      text: longDraft,
+      humanize: true,
+      humanizeDepth: "fast", // "fast" — без ратчет-прохода, проверяем именно бюджет основного прохода.
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  // Черновик длиной ~26 000 символов не должен получить лимит "как для одного чанка" (6 144).
+  assert.equal(requestedMaxTokens[1] > 6_144, true);
 });
