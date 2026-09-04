@@ -375,6 +375,51 @@ test("NVIDIA falls through to Groq after all bounded NVIDIA model attempts fail"
   assert.equal(calls.at(-1)?.url, "https://api.groq.com/openai/v1/chat/completions");
 });
 
+test("Gemini HTTP 503 (high demand) rotates its own models before falling back to Groq", async () => {
+  const calls: Array<{ url: string }> = [];
+  const text = await withMockFetch(async (url) => {
+    calls.push({ url });
+    if (url.includes("generativelanguage.googleapis.com")) {
+      return new Response(JSON.stringify({ error: { message: "This model is currently experiencing high demand." } }), { status: 503 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ Groq после перегрузки Gemini." } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "gemini",
+    model: "gemini-3.7-flash",
+    apiKeys: { gemini: "AIza-test", groq: "gsk-test" },
+    prompt: "Тест fallback при перегрузке Gemini.",
+    maxTokens: 2_048,
+  }));
+  assert.equal(text, "Ответ Groq после перегрузки Gemini.");
+  // Все 3 литературных профиля Gemini перегружены (503), затем переход к Groq.
+  assert.equal(calls.length, 4);
+  assert.equal(calls.slice(0, 3).every((call) => call.url.includes("generativelanguage.googleapis.com")), true);
+  assert.equal(calls[0].url.includes("models/gemini-3.7-flash:generateContent"), true);
+  assert.equal(calls[1].url.includes("models/gemini-3.1-pro-preview:generateContent"), true);
+  assert.equal(calls[2].url.includes("models/gemini-3.6-flash:generateContent"), true);
+  assert.equal(calls[3].url, "https://api.groq.com/openai/v1/chat/completions");
+});
+
+test("Gemini recovers on its second literary model after the first returns HTTP 503", async () => {
+  const calls: string[] = [];
+  const text = await withMockFetch(async (url) => {
+    calls.push(url);
+    if (url.includes("models/gemini-3.7-flash:generateContent")) {
+      return new Response(JSON.stringify({ error: { message: "This model is currently experiencing high demand." } }), { status: 503 });
+    }
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Ответ от резервной модели Gemini." }] } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "gemini",
+    model: "gemini-3.7-flash",
+    apiKeys: { gemini: "AIza-test" },
+    prompt: "Тест ротации моделей внутри Gemini.",
+    maxTokens: 2_048,
+  }));
+  assert.equal(text, "Ответ от резервной модели Gemini.");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].includes("models/gemini-3.1-pro-preview:generateContent"), true);
+});
+
 test("all NVIDIA 504 diagnostics show retry, model rotations, and Groq handoff", async () => {
   const globals = globalThis as any;
   const savedWindow = globals.window;

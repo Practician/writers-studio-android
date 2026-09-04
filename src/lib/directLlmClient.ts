@@ -1,5 +1,6 @@
 import { Capacitor } from "@capacitor/core";
 import type { AuthorEditAudit, AuthorVoiceSheet, HumanizeReport } from "../types";
+import { GEMINI_LITERARY_MODELS } from "./llmSettings";
 import {
   AI_TELL_CATALOG,
   AI_TELL_CATALOG_EXTENDED,
@@ -48,6 +49,12 @@ const NVIDIA_FALLBACK_MODELS = [
   "meta/llama-3.3-70b-instruct",
 ];
 const NVIDIA_MAX_MODEL_ATTEMPTS = 3;
+
+// Собственные литературные профили Gemini (та же тройка, что в настройках приложения).
+// При перегрузке/недоступности основной модели пробуем следующую, прежде чем
+// уходить к другому провайдеру — так временный HTTP 503 не выглядит зависанием.
+const GEMINI_FALLBACK_MODELS = GEMINI_LITERARY_MODELS.map((profile) => profile.id);
+const GEMINI_MAX_MODEL_ATTEMPTS = 3;
 
 type ApiTrace = {
   provider: Exclude<DirectProvider, "auto">;
@@ -179,9 +186,23 @@ function shouldRotateNvidiaModel(status: number): boolean {
   return status === 404 || status === 502 || status === 503 || status === 504;
 }
 
-function providerAfterNvidia(keys: ApiKeys): Exclude<DirectProvider, "auto" | "nvidia"> | undefined {
-  // Порядок соответствует автономной политике: быстрый Groq → Gemini → OpenRouter.
-  return (["groq", "gemini", "openrouter"] as const).find((provider) => hasProviderKey(keys, provider));
+function geminiModelChain(primary: string): string[] {
+  return [...new Set([primary, ...GEMINI_FALLBACK_MODELS])].slice(0, GEMINI_MAX_MODEL_ATTEMPTS);
+}
+
+function shouldRotateGeminiModel(status: number): boolean {
+  // Аналогично NVIDIA: 429 — личный лимит ключа/проекта, для него первична
+  // ротация ключей ниже. Модель меняем при её недоступности или перегрузке.
+  return status === 404 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+
+// Порядок каскада между провайдерами при полном отказе текущего: быстрый Groq →
+// Gemini → NVIDIA → OpenRouter (исключая провайдера, который только что отказал).
+const PROVIDER_FALLBACK_ORDER: readonly Exclude<DirectProvider, "auto">[] = ["groq", "gemini", "nvidia", "openrouter"];
+
+function nextFallbackProvider(current: Exclude<DirectProvider, "auto">, keys: ApiKeys): Exclude<DirectProvider, "auto"> | undefined {
+  return PROVIDER_FALLBACK_ORDER.find((candidate) => candidate !== current && hasProviderKey(keys, candidate));
 }
 
 export function isAutonomousApk(): boolean {
@@ -315,6 +336,44 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
 
     payload = await response.json().catch(() => ({}));
 
+    // После неудачи основной модели пробуем до двух резервных литературных
+    // профилей Gemini на том же ключе — управляемая деградация вместо зависания
+    // на временной перегрузке (HTTP 503) или снятой с провода модели (404).
+    if (provider === "gemini") {
+      const candidates = geminiModelChain(model).slice(1);
+      for (const nextModel of candidates) {
+        const needsRotation = (response.ok && !hasVisibleResponseText(payload))
+          || (!response.ok && shouldRotateGeminiModel(response.status));
+        if (!needsRotation) break;
+        emitApiTrace(traceFor(
+          provider,
+          effectiveModel,
+          key,
+          index + 1,
+          keyPool.length,
+          response.status,
+          `Ротация модели Gemini: ${effectiveModel} → ${nextModel}.`,
+          { chars: 0, finishReason: finishReasonFor(payload) },
+        ));
+        effectiveModel = nextModel;
+        response = await fetch(`${GEMINI_URL}/${encodeURIComponent(effectiveModel)}:generateContent?key=${encodeURIComponent(key)}`, {
+          method: "POST",
+          signal: request.signal,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: system }] },
+            contents: [{ role: "user", parts: [{ text: request.prompt }] }],
+            generationConfig: {
+              temperature: request.temperature ?? 0.75,
+              maxOutputTokens: maxTokens,
+              responseMimeType: request.json ? "application/json" : "text/plain",
+            },
+          }),
+        });
+        payload = await response.json().catch(() => ({}));
+      }
+    }
+
     // 504 означает, что NVIDIA не отдала результат. Повтор безопасен: текста ответа
     // ещё нет. Во второй попытке сокращаем лимит, чтобы снизить нагрузку на gateway.
     if (provider === "nvidia" && response.status === 504) {
@@ -431,9 +490,10 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, undefined, { chars: text.length, finishReason: finishReasonFor(payload) }));
         return text;
       } catch (error: any) {
-        const nextProvider = provider === "nvidia" ? providerAfterNvidia(request.apiKeys || {}) : undefined;
+        const nextProvider = nextFallbackProvider(provider, request.apiKeys || {});
+        const exhaustedNote = provider === "nvidia" || provider === "gemini" ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
         const message = nextProvider
-          ? `${error?.message || "NVIDIA не передала текст."} NVIDIA исчерпала ротацию моделей; переход к ${providerLabel(nextProvider)}.`
+          ? `${error?.message || `${providerLabel(provider)} не передала текст.`}${exhaustedNote} переход к ${providerLabel(nextProvider)}.`
           : error?.message || "Успешный ответ без текста.";
         const trace = traceFor(
           provider,
@@ -451,9 +511,10 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         throw new DirectProviderError(String(trace.message), 502, trace);
       }
     }
-    const nextProvider = provider === "nvidia" ? providerAfterNvidia(request.apiKeys || {}) : undefined;
-    const messageWithFallback = nextProvider && provider === "nvidia"
-      ? `${providerMessage}. NVIDIA исчерпала ротацию моделей; переход к ${providerLabel(nextProvider)}.`
+    const nextProvider = nextFallbackProvider(provider, request.apiKeys || {});
+    const exhaustedNote = provider === "nvidia" || provider === "gemini" ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
+    const messageWithFallback = nextProvider
+      ? `${providerMessage}.${exhaustedNote} переход к ${providerLabel(nextProvider)}.`
       : providerMessage;
     const trace = traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, messageWithFallback, { chars: 0, finishReason: finishReasonFor(payload) });
     emitApiTrace(trace);
