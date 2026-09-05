@@ -876,6 +876,7 @@ export {
 
 /** Объединённый каталог: оригинальные 80+ паттернов + 50 новых */
 export { AI_TELL_CATALOG_EXTENDED as AI_TELL_CATALOG_V2_EXTRA } from "./humanStyleEnhanced";
+export { NARRATIVE_ARCHITECTURE_CHECKLIST } from "./humanStyleEnhanced";
 
 /**
  * aiTellScoreFull — расширенная версия aiTellScore(), использующая

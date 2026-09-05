@@ -6,6 +6,7 @@ import {
   AI_TELL_CATALOG_EXTENDED,
   aiTellScore,
   detectAiTellsEnhanced,
+  NARRATIVE_ARCHITECTURE_CHECKLIST,
   resolveHumanizeDepth,
   runMultiDetectorGate,
 } from "../../server/humanStyle";
@@ -756,13 +757,17 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         const beforeWords = countGeneratedWords(text);
         const beforeAudit = auditHumanizedText(text, genre, depthConfig.scoreGate);
         const rewriteMaxTokens = humanizeMaxTokens(beforeChars);
+        // На «максимальной» глубине штампов и синтаксиса уже недостаточно — добавляем
+        // архитектурный уровень (тема/сюжет/развязка/сеть персонажей), который локальный
+        // regex-аудит в принципе не ловит, только суждение модели при переписывании.
+        const architectureNote = depth === "maximum" ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}` : "";
         const humanizedText = await generate({
           provider: credentials.provider,
           model: credentials.model,
           apiKeys: credentials.keys,
           maxTokens: rewriteMaxTokens,
           system: "Ты финальный литературный редактор. Верни только готовый русский художественный текст без комментариев.",
-          prompt: `${compactContext(body)}${humanizeDirective(body)}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости. Верни только готовую версию.`,
+          prompt: `${compactContext(body)}${humanizeDirective(body)}${architectureNote}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости. Верни только готовую версию.`,
         });
         // Полный постпроход иногда самовольно сокращает длинный черновик. В таком
         // случае сохраняем объёмную версию, а не выдаём пользователю короткий текст.

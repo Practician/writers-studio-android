@@ -638,3 +638,27 @@ test("full-chapter humanize pass requests a token budget scaled to the draft len
   // Черновик длиной ~26 000 символов не должен получить лимит "как для одного чанка" (6 144).
   assert.equal(requestedMaxTokens[1] > 6_144, true);
 });
+
+test("maximum-depth humanize prompt includes the narrative-architecture checklist, balanced does not", async () => {
+  const prompts: string[] = [];
+  async function runWithDepth(depth: string) {
+    await withMockFetch(async (_url, init) => {
+      const body = JSON.parse(String(init?.body || "{}"));
+      prompts.push(body.messages?.[1]?.content || "");
+      return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный текст." } }] }), { status: 200 });
+    }, () => directApi("/api/writer/ai", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "improve",
+        text: "Короткий черновик для проверки.",
+        humanize: true,
+        humanizeDepth: depth,
+        llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+      }),
+    }));
+  }
+  await runWithDepth("maximum");
+  await runWithDepth("balanced");
+  assert.equal(prompts[1].includes("Тема: не проговаривай мораль впрямую"), true);
+  assert.equal(prompts[3].includes("Тема: не проговаривай мораль впрямую"), false);
+});
