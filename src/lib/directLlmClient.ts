@@ -6,6 +6,9 @@ import {
   AI_TELL_CATALOG_EXTENDED,
   aiTellScore,
   detectAiTellsEnhanced,
+  DISCOURSE_FLOW_CHECKLIST,
+  HUMAN_POSITIVE_MARKERS_CHECKLIST,
+  modelFingerprintGuidance,
   NARRATIVE_ARCHITECTURE_CHECKLIST,
   resolveHumanizeDepth,
   runMultiDetectorGate,
@@ -626,7 +629,7 @@ function promptForAction(action: string, body: any): { system: string; prompt: s
   if (action === "evaluate_idea") return { system: "Ты опытный литературный редактор.", prompt: `${context}\n\nДай практическую оценку идеи: сильные стороны, риски, конкретные улучшения.` };
   if (action === "brainstorm") return { system: "Ты творческий соавтор.", prompt: `${context}\n\nПредложи свежие варианты для темы: ${body?.topic || body?.customPrompt || "следующей сцены"}. Дай несколько конкретных идей.` };
   if (action === "muse") return { system: "Ты Муза — бережный соавтор писателя.", prompt: `${context}\n\nОтветь на вопрос автора: ${body?.customPrompt || body?.prompt || "Помоги со следующей сценой."}` };
-  if (action === "improve" || action === "rewrite_detector_segments") return { system: "Ты бережный литературный редактор. Сохраняй события, имена и факты.", prompt: `${context}${humanize}\n\nПерепиши текст по задаче «${body?.stylePreset || body?.customPrompt || "улучшить стиль"}». Верни только готовый текст.\n\nТекст:\n${text}` };
+  if (action === "improve") return { system: "Ты бережный литературный редактор. Сохраняй события, имена и факты.", prompt: `${context}${humanize}\n\nПерепиши текст по задаче «${body?.stylePreset || body?.customPrompt || "улучшить стиль"}». Верни только готовый текст.\n\nТекст:\n${text}` };
   if (action === "continue" || action === "generate_full_chapter") return { system: "Ты пишешь художественную прозу по канону автора. Не объясняй свои действия.", prompt: `${context}${humanize}\n\n${action === "continue" ? "Продолжи текущую сцену 4–7 содержательными абзацами, с действием, деталями и завершённым микроповоротом" : "Напиши полноценную художественную главу объёмом около 3 300 слов (допустимо ±10%), с несколькими сценами, диалогами, конкретными деталями и завершённым поворотом. Не обрывай текст до достижения 3 000 слов"}. Учти пожелание: ${body?.customPrompt || "сохрани тон и канон"}.\n\nТекущий текст:\n${text}` };
   return { system: "Ты литературный помощник.", prompt: `${context}\n\n${body?.customPrompt || "Помоги автору с текстом."}\n\n${text}` };
 }
@@ -718,6 +721,78 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
     }
     if (path.startsWith("/api/writer/ai")) {
       const action = body.action || "muse";
+
+      // "rewrite_detector_segments" получает от AuthorEditorPanel не body.text, а
+      // detectorSegments (пары text+label из импортированного JSON нейродетектора).
+      // Раньше это молча проваливалось в общую ветку promptForAction, которая читает
+      // только body.text — с пустым текстом на входе результат был непредсказуемым
+      // и заведомо хуже точечной посегментной правки, ради которой кнопка и существует.
+      if (action === "rewrite_detector_segments") {
+        const segments: Array<{ text?: string; label?: string }> = Array.isArray(body.detectorSegments) ? body.detectorSegments : [];
+        if (!segments.length) return json({ error: "Нет сегментов детектора для переписывания." }, 400);
+        const depth = body?.humanizeDepth === "fast" || body?.humanizeDepth === "balanced" || body?.humanizeDepth === "maximum"
+          ? body.humanizeDepth
+          : "maximum";
+        const depthConfig = resolveHumanizeDepth(depth);
+        const genre = mapGenreContext(body?.genre);
+        const context = compactContext(body);
+        const humanize = humanizeDirective({ ...body, humanize: true, humanizeDepth: depth });
+        // На «максимальной» глубине штампов и синтаксиса уже недостаточно — добавляем
+        // архитектурный уровень (тема/сюжет/развязка/связность абзацев/позитивные
+        // ориентиры), который локальный regex-аудит в принципе не ловит, только суждение
+        // модели при переписывании. Плюс тики именно этой модели (DeepSeek/Gemini) —
+        // применимо при любой глубине кроме «Быстро», это дёшево и всегда к месту.
+        const architectureNote = depth === "maximum"
+          ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}\n\n${DISCOURSE_FLOW_CHECKLIST}\n\n${HUMAN_POSITIVE_MARKERS_CHECKLIST}`
+          : "";
+        const fingerprintNote = depth !== "fast" ? modelFingerprintGuidance(credentials.provider, credentials.model) : "";
+        let rewrittenCount = 0;
+        const resultSegments: string[] = [];
+        for (const segment of segments) {
+          const segmentText = String(segment?.text || "");
+          const isAiFlagged = segment?.label === "AI" || segment?.label === "LIKELY_AI";
+          // HUMAN/LIKELY_HUMAN/UNKNOWN не трогаем — это и есть «ратчет»: правим только
+          // то, что реально помечено детектором, остальное сохраняем как есть.
+          if (!isAiFlagged || !segmentText.trim()) { resultSegments.push(segmentText); continue; }
+          const rewritten = await generate({
+            provider: credentials.provider,
+            model: credentials.model,
+            apiKeys: credentials.keys,
+            maxTokens: humanizeMaxTokens(segmentText.length),
+            system: "Ты бережный литературный редактор. Правишь только присланный фрагмент из середины главы, не сочиняя вступление и не меняя её события.",
+            prompt: `${context}${humanize}${architectureNote}${fingerprintNote}\n\nФРАГМЕНТ НИЖЕ — кусок из середины уже написанной главы; детектор пометил именно его как ИИ-текст. Перепиши только этот фрагмент: живее, разнообразнее по ритму, без штампов и канцелярита. Сохрани все события, факты, имена и объём — это цитата, а не новая сцена. Верни только исправленный фрагмент без пояснений.\n\nФРАГМЕНТ:\n${segmentText}`,
+          });
+          const hygiene = sanitizeGeneratedText(rewritten);
+          const originalWords = countGeneratedWords(segmentText);
+          const candidateWords = countGeneratedWords(hygiene.text);
+          // Не принимаем результат, который заметно короче исходного фрагмента — обрезка
+          // означает потерю событий/деталей, а не удачную правку.
+          const accept = candidateWords >= Math.floor(originalWords * 0.7);
+          resultSegments.push(accept ? hygiene.text : segmentText);
+          if (accept) rewrittenCount += 1;
+        }
+        const assembled = resultSegments.join(" ").replace(/[ \t]+/g, " ").trim();
+        const beforeAudit = auditHumanizedText(segments.map((segment) => String(segment?.text || "")).join(" "), genre, depthConfig.scoreGate);
+        const finalAudit = auditHumanizedText(assembled, genre, depthConfig.scoreGate);
+        const humanizeReport: HumanizeReport = {
+          scoreBefore: beforeAudit.score,
+          scoreAfter: finalAudit.score,
+          refinedBlocks: rewrittenCount,
+          flaggedLabels: beforeAudit.labels,
+          unresolvedLabels: finalAudit.gatePassed ? [] : finalAudit.labels,
+          burstiness: finalAudit.burstiness,
+          openerRepetition: finalAudit.openerRepetition,
+          patternDensity: finalAudit.patternDensity,
+          gatePassed: finalAudit.gatePassed,
+          passesRun: 1,
+          scenesGenerated: 0,
+          depth: depthConfig.id,
+          mode: "single",
+          detectorSegmentsRewritten: rewrittenCount,
+        };
+        return json({ result: assembled, rewrittenCount, model: credentials.model, humanizeReport });
+      }
+
       const setup = promptForAction(action, body);
       let text = await generate({ provider: credentials.provider, model: credentials.model, apiKeys: credentials.keys, prompt: setup.prompt, system: setup.system, json: setup.json });
       if (action === "editorial_review") return json({ review: safeJson(text, { readiness: "Проверка готова", summary: text, checks: [], risks: [], nextStep: "Откройте результат и внесите правки." }) });
@@ -760,14 +835,22 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         // На «максимальной» глубине штампов и синтаксиса уже недостаточно — добавляем
         // архитектурный уровень (тема/сюжет/развязка/сеть персонажей), который локальный
         // regex-аудит в принципе не ловит, только суждение модели при переписывании.
-        const architectureNote = depth === "maximum" ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}` : "";
+        // На «максимальной» глубине штампов и синтаксиса уже недостаточно — добавляем
+        // архитектурный уровень (тема/сюжет/развязка/связность абзацев/позитивные
+        // ориентиры), который локальный regex-аудит в принципе не ловит, только суждение
+        // модели при переписывании. Плюс тики именно этой модели (DeepSeek/Gemini) —
+        // применимо при любой глубине кроме «Быстро», это дёшево и всегда к месту.
+        const architectureNote = depth === "maximum"
+          ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}\n\n${DISCOURSE_FLOW_CHECKLIST}\n\n${HUMAN_POSITIVE_MARKERS_CHECKLIST}`
+          : "";
+        const fingerprintNote = depth !== "fast" ? modelFingerprintGuidance(credentials.provider, credentials.model) : "";
         const humanizedText = await generate({
           provider: credentials.provider,
           model: credentials.model,
           apiKeys: credentials.keys,
           maxTokens: rewriteMaxTokens,
           system: "Ты финальный литературный редактор. Верни только готовый русский художественный текст без комментариев.",
-          prompt: `${compactContext(body)}${humanizeDirective(body)}${architectureNote}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости. Верни только готовую версию.`,
+          prompt: `${compactContext(body)}${humanizeDirective(body)}${architectureNote}${fingerprintNote}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости. Верни только готовую версию.`,
         });
         // Полный постпроход иногда самовольно сокращает длинный черновик. В таком
         // случае сохраняем объёмную версию, а не выдаём пользователю короткий текст.

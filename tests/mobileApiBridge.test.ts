@@ -662,3 +662,116 @@ test("maximum-depth humanize prompt includes the narrative-architecture checklis
   assert.equal(prompts[1].includes("Тема: не проговаривай мораль впрямую"), true);
   assert.equal(prompts[3].includes("Тема: не проговаривай мораль впрямую"), false);
 });
+
+test("rewrite_detector_segments rewrites only AI/LIKELY_AI segments and preserves HUMAN ones verbatim", async () => {
+  const rewriteCalls: string[] = [];
+  const response = await withMockFetch(async (_url, init) => {
+    const requestBody = JSON.parse(String(init?.body || "{}"));
+    const promptText = requestBody.messages?.[1]?.content || "";
+    rewriteCalls.push(promptText);
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный человечный вариант фрагмента с тем же смыслом событий." } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "rewrite_detector_segments",
+      humanizeDepth: "balanced",
+      detectorSegments: [
+        { text: "Человеческий фрагмент, который детектор не тронул.", label: "HUMAN" },
+        { text: "Штампованный ИИ-фрагмент про коридор и тепловизор, который нужно переписать.", label: "AI" },
+        { text: "Ещё один человеческий кусок диалога.", label: "HUMAN" },
+        { text: "Вероятно ИИ-фрагмент с канцеляритом.", label: "LIKELY_AI" },
+      ],
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  // Переписаны ровно 2 фрагмента (AI + LIKELY_AI), HUMAN-фрагменты не отправлялись в generate().
+  assert.equal(rewriteCalls.length, 2);
+  assert.equal(rewriteCalls.every((prompt) => prompt.includes("ФРАГМЕНТ:")), true);
+  assert.equal(payload.rewrittenCount, 2);
+  assert.equal(payload.result.includes("Человеческий фрагмент, который детектор не тронул."), true);
+  assert.equal(payload.result.includes("Ещё один человеческий кусок диалога."), true);
+  assert.equal(payload.result.includes("Переписанный человечный вариант фрагмента"), true);
+  assert.equal(payload.result.includes("Штампованный ИИ-фрагмент"), false);
+  assert.equal(payload.humanizeReport.detectorSegmentsRewritten, 2);
+  assert.equal(typeof payload.humanizeReport.scoreBefore, "number");
+});
+
+test("rewrite_detector_segments keeps the original segment when the rewrite is truncated too short", async () => {
+  const originalSegment = "Слово ".repeat(200).trim(); // длинный ИИ-фрагмент
+  const response = await withMockFetch(async () => {
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Слишком короткая правка." } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "rewrite_detector_segments",
+      humanizeDepth: "maximum",
+      detectorSegments: [{ text: originalSegment, label: "AI" }],
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(payload.rewrittenCount, 0);
+  assert.equal(payload.result, originalSegment);
+});
+
+test("maximum-depth humanize prompt also includes discourse-flow and human-positive checklists", async () => {
+  const prompts: string[] = [];
+  await withMockFetch(async (_url, init) => {
+    const requestBody = JSON.parse(String(init?.body || "{}"));
+    prompts.push(requestBody.messages?.[1]?.content || "");
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный текст." } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "improve",
+      text: "Короткий черновик для проверки.",
+      humanize: true,
+      humanizeDepth: "maximum",
+      llmApiFields: { llmProvider: "nvidia", model: "deepseek-ai/deepseek-v4-flash-0731", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const humanizePrompt = prompts[1];
+  assert.equal(humanizePrompt.includes("Уровень связности между абзацами"), true);
+  assert.equal(humanizePrompt.includes("Позитивные ориентиры человеческого письма"), true);
+});
+
+test("humanize prompt adds DeepSeek-specific fingerprint notes only for a DeepSeek model", async () => {
+  const prompts: string[] = [];
+  await withMockFetch(async (_url, init) => {
+    const requestBody = JSON.parse(String(init?.body || "{}"));
+    prompts.push(requestBody.messages?.[1]?.content || "");
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный текст." } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "improve",
+      text: "Короткий черновик для проверки.",
+      humanize: true,
+      humanizeDepth: "balanced",
+      llmApiFields: { llmProvider: "nvidia", model: "deepseek-ai/deepseek-v4-flash-0731", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  assert.equal(prompts[1].includes("Особенности именно этой модели (DeepSeek)"), true);
+  assert.equal(prompts[1].includes("Особенности именно этой модели (Gemini)"), false);
+});
+
+test("rewrite_detector_segments per-segment prompt includes DeepSeek fingerprint notes when using NVIDIA/DeepSeek", async () => {
+  const prompts: string[] = [];
+  await withMockFetch(async (_url, init) => {
+    const requestBody = JSON.parse(String(init?.body || "{}"));
+    prompts.push(requestBody.messages?.[1]?.content || "");
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный человечный фрагмент с тем же смыслом." } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "rewrite_detector_segments",
+      humanizeDepth: "maximum",
+      detectorSegments: [{ text: "Штампованный фрагмент про коридор.", label: "AI" }],
+      llmApiFields: { llmProvider: "nvidia", model: "deepseek-ai/deepseek-v4-flash-0731", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  assert.equal(prompts[0].includes("Особенности именно этой модели (DeepSeek)"), true);
+  assert.equal(prompts[0].includes("Уровень связности между абзацами"), true);
+});
