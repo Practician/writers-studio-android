@@ -1,4 +1,4 @@
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import type { AuthorEditAudit, AuthorVoiceSheet, HumanizeReport } from "../types";
 import { GEMINI_LITERARY_MODELS } from "./llmSettings";
 import {
@@ -31,6 +31,8 @@ type DirectRequest = {
   /** Явный лимит ответа: особенно важен для NVIDIA, где серверный default равен 1024. */
   maxTokens?: number;
   json?: boolean;
+  /** Внутреннее: провайдеры, уже испробованные в этой цепочке каскада (не для внешних вызовов). */
+  triedProviders?: readonly Exclude<DirectProvider, "auto">[];
 };
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -55,11 +57,11 @@ const NVIDIA_FALLBACK_MODELS = [
 ];
 const NVIDIA_MAX_MODEL_ATTEMPTS = 3;
 
-// Собственные литературные профили Gemini (та же тройка, что в настройках приложения).
+// Собственные литературные профили Gemini (та же четвёрка, что в настройках приложения).
 // При перегрузке/недоступности основной модели пробуем следующую, прежде чем
 // уходить к другому провайдеру — так временный HTTP 503 не выглядит зависанием.
 const GEMINI_FALLBACK_MODELS = GEMINI_LITERARY_MODELS.map((profile) => profile.id);
-const GEMINI_MAX_MODEL_ATTEMPTS = 3;
+const GEMINI_MAX_MODEL_ATTEMPTS = 4;
 
 type ApiTrace = {
   provider: Exclude<DirectProvider, "auto">;
@@ -197,10 +199,11 @@ function geminiModelChain(primary: string): string[] {
 }
 
 function shouldRotateGeminiModel(status: number): boolean {
-  // Аналогично NVIDIA: 429 — личный лимит ключа/проекта, для него первична
-  // ротация ключей ниже. Модель меняем при её недоступности (404/410),
-  // внутренней ошибке или перегрузке.
-  return status === 404 || status === 410 || status === 500 || status === 502 || status === 503 || status === 504;
+  // В отличие от NVIDIA, у Gemini квоты раздельные по каждой модели (у flash и
+  // pro разные RPM/RPD-лимиты) — 429 на одной модели не говорит о доступности
+  // другой под тем же ключом, поэтому, в отличие от NVIDIA, тоже ротируем модель.
+  // Модель также меняем при её недоступности (404/410), внутренней ошибке или перегрузке.
+  return status === 404 || status === 410 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
 
@@ -208,8 +211,16 @@ function shouldRotateGeminiModel(status: number): boolean {
 // Gemini → NVIDIA → OpenRouter (исключая провайдера, который только что отказал).
 const PROVIDER_FALLBACK_ORDER: readonly Exclude<DirectProvider, "auto">[] = ["groq", "gemini", "nvidia", "openrouter"];
 
-function nextFallbackProvider(current: Exclude<DirectProvider, "auto">, keys: ApiKeys): Exclude<DirectProvider, "auto"> | undefined {
-  return PROVIDER_FALLBACK_ORDER.find((candidate) => candidate !== current && hasProviderKey(keys, candidate));
+// Порядок каскада между провайдерами при полном отказе текущего: быстрый Groq →
+// Gemini → NVIDIA → OpenRouter. Исключает не только текущего провайдера, но и всех
+// уже испробованных в этой цепочке — иначе NVIDIA↔Gemini могут бесконечно
+// перебрасывать друг на друга (у обоих есть ключ) и OpenRouter так и не будет
+// вызван, хотя он последний в списке и тоже настроен.
+function nextFallbackProvider(
+  tried: readonly Exclude<DirectProvider, "auto">[],
+  keys: ApiKeys,
+): Exclude<DirectProvider, "auto"> | undefined {
+  return PROVIDER_FALLBACK_ORDER.find((candidate) => !tried.includes(candidate) && hasProviderKey(keys, candidate));
 }
 
 export function isAutonomousApk(): boolean {
@@ -292,6 +303,9 @@ function hasVisibleResponseText(payload: any): boolean {
 export async function directGenerate(request: DirectRequest): Promise<string> {
   const requestedProvider = request.provider || "auto";
   const provider = selectProvider(requestedProvider, request.apiKeys || {}, request.model);
+  // Копим провайдеров, уже опробованных в этой цепочке каскада (включая текущий),
+  // чтобы дальнейшие фолбэки не возвращались к уже отказавшему.
+  const triedSoFar = [...(request.triedProviders || []), provider];
   // Автовыбор определяет и провайдера, и совместимую с ним модель.
   // Явно выбранный провайдер получает только один из встроенных литературных профилей.
   const model = requestedProvider === "auto"
@@ -308,10 +322,37 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   // чтобы вся существующая логика ретраев/ротации/фолбэка сработала без изменений.
   const CLIENT_TIMEOUT_MS = 90_000;
   async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+    if (request.signal?.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+    if (Capacitor.isNativePlatform()) {
+      // capacitor.config патчит window.fetch через нативный мост (CapacitorHttp),
+      // чтобы обходить CORS у внешних AI API — но этот мост не читает AbortSignal:
+      // обычный fetch() с AbortController здесь никогда не сработает и молча ждёт
+      // ответа шлюза столько, сколько он сам решит (замечено — до 5 минут).
+      // Настоящий таймаут на нативной платформе — только через прямой вызов
+      // CapacitorHttp.request() с readTimeout/connectTimeout.
+      try {
+        const httpResponse = await CapacitorHttp.request({
+          url,
+          method: init.method || "GET",
+          headers: (init.headers as Record<string, string>) || {},
+          data: typeof init.body === "string" ? JSON.parse(init.body) : init.body,
+          readTimeout: CLIENT_TIMEOUT_MS,
+          connectTimeout: CLIENT_TIMEOUT_MS,
+        });
+        const status = httpResponse.status;
+        return { status, ok: status >= 200 && status < 300, json: async () => httpResponse.data } as Response;
+      } catch (err) {
+        // Таймаут и любая сетевая ошибка нативного моста трактуются как временный
+        // сбой шлюза (эквивалент 504) — дальше срабатывает уже существующая
+        // логика ретраев/ротации/фолбэка без каких-либо изменений.
+        const message = err instanceof Error ? err.message : String(err);
+        return new Response(JSON.stringify({ error: { message: `Клиентский таймаут или сетевая ошибка: ${message}` } }), { status: 504 });
+      }
+    }
+    // Веб/дев-сборка (без нативного моста) — обычный fetch с AbortController-таймаутом.
     const controller = new AbortController();
     const onUserAbort = () => controller.abort(request.signal?.reason);
-    if (request.signal?.aborted) controller.abort(request.signal.reason);
-    else request.signal?.addEventListener("abort", onUserAbort);
+    request.signal?.addEventListener("abort", onUserAbort);
     const timeoutId = setTimeout(() => controller.abort(new DOMException("client-timeout", "TimeoutError")), CLIENT_TIMEOUT_MS);
     try {
       return await fetch(url, { ...init, signal: controller.signal });
@@ -367,8 +408,9 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
 
     payload = await response.json().catch(() => ({}));
 
-    // После неудачи основной модели пробуем до двух резервных литературных
-    // профилей Gemini на том же ключе — управляемая деградация вместо зависания
+    // После неудачи основной модели пробуем до трёх резервных литературных
+    // профилей Gemini на том же ключе (включая gemini-2.5-flash — старая модель
+    // с заметно большей дневной квотой) — управляемая деградация вместо зависания
     // на временной перегрузке (HTTP 503) или снятой с провода модели (404).
     if (provider === "gemini") {
       const candidates = geminiModelChain(model).slice(1);
@@ -517,7 +559,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, undefined, { chars: text.length, finishReason: finishReasonFor(payload) }));
         return text;
       } catch (error: any) {
-        const nextProvider = nextFallbackProvider(provider, request.apiKeys || {});
+        const nextProvider = nextFallbackProvider(triedSoFar, request.apiKeys || {});
         const exhaustedNote = provider === "nvidia" || provider === "gemini" ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
         const message = nextProvider
           ? `${error?.message || `${providerLabel(provider)} не передала текст.`}${exhaustedNote} переход к ${providerLabel(nextProvider)}.`
@@ -533,12 +575,12 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
           { chars: 0, finishReason: finishReasonFor(payload) },
         );
         emitApiTrace(trace);
-        if (nextProvider) return directGenerate({ ...request, provider: nextProvider, model: undefined });
+        if (nextProvider) return directGenerate({ ...request, provider: nextProvider, model: undefined, triedProviders: triedSoFar });
         // У провайдера HTTP 200, но для UI это должна быть явная ошибка, а не пустой результат.
         throw new DirectProviderError(String(trace.message), 502, trace);
       }
     }
-    const nextProvider = nextFallbackProvider(provider, request.apiKeys || {});
+    const nextProvider = nextFallbackProvider(triedSoFar, request.apiKeys || {});
     const exhaustedNote = provider === "nvidia" || provider === "gemini" ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
     const messageWithFallback = nextProvider
       ? `${providerMessage}.${exhaustedNote} переход к ${providerLabel(nextProvider)}.`
@@ -550,7 +592,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       notifyApiKeyRotation(provider, index + 1, index + 2, keyPool.length, response.status);
       continue;
     }
-    if (nextProvider) return directGenerate({ ...request, provider: nextProvider, model: undefined });
+    if (nextProvider) return directGenerate({ ...request, provider: nextProvider, model: undefined, triedProviders: triedSoFar });
     throw new DirectProviderError(String(messageWithFallback), response.status, trace);
   }
 

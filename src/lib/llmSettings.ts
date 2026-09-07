@@ -29,8 +29,9 @@ export type LiteraryModelProfile = { id: string; label: string; description: str
 
 export const GEMINI_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
   { id: DEFAULT_GEMINI_MODEL, label: "Литературный авто — Gemini 3.7 Flash", description: "Рекомендуемый быстрый профиль для русской прозы и продолжения сцен." },
-  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro — глубокая редактура", description: "Вариант для сложной композиции; preview-модель может иметь отдельные лимиты." },
   { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash — баланс", description: "Стабильный баланс между темпом, связностью и стоимостью." },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — большая квота", description: "Более старая, но стабильная модель с заметно большей дневной квотой на бесплатном тарифе — надёжный резерв, когда свежие модели упираются в лимиты." },
+  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro — глубокая редактура", description: "Вариант для сложной композиции; preview-модель имеет отдельную, более строгую квоту — стоит в конце цепочки ротации, чтобы не тратить попытку на гарантированный HTTP 429." },
 ];
 
 export const GROQ_LITERARY_MODELS: readonly LiteraryModelProfile[] = [

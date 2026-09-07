@@ -391,13 +391,14 @@ test("Gemini HTTP 503 (high demand) rotates its own models before falling back t
     maxTokens: 2_048,
   }));
   assert.equal(text, "Ответ Groq после перегрузки Gemini.");
-  // Все 3 литературных профиля Gemini перегружены (503), затем переход к Groq.
-  assert.equal(calls.length, 4);
-  assert.equal(calls.slice(0, 3).every((call) => call.url.includes("generativelanguage.googleapis.com")), true);
+  // Все 4 литературных профиля Gemini перегружены (503), затем переход к Groq.
+  assert.equal(calls.length, 5);
+  assert.equal(calls.slice(0, 4).every((call) => call.url.includes("generativelanguage.googleapis.com")), true);
   assert.equal(calls[0].url.includes("models/gemini-3.7-flash:generateContent"), true);
-  assert.equal(calls[1].url.includes("models/gemini-3.1-pro-preview:generateContent"), true);
-  assert.equal(calls[2].url.includes("models/gemini-3.6-flash:generateContent"), true);
-  assert.equal(calls[3].url, "https://api.groq.com/openai/v1/chat/completions");
+  assert.equal(calls[1].url.includes("models/gemini-3.6-flash:generateContent"), true);
+  assert.equal(calls[2].url.includes("models/gemini-2.5-flash:generateContent"), true);
+  assert.equal(calls[3].url.includes("models/gemini-3.1-pro-preview:generateContent"), true);
+  assert.equal(calls[4].url, "https://api.groq.com/openai/v1/chat/completions");
 });
 
 test("Gemini recovers on its second literary model after the first returns HTTP 503", async () => {
@@ -417,7 +418,7 @@ test("Gemini recovers on its second literary model after the first returns HTTP 
   }));
   assert.equal(text, "Ответ от резервной модели Gemini.");
   assert.equal(calls.length, 2);
-  assert.equal(calls[1].includes("models/gemini-3.1-pro-preview:generateContent"), true);
+  assert.equal(calls[1].includes("models/gemini-3.6-flash:generateContent"), true);
 });
 
 test("all NVIDIA 504 diagnostics show retry, model rotations, and Groq handoff", async () => {
@@ -774,4 +775,48 @@ test("rewrite_detector_segments per-segment prompt includes DeepSeek fingerprint
   }));
   assert.equal(prompts[0].includes("Особенности именно этой модели (DeepSeek)"), true);
   assert.equal(prompts[0].includes("Уровень связности между абзацами"), true);
+});
+
+test("provider cascade never bounces back to an already-failed provider and reaches OpenRouter", async () => {
+  // Раньше NVIDIA и Gemini могли бесконечно перебрасывать друг на друга (у обоих
+  // есть ключ), и OpenRouter, будучи последним в списке, так и не вызывался.
+  const providersHit: string[] = [];
+  const text = await withMockFetch(async (url) => {
+    if (url.includes("integrate.api.nvidia.com")) { providersHit.push("nvidia"); return new Response(JSON.stringify({ error: {} }), { status: 504 }); }
+    if (url.includes("generativelanguage.googleapis.com")) { providersHit.push("gemini"); return new Response(JSON.stringify({ error: {} }), { status: 503 }); }
+    if (url.includes("openrouter.ai")) { providersHit.push("openrouter"); return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ OpenRouter после полного каскада." } }] }), { status: 200 }); }
+    return new Response(JSON.stringify({ error: {} }), { status: 500 });
+  }, () => directGenerate({
+    provider: "nvidia",
+    model: "meta/llama-3.3-70b-instruct", // модель вне встроенной цепочки NVIDIA — рвётся сразу на провайдерный каскад
+    apiKeys: { nvidia: "nvapi-test", gemini: "AIza-test", openrouter: "sk-or-test" },
+    prompt: "Тест полного каскада без пинг-понга.",
+  }));
+  assert.equal(text, "Ответ OpenRouter после полного каскада.");
+  assert.equal(providersHit.includes("openrouter"), true);
+  // Каждый провайдер встречается в каскаде, но набор различных провайдеров —
+  // ровно nvidia/gemini/openrouter, без повторного возврата к уже отказавшему.
+  assert.deepEqual([...new Set(providersHit)].sort(), ["gemini", "nvidia", "openrouter"].sort());
+});
+
+test("Gemini HTTP 429 on one model still rotates to the next model (per-model quotas, unlike NVIDIA)", async () => {
+  const models: string[] = [];
+  const text = await withMockFetch(async (url) => {
+    const model = url.match(/models\/([^:]+):generateContent/)?.[1] || "";
+    models.push(model);
+    if (model === "gemini-3.7-flash") {
+      return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+    }
+    if (model === "gemini-3.6-flash") {
+      return new Response(JSON.stringify({ error: { message: "Quota exceeded for metric" } }), { status: 429 });
+    }
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Ответ от третьей модели Gemini." }] } }] }), { status: 200 });
+  }, () => directGenerate({
+    provider: "gemini",
+    model: "gemini-3.7-flash",
+    apiKeys: { gemini: "AIza-test" },
+    prompt: "Тест ротации после 429 у отдельной модели.",
+  }));
+  assert.equal(text, "Ответ от третьей модели Gemini.");
+  assert.deepEqual(models, ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash"]);
 });
