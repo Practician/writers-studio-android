@@ -820,3 +820,27 @@ test("Gemini HTTP 429 on one model still rotates to the next model (per-model qu
   assert.equal(text, "Ответ от третьей модели Gemini.");
   assert.deepEqual(models, ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash"]);
 });
+
+test("humanize pass rejects a result inflated ~40% beyond the draft (padding, not polish) and keeps the original", async () => {
+  const originalDraft = "Слово ".repeat(1_000).trim(); // 1000 слов — реалистичный объём главы
+  const inflatedResult = "Обзор ".repeat(1_400).trim(); // +40% — как в реальном логе, где текст раздулся
+  let calls = 0;
+  const response = await withMockFetch(async () => {
+    calls += 1;
+    // 1-й вызов — это "improve"-переписывание (ещё не сам проход очеловечивания);
+    // возвращаем его без раздутия, чтобы raздутие проверялось именно на проходе humanize.
+    const content = calls === 1 ? originalDraft : inflatedResult;
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "improve",
+      text: originalDraft,
+      humanize: true,
+      humanizeDepth: "fast",
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(payload.result, originalDraft);
+});

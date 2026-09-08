@@ -643,6 +643,13 @@ function countGeneratedWords(text: string): number {
   return (text.match(/[A-Za-zА-Яа-яЁё0-9]+(?:[-'][A-Za-zА-Яа-яЁё0-9]+)*/gu) || []).length;
 }
 
+// Процентный потолок роста ненадёжен на коротких текстах (единицы слов дают
+// огромный процентный разброс) — берём более мягкую из двух границ: процент
+// ИЛИ фиксированный запас слов.
+function maxAllowedGrowth(baseWords: number, ratio: number, wordBuffer = 80): number {
+  return Math.max(Math.ceil(baseWords * ratio), baseWords + wordBuffer);
+}
+
 function notifyChapterVolume(words: number, segments: number, target: number, complete: boolean): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent("writers-studio-chapter-volume", { detail: { words, segments, target, complete } }));
@@ -802,14 +809,15 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             apiKeys: credentials.keys,
             maxTokens: humanizeMaxTokens(segmentText.length),
             system: "Ты бережный литературный редактор. Правишь только присланный фрагмент из середины главы, не сочиняя вступление и не меняя её события.",
-            prompt: `${context}${humanize}${architectureNote}${fingerprintNote}\n\nФРАГМЕНТ НИЖЕ — кусок из середины уже написанной главы; детектор пометил именно его как ИИ-текст. Перепиши только этот фрагмент: живее, разнообразнее по ритму, без штампов и канцелярита. Сохрани все события, факты, имена и объём — это цитата, а не новая сцена. Верни только исправленный фрагмент без пояснений.\n\nФРАГМЕНТ:\n${segmentText}`,
+            prompt: `${context}${humanize}${architectureNote}${fingerprintNote}\n\nФРАГМЕНТ НИЖЕ — кусок из середины уже написанной главы; детектор пометил именно его как ИИ-текст. Перепиши только этот фрагмент: живее, разнообразнее по ритму, без штампов и канцелярита, без нагромождения сравнений и лишних сенсорных деталей. Сохрани все события, факты, имена и объём (не раздувай ради «живости») — это цитата, а не новая сцена. Верни только исправленный фрагмент без пояснений.\n\nФРАГМЕНТ:\n${segmentText}`,
           });
           const hygiene = sanitizeGeneratedText(rewritten);
           const originalWords = countGeneratedWords(segmentText);
           const candidateWords = countGeneratedWords(hygiene.text);
-          // Не принимаем результат, который заметно короче исходного фрагмента — обрезка
-          // означает потерю событий/деталей, а не удачную правку.
-          const accept = candidateWords >= Math.floor(originalWords * 0.7);
+          // Не принимаем результат, который заметно короче (обрезка — потеря событий)
+          // или заметно длиннее (раздувание сравнениями/деталями коррелирует с
+          // ухудшением у внешних детекторов) исходного фрагмента.
+          const accept = candidateWords >= Math.floor(originalWords * 0.7) && candidateWords <= maxAllowedGrowth(originalWords, 1.3);
           resultSegments.push(accept ? hygiene.text : segmentText);
           if (accept) rewrittenCount += 1;
         }
@@ -892,12 +900,19 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           apiKeys: credentials.keys,
           maxTokens: rewriteMaxTokens,
           system: "Ты финальный литературный редактор. Верни только готовый русский художественный текст без комментариев.",
-          prompt: `${compactContext(body)}${humanizeDirective(body)}${architectureNote}${fingerprintNote}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости. Верни только готовую версию.`,
+          prompt: `${compactContext(body)}${humanizeDirective(body)}${architectureNote}${fingerprintNote}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости, но и не раздувай его: не нанизывай сравнения одно на другое («как будто X, словно Y»), не добавляй лишних сенсорных описаний ради «живости» — итоговый объём должен остаться близким к исходному, без искусственного разрастания. Верни только готовую версию.`,
         });
         // Полный постпроход иногда самовольно сокращает длинный черновик. В таком
         // случае сохраняем объёмную версию, а не выдаём пользователю короткий текст.
         const humanizedWords = countGeneratedWords(humanizedText);
-        const acceptHumanized = action !== "generate_full_chapter" || humanizedWords >= Math.floor(beforeWords * 0.9);
+        // Раздутие текста при «очеловечивании» — не полировка, а обвес (лишние
+        // сравнения, сенсорные детали, каскады описаний). На практике именно
+        // разрастание текста на 30-40%+ коррелирует с ухудшением у внешних
+        // детекторов, даже когда наш локальный аудит показывает улучшение —
+        // поэтому режем рост так же, как режем чрезмерное сокращение.
+        const tooShort = action === "generate_full_chapter" && humanizedWords < Math.floor(beforeWords * 0.9);
+        const tooInflated = humanizedWords > maxAllowedGrowth(beforeWords, 1.25);
+        const acceptHumanized = !tooShort && !tooInflated;
         if (acceptHumanized) text = humanizedText;
 
         // Локальный аудит (каталог human-touch-max: базовые + расширенные ~130 паттернов,
@@ -916,12 +931,13 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             apiKeys: credentials.keys,
             maxTokens: humanizeMaxTokens(text.length),
             system: "Ты точечный литературный редактор. Правишь только отмеченные проблемы, не переписывая текст заново.",
-            prompt: `ТЕКСТ:\n${text}\n\nЛокальный аудит нашёл проблемы:\n${finalAudit.gateDetails.join("\n") || "признаки ИИ-текста выше порога"}\n${finalAudit.labels.length ? `Замеченные штампы: ${finalAudit.labels.join(", ")}.` : ""}\n\nТочечно исправь только эти места (ритм фраз, лексику, штампы), не меняя события, имена, канон, точку зрения и объём текста. Верни только исправленный текст целиком.`,
+            prompt: `ТЕКСТ:\n${text}\n\nЛокальный аудит нашёл проблемы:\n${finalAudit.gateDetails.join("\n") || "признаки ИИ-текста выше порога"}\n${finalAudit.labels.length ? `Замеченные штампы: ${finalAudit.labels.join(", ")}.` : ""}\n\nТочечно исправь только эти места (ритм фраз, лексику, штампы), не меняя события, имена, канон, точку зрения и объём текста; не добавляй новых сравнений и описаний сверх исходных. Верни только исправленный текст целиком.`,
           });
           const correctedHygiene = sanitizeGeneratedText(correction);
           const correctedAudit = auditHumanizedText(correctedHygiene.text, genre, depthConfig.scoreGate);
           const correctedWords = countGeneratedWords(correctedHygiene.text);
           const acceptCorrection = correctedWords >= Math.floor(countGeneratedWords(text) * 0.85)
+            && correctedWords <= maxAllowedGrowth(countGeneratedWords(text), 1.25)
             && correctedAudit.score <= finalAudit.score;
           if (acceptCorrection) {
             text = correctedHygiene.text;

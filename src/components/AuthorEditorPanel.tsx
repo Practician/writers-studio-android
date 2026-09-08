@@ -192,7 +192,15 @@ export default function AuthorEditorPanel({
     : scope === "detector" && selectedDetectorSegment
       ? selectedDetectorSegment.text
       : currentDraft;
-  const reportMatchesChapter = Boolean(detectorReport && detectorReport.fullText === currentDraft);
+  // Побайтовое сравнение слишком хрупкое: экспорт в docx/плоский текст для детектора
+  // почти неизбежно меняет переносы строк и пробелы, даже когда содержание не менялось.
+  // Само переписывание сегментов не использует fullText для сборки (только массив
+  // текстов сегментов), так что для проверки достаточно сравнивать по нормализованному
+  // пробельному контуру — это всё ещё ловит реально другую/отредактированную главу.
+  const normalizeForComparison = (value: string) => value.replace(/\s+/g, " ").trim();
+  const reportMatchesChapter = Boolean(
+    detectorReport && normalizeForComparison(detectorReport.fullText) === normalizeForComparison(currentDraft),
+  );
 
   const target = useMemo<AuthorEditTarget | null>(() => {
     if (!activeChapter) return null;
