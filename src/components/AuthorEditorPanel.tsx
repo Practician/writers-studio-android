@@ -91,6 +91,39 @@ function ProfileView({ profile }: { profile: AuthorVoiceSheet }) {
   );
 }
 
+/** Строит строку из букв/цифр и карту «индекс в нормализованной строке → индекс в исходной». */
+function normalizeWithMap(value: string): { text: string; map: number[] } {
+  let text = "";
+  const map: number[] = [];
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i].toLowerCase();
+    const c = ch === "ё" ? "е" : ch;
+    if (/[а-яa-z0-9]/.test(c)) {
+      text += c;
+      map.push(i);
+    }
+  }
+  return { text, map };
+}
+
+/**
+ * Ищет фрагмент текста (сегмент отчёта детектора) в главе по потоку букв/цифр
+ * и возвращает реальные границы в главе. Нужно, потому что нейродетектор
+ * нормализует типографику (ё→е, убирает тире/многоточия), и смещения из отчёта
+ * не совпадают с позициями в главе.
+ */
+function findDetectorSegmentRange(chapter: string, segment: string): { start: number; end: number } | null {
+  const chapterLetters = normalizeWithMap(chapter);
+  const segmentLetters = normalizeWithMap(segment);
+  if (!segmentLetters.text.length || !chapterLetters.text.length) return null;
+  const from = chapterLetters.text.indexOf(segmentLetters.text);
+  if (from < 0) return null;
+  const to = from + segmentLetters.text.length;
+  const start = chapterLetters.map[from];
+  const end = (chapterLetters.map[to - 1] ?? start) + 1;
+  return { start, end };
+}
+
 function DiffView({ original, revised }: { original: string; revised: string }) {
   const blocks = useMemo(() => diffParagraphs(original, revised), [original, revised]);
   return (
@@ -192,15 +225,13 @@ export default function AuthorEditorPanel({
     : scope === "detector" && selectedDetectorSegment
       ? selectedDetectorSegment.text
       : currentDraft;
-  // Побайтовое сравнение слишком хрупкое сразу по двум причинам:
-  // 1) экспорт в docx/плоский текст почти неизбежно меняет переносы строк и пробелы;
-  // 2) exportChapterDocx всегда добавляет перед телом главы название книги, «Глава: …»
-  //    и (если задан) «Синопсис: …» — их нет в currentDraft, поэтому строгое равенство
-  //    не совпадёт вообще никогда, даже без единой реальной правки текста.
-  // Само переписывание сегментов не использует fullText для сборки (только массив
-  // текстов сегментов), так что безопасно проверять вхождение нормализованного тела
-  // главы в нормализованный отчёт — это всё ещё ловит реально другую/отредактированную главу.
-  const normalizeForComparison = (value: string) => value.replace(/\s+/g, " ").trim();
+  // Побайтовое сравнение хрупкое: экспорт в docx добавляет перед телом главы название
+  // книги, «Глава: …» и «Синопсис: …», а сам нейродетектор возвращает текст с другой
+  // типографикой — без «ё» (ё→е), без длинных тире и многоточий. Поэтому сравниваем
+  // только поток букв/цифр: регистр, «ё» и все знаки препинания не влияют на результат,
+  // и глава совпадает с отчётом, даже если детектор переписал пунктуацию.
+  const normalizeForComparison = (value: string) =>
+    value.toLowerCase().replace(/ё/g, "е").replace(/[^а-яa-z0-9]+/g, "");
   const reportMatchesChapter = Boolean(
     detectorReport
     && normalizeForComparison(currentDraft).length > 0
@@ -221,12 +252,16 @@ export default function AuthorEditorPanel({
     }
     if (scope === "detector" && selectedDetectorSegment) {
       if (!reportMatchesChapter) return null;
+      // Смещения сегмента из отчёта посчитаны по нормализованному детектором тексту
+      // и не совпадают с позициями в главе. Ищем реальные границы по словам.
+      const range = findDetectorSegmentRange(currentDraft, selectedDetectorSegment.text);
+      if (!range) return null;
       return {
         chapterId: activeChapter.id,
         kind: "detector-segment",
-        start: selectedDetectorSegment.start,
-        end: selectedDetectorSegment.end,
-        original: selectedDetectorSegment.text,
+        start: range.start,
+        end: range.end,
+        original: currentDraft.slice(range.start, range.end),
         sourceHash: hashText(currentDraft),
       };
     }
