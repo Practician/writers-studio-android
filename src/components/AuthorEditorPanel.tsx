@@ -192,14 +192,19 @@ export default function AuthorEditorPanel({
     : scope === "detector" && selectedDetectorSegment
       ? selectedDetectorSegment.text
       : currentDraft;
-  // Побайтовое сравнение слишком хрупкое: экспорт в docx/плоский текст для детектора
-  // почти неизбежно меняет переносы строк и пробелы, даже когда содержание не менялось.
+  // Побайтовое сравнение слишком хрупкое сразу по двум причинам:
+  // 1) экспорт в docx/плоский текст почти неизбежно меняет переносы строк и пробелы;
+  // 2) exportChapterDocx всегда добавляет перед телом главы название книги, «Глава: …»
+  //    и (если задан) «Синопсис: …» — их нет в currentDraft, поэтому строгое равенство
+  //    не совпадёт вообще никогда, даже без единой реальной правки текста.
   // Само переписывание сегментов не использует fullText для сборки (только массив
-  // текстов сегментов), так что для проверки достаточно сравнивать по нормализованному
-  // пробельному контуру — это всё ещё ловит реально другую/отредактированную главу.
+  // текстов сегментов), так что безопасно проверять вхождение нормализованного тела
+  // главы в нормализованный отчёт — это всё ещё ловит реально другую/отредактированную главу.
   const normalizeForComparison = (value: string) => value.replace(/\s+/g, " ").trim();
   const reportMatchesChapter = Boolean(
-    detectorReport && normalizeForComparison(detectorReport.fullText) === normalizeForComparison(currentDraft),
+    detectorReport
+    && normalizeForComparison(currentDraft).length > 0
+    && normalizeForComparison(detectorReport.fullText).includes(normalizeForComparison(currentDraft)),
   );
 
   const target = useMemo<AuthorEditTarget | null>(() => {
@@ -373,7 +378,8 @@ export default function AuthorEditorPanel({
       setScope("detector");
       // Та же нормализация, что и в reportMatchesChapter выше — иначе самообучение
       // ложно пропускается из-за одних лишь различий в пробелах/переносах строк.
-      if (normalizeForComparison(report.fullText) === normalizeForComparison(currentDraft)) {
+      const chapterNormalized = normalizeForComparison(currentDraft);
+      if (chapterNormalized.length > 0 && normalizeForComparison(report.fullText).includes(chapterNormalized)) {
         const learning = learnFromDetectorReport(adaptiveProfile, report);
         if (learning.duplicate) {
           setAdaptiveStatus("Этот отчёт уже учтён — повторно профиль не изменён.");
