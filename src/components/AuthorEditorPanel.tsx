@@ -371,7 +371,9 @@ export default function AuthorEditorPanel({
       const firstAi = report.segments.findIndex(isAiSegment);
       setDetectorSegmentIndex(firstAi >= 0 ? firstAi : 0);
       setScope("detector");
-      if (report.fullText === currentDraft) {
+      // Та же нормализация, что и в reportMatchesChapter выше — иначе самообучение
+      // ложно пропускается из-за одних лишь различий в пробелах/переносах строк.
+      if (normalizeForComparison(report.fullText) === normalizeForComparison(currentDraft)) {
         const learning = learnFromDetectorReport(adaptiveProfile, report);
         if (learning.duplicate) {
           setAdaptiveStatus("Этот отчёт уже учтён — повторно профиль не изменён.");
