@@ -840,7 +840,13 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           mode: "single",
           detectorSegmentsRewritten: rewrittenCount,
         };
-        return json({ result: assembled, rewrittenCount, model: credentials.model, humanizeReport });
+        return json({
+          result: assembled,
+          blocks: resultSegments,
+          rewrittenCount,
+          model: credentials.model,
+          humanizeReport,
+        });
       }
 
       const setup = promptForAction(action, body);

@@ -663,15 +663,84 @@ export default function AuthorEditorPanel({
                     });
                     const data = await response.json();
                     if (!response.ok) throw new Error(data.error || "Не удалось переписать AI-сегменты");
+                    const blocks: string[] = Array.isArray(data.blocks) ? data.blocks : [];
+                    const scoreBefore = data.humanizeReport?.scoreBefore;
+                    const scoreAfter = data.humanizeReport?.scoreAfter;
+                    const gatePassed = Boolean(data.humanizeReport?.gatePassed);
+                    // Автоприменение: подставляем переписанные блоки прямо в главу,
+                    // меняя только реальные AI-сегменты (HUMAN/абзацы/шапку не трогаем).
+                    // Каждый блок ищем в главе по словам (findDetectorSegmentRange),
+                    // смещения отчёта тут не используются — они посчитаны по нормализованному тексту.
+                    if (activeChapter && blocks.length === detectorReport.segments.length) {
+                      let newDraft = currentDraft;
+                      let replaced = 0;
+                      detectorReport.segments.forEach((segment, index) => {
+                        if (!isAiSegment(segment)) return;
+                        const block = blocks[index];
+                        if (typeof block !== "string" || !block.trim() || block === segment.text) return;
+                        const range = findDetectorSegmentRange(newDraft, segment.text);
+                        if (!range) return;
+                        newDraft = newDraft.slice(0, range.start) + block + newDraft.slice(range.end);
+                        replaced += 1;
+                      });
+                      if (replaced > 0) {
+                        const applied = onApply(newDraft, {
+                          chapterId: activeChapter.id,
+                          kind: "chapter",
+                          original: currentDraft,
+                          sourceHash: hashText(currentDraft),
+                        });
+                        if (!applied) {
+                          setError("Глава изменилась во время прогона. Повторите «Очеловечить AI-сегменты» по текущей версии.");
+                          return;
+                        }
+                        const appliedAudit = {
+                          passed: true,
+                          summary: `Автоматически заменено AI-сегментов в главе: ${replaced}. HUMAN-сегменты не тронуты. AI-tell: ${scoreBefore ?? "—"} → ${scoreAfter ?? "—"}.`,
+                          factIssues: [],
+                          protectedTermIssues: [],
+                          voiceNotes: data.humanizeReport?.flaggedLabels || [],
+                          naturalnessNotes: gatePassed
+                            ? ["Gate очеловечивания пройден"]
+                            : ["Gate не пройден — просмотрите вручную"],
+                        };
+                        const revision: AuthorRevisionRecord = {
+                          id: createId(),
+                          storyId: story.id,
+                          chapterId: activeChapter.id,
+                          storyChapterKey: `${story.id}:${activeChapter.id}`,
+                          createdAt: Date.now(),
+                          original: currentDraft,
+                          revised: newDraft,
+                          target: {
+                            chapterId: activeChapter.id,
+                            kind: "chapter",
+                            original: currentDraft,
+                            sourceHash: hashText(currentDraft),
+                          },
+                          audit: appliedAudit,
+                          applied: true,
+                          model: data.model || selectedModel || "detector-ai-only",
+                        };
+                        await saveAuthorRevision(revision);
+                        setCurrentRevision(revision);
+                        setResult(newDraft);
+                        setModelUsed(revision.model);
+                        setAudit(appliedAudit);
+                        setRevisions((previous) => [revision, ...previous.filter((item) => item.id !== revision.id)]);
+                        return;
+                      }
+                    }
+                    // Резервный путь (сервер без blocks или ноль реальных замен): показать результат на просмотр.
                     setResult(data.result);
                     setModelUsed(data.model || selectedModel || "detector-ai-only");
                     setAudit({
                       passed: true,
-                      summary: `Переписано AI-сегментов: ${data.rewrittenCount ?? data.humanizeReport?.detectorSegmentsRewritten ?? "—"}. HUMAN-сегменты не трогались. Локальный AI-tell: ${data.humanizeReport?.scoreBefore} → ${data.humanizeReport?.scoreAfter}.`,
+                      summary: `Переписано AI-сегментов: ${data.rewrittenCount ?? data.humanizeReport?.detectorSegmentsRewritten ?? "—"}. HUMAN-сегменты не трогались. Локальный AI-tell: ${scoreBefore ?? "—"} → ${scoreAfter ?? "—"}.`,
                       factIssues: [],
                       protectedTermIssues: [],
                       voiceNotes: data.humanizeReport?.flaggedLabels || [],
-                      naturalnessNotes: data.humanizeReport?.gatePassed
+                      naturalnessNotes: gatePassed
                         ? ["Gate очеловечивания пройден"]
                         : ["Gate не пройден — просмотрите вручную"],
                     });

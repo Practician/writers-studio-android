@@ -851,6 +851,7 @@ ${text || ""}
       );
       return res.json({
         result: rewritten.text,
+        blocks: rewritten.blocks,
         humanizeReport: rewritten.humanizeReport,
         rewrittenCount: rewritten.rewrittenCount,
         provider: "detector-ai-only",

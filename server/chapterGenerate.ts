@@ -972,7 +972,7 @@ export async function rewriteDetectorAiSegments(
     personaBlock?: string;
     humanizeDepth?: HumanizeDepth | string;
   },
-): Promise<{ text: string; humanizeReport: HumanizePipelineReport; rewrittenCount: number }> {
+): Promise<{ text: string; blocks: string[]; humanizeReport: HumanizePipelineReport; rewrittenCount: number }> {
   if (!Array.isArray(segments) || !segments.length) {
     throw new Error("Нет сегментов детектора");
   }
@@ -990,6 +990,7 @@ export async function rewriteDetectorAiSegments(
     const after = aiTellScore(hygiene.text);
     return {
       text: hygiene.text,
+      blocks: segments.map((segment) => segment.text),
       rewrittenCount: 0,
       humanizeReport: {
         scoreBefore: before.score,
@@ -1092,6 +1093,7 @@ export async function rewriteDetectorAiSegments(
 
   return {
     text: hygiene.text,
+    blocks: revised,
     rewrittenCount,
     humanizeReport: {
       scoreBefore: before.score,
