@@ -628,6 +628,9 @@ function humanizeDirective(body: any): string {
 - Пиши живой, неровный человеческий текст: чередуй короткие и длинные фразы, не делай абзацы одинаковыми.
 - Показывай эмоции через выбор, жест, предмет, телесное ощущение и действие; не называй эмоцию вместо сцены.
 - Убирай канцелярит, универсальные выводы, повторяющиеся зачины и шаблонные связки.
+- Проверь каждый абзац на «рефлексивный хвост» (обобщение/вывод в конце: «она поняла, что…», «это значило, что…») — если он есть, убери его или замени действием либо предметом, меняющим смысл.
+- Для каждого абзаца ответь, на какой вопрос он отвечает; если два абзаца подряд отвечают на один и тот же вопрос, второй переделай — противоречием, отступлением или конкретной деталью.
+- Не используй синтаксические шаблоны: перечисление из трёх и более однородных членов дважды в абзаце, причастный/деепричастный оборот после каждой второй запятой, готовые абстрактные пары («надежда и страх», «свет и тень»), двойные сравнения («словно… будто…», «не только… но и…»).
 - Сохраняй канон, факты, имена, точку зрения и события. Не объясняй применённые приёмы.
 - Образец автора и паспорт голоса выше важнее общих шаблонов. ${preset}`;
 }
@@ -679,7 +682,7 @@ function promptForAction(action: string, body: any): { system: string; prompt: s
   if (action === "brainstorm") return { system: "Ты творческий соавтор.", prompt: `${context}\n\nПредложи свежие варианты для темы: ${body?.topic || body?.customPrompt || "следующей сцены"}. Дай несколько конкретных идей.` };
   if (action === "muse") return { system: "Ты Муза — бережный соавтор писателя.", prompt: `${context}\n\nОтветь на вопрос автора: ${body?.customPrompt || body?.prompt || "Помоги со следующей сценой."}` };
   if (action === "improve") return { system: "Ты бережный литературный редактор. Сохраняй события, имена и факты.", prompt: `${context}${humanize}\n\nПерепиши текст по задаче «${body?.stylePreset || body?.customPrompt || "улучшить стиль"}». Верни только готовый текст.\n\nТекст:\n${text}` };
-  if (action === "continue" || action === "generate_full_chapter") return { system: "Ты пишешь художественную прозу по канону автора. Не объясняй свои действия.", prompt: `${context}${humanize}\n\n${action === "continue" ? "Продолжи текущую сцену 4–7 содержательными абзацами, с действием, деталями и завершённым микроповоротом" : "Напиши полноценную художественную главу объёмом около 3 300 слов (допустимо ±10%), с несколькими сценами, диалогами, конкретными деталями и завершённым поворотом. Не обрывай текст до достижения 3 000 слов"}. Учти пожелание: ${body?.customPrompt || "сохрани тон и канон"}.\n\nТекущий текст:\n${text}` };
+  if (action === "continue" || action === "generate_full_chapter") return { system: "Ты пишешь художественную прозу по канону автора. Не объясняй свои действия.", prompt: `${context}${humanize}\n\n${action === "continue" ? "Продолжи текущую сцену 4–7 содержательными абзацами, с действием, деталями и завершённым микроповоротом. Не начинай абзац с рефлексии героя и не подводи итог в конце — двигай сцену действием." : "Напиши полноценную художественную главу объёмом около 3 300 слов (допустимо ±10%), с несколькими сценами, диалогами, конкретными деталями и завершённым поворотом. Не обрывай текст до достижения 3 000 слов.\n\nПЕРЕД НАПИСАНИЕМ зафиксируй архитектуру главы (в тексте её не называй):\n- Тема главы — скрытая: нигде не называй её словами, выведи через конфликт и выборы героя.\n- Герой вводится через действие, диалог или предмет, а не портретом и биографией.\n- Одна под-линия, пересекающаяся с главной не позже середины главы.\n- Развязка — не «герой принял и повзрослел»: вместо вывода поставь действие или предмет, который меняет смысл сцены.\n- Минимум один конкретный якорь (место, книга, марка, блюдо, запах) с точной деталью.\n- Ровно один структурный ход, нетипичный для этого сюжета (флэшбэк, сменивший порядок; сцена глазами второго персонажа; ложная цель, сорвавшаяся к концу).\n- Последний абзац оборви на один такт раньше, чем кажется «полным»: без итоговой рефлексии героя."}. Учти пожелание: ${body?.customPrompt || "сохрани тон и канон"}.\n\nТекущий текст:\n${text}` };
   return { system: "Ты литературный помощник.", prompt: `${context}\n\n${body?.customPrompt || "Помоги автору с текстом."}\n\n${text}` };
 }
 
@@ -791,7 +794,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         // ориентиры), который локальный regex-аудит в принципе не ловит, только суждение
         // модели при переписывании. Плюс тики именно этой модели (DeepSeek/Gemini) —
         // применимо при любой глубине кроме «Быстро», это дёшево и всегда к месту.
-        const architectureNote = depth === "maximum"
+        const architectureNote = depth !== "fast"
           ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}\n\n${DISCOURSE_FLOW_CHECKLIST}\n\n${HUMAN_POSITIVE_MARKERS_CHECKLIST}`
           : "";
         const fingerprintNote = depth !== "fast" ? modelFingerprintGuidance(credentials.provider, credentials.model) : "";
@@ -808,6 +811,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             model: credentials.model,
             apiKeys: credentials.keys,
             maxTokens: humanizeMaxTokens(segmentText.length),
+            temperature: 0.9,
             system: "Ты бережный литературный редактор. Правишь только присланный фрагмент из середины главы, не сочиняя вступление и не меняя её события.",
             prompt: `${context}${humanize}${architectureNote}${fingerprintNote}\n\nФРАГМЕНТ НИЖЕ — кусок из середины уже написанной главы; детектор пометил именно его как ИИ-текст. Перепиши только этот фрагмент: живее, разнообразнее по ритму, без штампов и канцелярита, без нагромождения сравнений и лишних сенсорных деталей. Сохрани все события, факты, имена и объём (не раздувай ради «живости») — это цитата, а не новая сцена. Верни только исправленный фрагмент без пояснений.\n\nФРАГМЕНТ:\n${segmentText}`,
           });
@@ -817,7 +821,13 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           // Не принимаем результат, который заметно короче (обрезка — потеря событий)
           // или заметно длиннее (раздувание сравнениями/деталями коррелирует с
           // ухудшением у внешних детекторов) исходного фрагмента.
-          const accept = candidateWords >= Math.floor(originalWords * 0.7) && candidateWords <= maxAllowedGrowth(originalWords, 1.3);
+          const segBefore = auditHumanizedText(segmentText, genre, depthConfig.scoreGate);
+          const segAfter = auditHumanizedText(hygiene.text, genre, depthConfig.scoreGate);
+          const lengthOk = candidateWords >= Math.floor(originalWords * 0.7) && candidateWords <= maxAllowedGrowth(originalWords, 1.3);
+          // Принимаем правку только если она действительно уменьшила ИИ-сигнал
+          // (score ниже) или сделала ритм неровнее (burstiness выше). Пересказ
+          // «в пределах длины», но без улучшения, бесполезен для детекторов.
+          const accept = lengthOk && (segAfter.score < segBefore.score || segAfter.burstiness > segBefore.burstiness + 0.02);
           resultSegments.push(accept ? hygiene.text : segmentText);
           if (accept) rewrittenCount += 1;
         }
@@ -896,7 +906,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         // ориентиры), который локальный regex-аудит в принципе не ловит, только суждение
         // модели при переписывании. Плюс тики именно этой модели (DeepSeek/Gemini) —
         // применимо при любой глубине кроме «Быстро», это дёшево и всегда к месту.
-        const architectureNote = depth === "maximum"
+        const architectureNote = depth !== "fast"
           ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}\n\n${DISCOURSE_FLOW_CHECKLIST}\n\n${HUMAN_POSITIVE_MARKERS_CHECKLIST}`
           : "";
         const fingerprintNote = depth !== "fast" ? modelFingerprintGuidance(credentials.provider, credentials.model) : "";
@@ -905,6 +915,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           model: credentials.model,
           apiKeys: credentials.keys,
           maxTokens: rewriteMaxTokens,
+          temperature: 0.85,
           system: "Ты финальный литературный редактор. Верни только готовый русский художественный текст без комментариев.",
           prompt: `${compactContext(body)}${humanizeDirective(body)}${architectureNote}${fingerprintNote}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости, но и не раздувай его: не нанизывай сравнения одно на другое («как будто X, словно Y»), не добавляй лишних сенсорных описаний ради «живости» — итоговый объём должен остаться близким к исходному, без искусственного разрастания. Верни только готовую версию.`,
         });
