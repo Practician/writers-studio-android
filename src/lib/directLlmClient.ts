@@ -794,7 +794,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         // ориентиры), который локальный regex-аудит в принципе не ловит, только суждение
         // модели при переписывании. Плюс тики именно этой модели (DeepSeek/Gemini) —
         // применимо при любой глубине кроме «Быстро», это дёшево и всегда к месту.
-        const architectureNote = depth !== "fast"
+        const architectureNote = depth === "maximum"
           ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}\n\n${DISCOURSE_FLOW_CHECKLIST}\n\n${HUMAN_POSITIVE_MARKERS_CHECKLIST}`
           : "";
         const fingerprintNote = depth !== "fast" ? modelFingerprintGuidance(credentials.provider, credentials.model) : "";
@@ -827,7 +827,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           // Принимаем правку только если она действительно уменьшила ИИ-сигнал
           // (score ниже) или сделала ритм неровнее (burstiness выше). Пересказ
           // «в пределах длины», но без улучшения, бесполезен для детекторов.
-          const accept = lengthOk && (segAfter.score < segBefore.score || segAfter.burstiness > segBefore.burstiness + 0.02);
+          const accept = lengthOk && (segAfter.score < segBefore.score || segAfter.burstiness > segBefore.burstiness + 0.02 || segAfter.gatePassed);
           resultSegments.push(accept ? hygiene.text : segmentText);
           if (accept) rewrittenCount += 1;
         }
@@ -906,7 +906,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         // ориентиры), который локальный regex-аудит в принципе не ловит, только суждение
         // модели при переписывании. Плюс тики именно этой модели (DeepSeek/Gemini) —
         // применимо при любой глубине кроме «Быстро», это дёшево и всегда к месту.
-        const architectureNote = depth !== "fast"
+        const architectureNote = depth === "maximum"
           ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}\n\n${DISCOURSE_FLOW_CHECKLIST}\n\n${HUMAN_POSITIVE_MARKERS_CHECKLIST}`
           : "";
         const fingerprintNote = depth !== "fast" ? modelFingerprintGuidance(credentials.provider, credentials.model) : "";
