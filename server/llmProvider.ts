@@ -4,7 +4,7 @@
 // UI-ключи живут только в браузере; сервер использует их в AsyncLocalStorage на время запроса.
 //
 // Env:
-//   GEMINI_API_KEY[_2|_3], NVIDIA_API_KEY[_2], GROQ_API_KEY, OPENROUTER_API_KEY
+//   GEMINI_API_KEY[_2|_3|...|_9], NVIDIA_API_KEY[_2], GROQ_API_KEY, OPENROUTER_API_KEY
 //   LLM_PROVIDER = gemini | nvidia | groq | openrouter | auto
 //   NVIDIA_*, GROQ_DEFAULT_MODEL, OPENROUTER_DEFAULT_MODEL, *_FALLBACK_MODELS
 //
@@ -264,13 +264,23 @@ function keysFromEnvList(names: string[]): string[] {
   return uniquePreserve(raw.split(",").map((key) => key.trim()).filter(Boolean));
 }
 
+/** Пул ключей провайдера: базовый *_API_KEY + нумерованные *_API_KEY_2.._9.
+ *  Позволяет добавить произвольное число ключей (например, несколько бесплатных
+ *  ключей Gemini AI Studio) без правки кода. Пустые значения и дубли отбрасываются,
+ *  порядок стабилен: сначала базовый ключ, затем _2.._9. */
+function keysFromEnvPrefix(prefix: string): string[] {
+  const names = [prefix];
+  for (let i = 2; i <= 9; i += 1) names.push(`${prefix}_${i}`);
+  return keysFromEnvList(names);
+}
+
 function mergeKeys(fromRequest: string[] | undefined, fromEnv: string[]): string[] {
   // UI-ключи первыми — пользователь явно задал в приложении.
   return uniquePreserve([...(fromRequest || []), ...fromEnv]);
 }
 
 export function collectGeminiKeys(): string[] {
-  const fromEnv = keysFromEnvList(["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"]);
+  const fromEnv = keysFromEnvPrefix("GEMINI_API_KEY");
   return mergeKeys(credentialsAls.getStore()?.geminiApiKeys, fromEnv);
 }
 
@@ -580,7 +590,7 @@ export function getLlmStatus(): LlmStatus {
     nvidiaRequestTimeoutMs: nvidiaRequestTimeoutMs(),
     nvidiaCooledModels: cooledNvidiaModels(),
     keysFromEnv: {
-      gemini: keysFromEnvList(["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"]).length > 0,
+      gemini: keysFromEnvPrefix("GEMINI_API_KEY").length > 0,
       nvidia: keysFromEnvList(["NVIDIA_API_KEY", "NVIDIA_API_KEY_2"]).length > 0,
       groq: keysFromEnvList(["GROQ_API_KEY", "GROQ_API_KEY_2"]).length > 0,
       openrouter: keysFromEnvList(["OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"]).length > 0,

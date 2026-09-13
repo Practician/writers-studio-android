@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { directApi, directGenerate } from "../src/lib/directLlmClient";
+import { splitApiKeyPool } from "../src/lib/directLlmClient";
 
 async function withMockFetch<T>(handler: (url: string, init?: RequestInit) => Promise<Response>, run: () => Promise<T>): Promise<T> {
   const originalFetch = globalThis.fetch;
@@ -844,3 +845,44 @@ test("humanize pass rejects a result inflated ~40% beyond the draft (padding, no
   const payload = await response.json();
   assert.equal(payload.result, originalDraft);
 });
+
+test("splitApiKeyPool: пусто/один/N ключей, дедупликация и обрезка пробелов", () => {
+  assert.deepEqual(splitApiKeyPool(""), []);
+  assert.deepEqual(splitApiKeyPool("   "), []);
+  assert.deepEqual(splitApiKeyPool("AIza-one"), ["AIza-one"]);
+  assert.deepEqual(splitApiKeyPool("AIza-one\nAIza-two;AIza-three, AIza-one ,,AIza-two "), ["AIza-one", "AIza-two", "AIza-three"]);
+});
+
+test("Gemini: при квоте на первых двух ключах переходит на третий (ротация нескольких ключей APK)", async () => {
+  const keysUsed: string[] = [];
+  const orig = globalThis.fetch;
+  (globalThis as any).fetch = async (url: any) => {
+    const u = String(url);
+    const key = u.match(/[?&]key=([^&]+)/)?.[1] || "";
+    keysUsed.push(key);
+    if (key === "AIza-key1" || key === "AIza-key2") {
+      return new Response(JSON.stringify({ error: { message: "Quota exceeded for metric" } }), { status: 429 });
+    }
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Ответ третьим ключом Gemini." }] } }] }), { status: 200 });
+  };
+  try {
+    const text = await directGenerate({
+      provider: "gemini",
+      model: "gemini-3.8-flash",
+      apiKeys: { gemini: "AIza-key1\nAIza-key2\nAIza-key3" },
+      prompt: "Тест ротации нескольких ключей Gemini.",
+      maxTokens: 512,
+    });
+    console.log("KEYS_USED=" + JSON.stringify(keysUsed));
+    assert.equal(text, "Ответ третьим ключом Gemini.");
+    // На каждом ключе сначала перебирается вся цепочка моделей 3.8→3.7→3.6→2.5,
+    // затем идёт переход к следующему ключу.
+    assert.equal(keysUsed.filter((k) => k === "AIza-key1").length, 4);
+    assert.equal(keysUsed.filter((k) => k === "AIza-key2").length, 4);
+    assert.equal(keysUsed.filter((k) => k === "AIza-key3").length, 1);
+    assert.deepEqual([...new Set(keysUsed)], ["AIza-key1", "AIza-key2", "AIza-key3"]);
+  } finally {
+    (globalThis as any).fetch = orig;
+  }
+});
+
