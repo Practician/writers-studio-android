@@ -122,6 +122,29 @@ export default function App() {
   // На телефоне главы и инструменты открываются как отдельные панели, не как постоянные колонки.
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "assistant" | null>(null);
   const [llmKeysDraft, setLlmKeysDraft] = useState<StoredLlmKeys>(() => loadLlmKeys());
+  // Редактирование нескольких ключей провайдера списком полей. Хранится та же
+  // строка с разделителями \n/;/,, — полностью совместимо со splitApiKeyPool и
+  // с уже сохранёнными ключами (миграция не нужна).
+  const splitProviderKeys = (raw: string): string[] => raw.split(/[\n,;]/);
+  const setProviderKeyAt = (provider: keyof StoredLlmKeys, index: number, value: string): void => {
+    setLlmKeysDraft((prev) => {
+      const list = splitProviderKeys(prev[provider] || "");
+      list[index] = value;
+      return { ...prev, [provider]: list.join("\n") };
+    });
+  };
+  const addProviderKey = (provider: keyof StoredLlmKeys): void => {
+    setLlmKeysDraft((prev) => {
+      const current = prev[provider] || "";
+      return { ...prev, [provider]: current.trim().length > 0 ? `${current.replace(/\s+$/, "")}\n` : "" };
+    });
+  };
+  const removeProviderKey = (provider: keyof StoredLlmKeys, index: number): void => {
+    setLlmKeysDraft((prev) => {
+      const list = splitProviderKeys(prev[provider] || "").filter((_, i) => i !== index);
+      return { ...prev, [provider]: list.join("\n") };
+    });
+  };
   const [openrouterKeyCheck, setOpenrouterKeyCheck] = useState<{
     state: "idle" | "loading" | "success" | "error";
     message?: string;
@@ -2323,16 +2346,39 @@ export default function App() {
                         )}
                       </div>
                     </div>
-                    <input
-                      type="password"
-                      autoComplete="off"
-                      placeholder={`Ключ или несколько через ; · ${row.hint}`}
-                      value={llmKeysDraft[row.key]}
-                      onChange={(e) => setLlmKeysDraft((prev) => ({ ...prev, [row.key]: e.target.value }))}
-                      className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2.5 text-slate-100 outline-none focus:border-amber-500/70 focus:ring-1 focus:ring-amber-500/20 font-mono text-[11px] placeholder:text-slate-600"
-                    />
+                    <div className="space-y-1.5">
+                      {splitProviderKeys(llmKeysDraft[row.key] || "").map((keyValue, keyIndex) => (
+                        <div key={`${row.key}-${keyIndex}`} className="flex gap-1.5 items-center">
+                          <input
+                            type="password"
+                            autoComplete="off"
+                            placeholder={`Ключ ${keyIndex + 1} · ${row.hint}`}
+                            value={keyValue}
+                            onChange={(e) => setProviderKeyAt(row.key, keyIndex, e.target.value)}
+                            className="w-full bg-slate-950/80 border border-slate-700/70 rounded-lg px-3 py-2 text-slate-100 outline-none focus:border-amber-500/70 focus:ring-1 focus:ring-amber-500/20 font-mono text-[11px] placeholder:text-slate-600"
+                          />
+                          {splitProviderKeys(llmKeysDraft[row.key] || "").length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => removeProviderKey(row.key, keyIndex)}
+                              className="px-2 shrink-0 rounded-md border border-slate-700/70 text-slate-400 hover:text-red-300 hover:border-red-800/50 cursor-pointer text-xs"
+                              aria-label={`Удалить ключ ${keyIndex + 1}`}
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => addProviderKey(row.key)}
+                        className="text-[10px] text-amber-300/90 hover:text-amber-100 underline underline-offset-2 cursor-pointer"
+                      >
+                        + Добавить ещё ключ
+                      </button>
+                    </div>
                     <p className="text-[10px] text-slate-500">
-                      При одном ключе он используется всегда. При нескольких APK переключится на следующий только при HTTP 402/429 (квота или лимит), но не при 401/404.
+                      Каждая строка — отдельный ключ (разделители ; или перенос строки тоже поддерживаются). При нескольких APK переключится на следующий только при HTTP 402/429 (квота или лимит), но не при 401/404.
                     </p>
                   </div>
                 );
