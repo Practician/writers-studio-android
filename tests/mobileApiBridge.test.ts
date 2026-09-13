@@ -395,9 +395,9 @@ test("Gemini HTTP 503 (high demand) rotates its own models before falling back t
   assert.equal(calls.length, 5);
   assert.equal(calls.slice(0, 4).every((call) => call.url.includes("generativelanguage.googleapis.com")), true);
   assert.equal(calls[0].url.includes("models/gemini-3.7-flash:generateContent"), true);
-  assert.equal(calls[1].url.includes("models/gemini-3.6-flash:generateContent"), true);
-  assert.equal(calls[2].url.includes("models/gemini-2.5-flash:generateContent"), true);
-  assert.equal(calls[3].url.includes("models/gemini-3.1-pro-preview:generateContent"), true);
+  assert.equal(calls[1].url.includes("models/gemini-3.8-flash:generateContent"), true);
+  assert.equal(calls[2].url.includes("models/gemini-3.6-flash:generateContent"), true);
+  assert.equal(calls[3].url.includes("models/gemini-2.5-flash:generateContent"), true);
   assert.equal(calls[4].url, "https://api.groq.com/openai/v1/chat/completions");
 });
 
@@ -418,7 +418,7 @@ test("Gemini recovers on its second literary model after the first returns HTTP 
   }));
   assert.equal(text, "Ответ от резервной модели Gemini.");
   assert.equal(calls.length, 2);
-  assert.equal(calls[1].includes("models/gemini-3.6-flash:generateContent"), true);
+  assert.equal(calls[1].includes("models/gemini-3.8-flash:generateContent"), true);
 });
 
 test("all NVIDIA 504 diagnostics show retry, model rotations, and Groq handoff", async () => {
@@ -516,11 +516,11 @@ test("Gemini sends the selected literary profile to its matching endpoint", asyn
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Текст Gemini." }] } }] }), { status: 200 });
   }, () => directGenerate({
     provider: "gemini",
-    model: "gemini-3.1-pro-preview",
+    model: "gemini-3.8-flash",
     apiKeys: { gemini: "AIza-test" },
     prompt: "Тест профиля Gemini.",
   }));
-  assert.equal(requestedUrl.includes("models/gemini-3.1-pro-preview:generateContent"), true);
+  assert.equal(requestedUrl.includes("models/gemini-3.8-flash:generateContent"), true);
 });
 
 test("Groq sends the selected literary profile to its OpenAI-compatible endpoint", async () => {
@@ -818,7 +818,7 @@ test("Gemini HTTP 429 on one model still rotates to the next model (per-model qu
     prompt: "Тест ротации после 429 у отдельной модели.",
   }));
   assert.equal(text, "Ответ от третьей модели Gemini.");
-  assert.deepEqual(models, ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash"]);
+  assert.deepEqual(models, ["gemini-3.7-flash", "gemini-3.8-flash"]);
 });
 
 test("humanize pass rejects a result inflated ~40% beyond the draft (padding, not polish) and keeps the original", async () => {

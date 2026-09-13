@@ -261,7 +261,7 @@ function providerLabel(provider: Exclude<DirectProvider, "auto">): string {
 }
 
 function defaultModel(provider: Exclude<DirectProvider, "auto">): string {
-  if (provider === "gemini") return "gemini-3.7-flash";
+  if (provider === "gemini") return "gemini-3.8-flash";
   if (provider === "groq") return "openai/gpt-oss-120b";
   if (provider === "nvidia") return "deepseek-ai/deepseek-v4-flash-0731";
   return "deepseek/deepseek-v3.2";

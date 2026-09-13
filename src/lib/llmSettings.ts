@@ -21,17 +21,17 @@ const GROQ_MODEL_LS = "writers_studio_groq_model_v1";
 export const DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v3.2";
 /** Больше не существует у провайдера; используется только для одноразовой миграции сохранённого выбора. */
 const REMOVED_OPENROUTER_MODEL = "stealth/ox-alpha";
-export const DEFAULT_GEMINI_MODEL = "gemini-3.7-flash";
+export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 export const DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b";
 /** Литературный профиль: первый в цепочке локального RU-бенчмарка основного приложения. */
 export const DEFAULT_NVIDIA_MODEL = "deepseek-ai/deepseek-v4-flash-0731";
 export type LiteraryModelProfile = { id: string; label: string; description: string };
 
 export const GEMINI_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
-  { id: DEFAULT_GEMINI_MODEL, label: "Литературный авто — Gemini 3.7 Flash", description: "Рекомендуемый быстрый профиль для русской прозы и продолжения сцен." },
+  { id: DEFAULT_GEMINI_MODEL, label: "Литературный авто — Gemini 3.8 Flash", description: "Новейшая Flash-модель (релиз 2 сентября 2026), бесплатный тариф ключа AI Studio; первая в цепочке ротации Gemini." },
+  { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash — основной профиль", description: "Проверенный быстрый профиль для русской прозы и продолжения сцен; второй в цепочке ротации." },
   { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash — баланс", description: "Стабильный баланс между темпом, связностью и стоимостью." },
   { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — большая квота", description: "Более старая, но стабильная модель с заметно большей дневной квотой на бесплатном тарифе — надёжный резерв, когда свежие модели упираются в лимиты." },
-  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro — глубокая редактура", description: "Вариант для сложной композиции; preview-модель имеет отдельную, более строгую квоту — стоит в конце цепочки ротации, чтобы не тратить попытку на гарантированный HTTP 429." },
 ];
 
 export const GROQ_LITERARY_MODELS: readonly LiteraryModelProfile[] = [

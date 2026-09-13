@@ -99,7 +99,7 @@ const DEFAULT_OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const DEFAULT_NVIDIA_MODEL = "deepseek-ai/deepseek-v4-flash-0731";
 // Live humanize benchmark 2026-07: 3.5-flash дал лучшее совпадение локальной
 // оценки с внешней; 2.0 и 2.5 в этом аккаунте падали в quota/404.
-const DEFAULT_GEMINI_MODEL = "gemini-flash-lite-latest";
+const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
 // openrouter/auto часто платный (402 без credits); free-router — openrouter/free
 const DEFAULT_OPENROUTER_MODEL = "openrouter/free";
@@ -199,8 +199,8 @@ export function isKeyOnCooldown(key: string): boolean {
 
 /** Порядок по актуальной доступности; uniquePreserve уберёт повтор primary. */
 const BUILTIN_GEMINI_FALLBACKS = [
+  "gemini-3.8-flash",
   "gemini-flash-latest",
-  "gemini-3.1-flash-lite",
   "gemini-2.5-flash-lite",
   "gemini-3.5-flash-lite",
 ];
