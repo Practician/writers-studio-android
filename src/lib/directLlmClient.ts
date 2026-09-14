@@ -658,7 +658,7 @@ function notifyChapterVolume(words: number, segments: number, target: number, co
   window.dispatchEvent(new CustomEvent("writers-studio-chapter-volume", { detail: { words, segments, target, complete } }));
 }
 
-function promptForAction(action: string, body: any): { system: string; prompt: string; json?: boolean } {
+export function promptForAction(action: string, body: any): { system: string; prompt: string; json?: boolean } {
   const context = compactContext(body);
   const text = body?.text || body?.currentDraft || body?.sourceText || "";
   const humanize = humanizeDirective(body);
@@ -676,6 +676,28 @@ function promptForAction(action: string, body: any): { system: string; prompt: s
       json: true,
     };
   }
+  if (action === "generate_chapters") {
+    return {
+      system: "Ты литературный планировщик. Верни только JSON без markdown.",
+      prompt: `Составь поглавный план книги «${body?.title || "Без названия"}».
+Жанр: ${body?.genre || "не указан"}. Описание: ${body?.description || "нет"}.
+
+БИБЛИЯ МИРА И ПАСПОРТА ГЕРОЕВ:
+"""
+${body?.worldBible || "не заполнены"}
+"""
+
+ПЛАН КНИГИ / СЮЖЕТНЫЕ АРКИ:
+"""
+${body?.bookPlan || "не заполнен"}
+"""
+
+Нужны 6–12 глав, покрывающих сюжет от завязки до развязки. Для каждой главы: короткий title (БЕЗ слова «Глава N» — номер добавит приложение) и summary из 2–4 предложений: событие главы, решение героя, поворот. Не раскрывай в синопсисе развязки из более поздних глав. Соблюдай лор из Библии мира и психологию героев из их паспортов.
+Верни строго JSON: {"chapters":[{"title":"...","summary":"..."}]} — без markdown и без пояснений.`,
+      json: true,
+    };
+  }
+
   if (action === "generate_plan") return { system: "Ты редактор романа.", prompt: `${context}\n\nСоставь подробный план книги с главами, поворотами и финалом.` };
   if (action === "generate_bible") return { system: "Ты редактор романа.", prompt: `${context}\n\nСобери ясную библию мира: правила, места, ограничения и факты, которые нельзя нарушать.` };
   if (action === "evaluate_idea") return { system: "Ты опытный литературный редактор.", prompt: `${context}\n\nДай практическую оценку идеи: сильные стороны, риски, конкретные улучшения.` };
@@ -714,9 +736,10 @@ function createVoiceSheet(text: string): AuthorVoiceSheet {
   };
 }
 
-function maxTokensForAction(action?: string): number {
+export function maxTokensForAction(action?: string): number {
   if (action === "generate_full_chapter") return 6_144;
   if (action === "continue") return 2_560;
+  if (action === "generate_chapters") return 3_072;
   if (action === "parse_import") return 3_072;
   return 2_048;
 }

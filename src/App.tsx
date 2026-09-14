@@ -984,7 +984,8 @@ export default function App() {
     let evaluationResult = "";
     const initialWorldRules: WorldRule[] = [];
     const initialCharacters: Character[] = [];
-    const initialChapters: Chapter[] = [];
+    let initialChapters: Chapter[] = [];
+    let generatedChapters: { title: string; summary: string }[] = [];
     let hasParsedChapters = false;
 
     if (newWorldBible.trim()) {
@@ -998,7 +999,7 @@ export default function App() {
     if (newWorldBible.trim() || newBookPlan.trim()) {
       try {
         // Run both evaluation and extraction in parallel for fast loading
-        const [evalResponse, parseResponse] = await Promise.all([
+        const [evalResponse, parseResponse, chaptersResponse] = await Promise.all([
           fetch("/api/writer/ai", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1018,6 +1019,19 @@ export default function App() {
             body: JSON.stringify({
               action: "parse_import",
               text: `Библия мира (сеттинг):\n${newWorldBible}\n\nПлан сюжета и книга:\n${newBookPlan}`,
+              ...llmApiFields,
+            }),
+          }),
+          fetch("/api/writer/ai", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "generate_chapters",
+              title: newTitle,
+              genre: newGenre,
+              description: newDesc,
+              worldBible: newWorldBible,
+              bookPlan: newBookPlan,
               ...llmApiFields,
             }),
           })
@@ -1076,9 +1090,37 @@ export default function App() {
             console.error("Failed to parse extracted JSON from Gemini", e);
           }
         }
+
+        if (chaptersResponse.ok) {
+          try {
+            const chaptersData = await chaptersResponse.json();
+            const chaptersPayload = JSON.parse(chaptersData.result || "{}");
+            if (chaptersPayload?.chapters && Array.isArray(chaptersPayload.chapters)) {
+              generatedChapters = chaptersPayload.chapters
+                .filter((ch: any) => ch && (ch.title || ch.summary))
+                .map((ch: any) => ({
+                  title: String(ch.title || "Без названия").trim(),
+                  summary: String(ch.summary || "").trim(),
+                }))
+                .filter((ch) => ch.title || ch.summary);
+            }
+          } catch (e) {
+            console.error("Failed to parse generated chapters response", e);
+          }
+        }
       } catch (err) {
         console.error("Story creation extraction & evaluation error:", err);
       }
+    }
+
+    if (generatedChapters.length > 0) {
+      initialChapters = generatedChapters.map((ch, index) => ({
+        id: "chapter-gen-" + Math.random().toString(36).substr(2, 9),
+        title: ch.title,
+        summary: ch.summary || `Синопсис главы ${index + 1}`,
+        content: ""
+      }));
+      hasParsedChapters = true;
     }
 
     const storyId = "story-" + Math.random().toString(36).substr(2, 9);
@@ -1122,7 +1164,7 @@ export default function App() {
       initialMessages.push({
         id: "eval-asst-" + Math.random().toString(36).substr(2, 9),
         role: "assistant",
-        content: `Привет! Я твоя творческая Муза. ✨🎨\n\nЯ внимательно изучила загруженную тобой Библию мира и План сюжета для твоей новой книги **«${newTitle}»**.\n\n${initialCharacters.length > 0 || initialWorldRules.length > 0 ? `⚡ **Интеграция Лора и Персонажей**: ${extractedStats}\n\n` : ""}Вот моя подробная профессиональная оценка твоей идеи:\n\n${evaluationResult}`,
+        content: `Привет! Я твоя творческая Муза. ✨🎨\n\nЯ внимательно изучила загруженную тобой Библию мира и План сюжета для твоей новой книги **«${newTitle}»**.\n\n${initialCharacters.length > 0 || initialWorldRules.length > 0 ? `⚡ **Интеграция Лора и Персонажей**: ${extractedStats}\n\n` : ""}${generatedChapters.length > 0 ? `📖 **Структура книги**: сформирован поглавный план из **${generatedChapters.length} глав** — он открылся слева в списке глав.\n\n` : ""}Вот моя подробная профессиональная оценка твоей идеи:\n\n${evaluationResult}`,
         timestamp: Date.now()
       });
     } else {
