@@ -191,6 +191,17 @@ function shouldRotateProviderKey(provider: DirectProvider, status: number): bool
   return shouldRotateKey(status) || (provider === "gemini" && (status === 503 || status === 504));
 }
 
+// Детекторы ловят в первую очередь «пальцы» конкретной модели: переписывать сегмент
+// тем же провайдером, которым текст написан, почти бесполезно — модель воспроизводит
+// собственный токен-профиль. Если настроен другой провайдер, правку детекторных
+// сегментов ведёт он, а основной остаётся для остального каскада.
+function pickRewriteProvider(primary: DirectProvider, keys: ApiKeys): DirectProvider {
+  const candidates: DirectProvider[] = primary === "gemini"
+    ? ["openrouter", "groq", "nvidia"]
+    : ["gemini", "groq", "openrouter", "nvidia"];
+  return candidates.find((candidate) => candidate !== primary && splitApiKeyPool(keys[candidate]).length > 0) || primary;
+}
+
 function nvidiaModelChain(primary: string): string[] {
   return [...new Set([primary, ...NVIDIA_FALLBACK_MODELS])].slice(0, NVIDIA_MAX_MODEL_ATTEMPTS);
 }
@@ -633,7 +644,7 @@ function humanizeDirective(body: any): string {
     : "balanced";
   const preset = body?.voicePreset ? `Ориентир голоса: ${body.voicePreset}.` : "";
   return `\n\nРЕЖИМ ОЧЕЛОВЕЧИВАНИЯ (${depth.toUpperCase()}):
-- Пиши живой, неровный человеческий текст: чередуй короткие и длинные фразы, не делай абзацы одинаковыми.
+- Пиши живой, неровный человеческий текст: чередуй короткие и длинные фразы — каждые 3–4 предложения делай одно очень коротким (3–6 слов); два соседних предложения не начинай одинаково.
 - Показывай эмоции через выбор, жест, предмет, телесное ощущение и действие; не называй эмоцию вместо сцены.
 - Убирай канцелярит, универсальные выводы, повторяющиеся зачины и шаблонные связки.
 - Проверь каждый абзац на «рефлексивный хвост» (обобщение/вывод в конце: «она поняла, что…», «это значило, что…») — если он есть, убери его или замени действием либо предметом, меняющим смысл.
@@ -841,6 +852,9 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}\n\n${DISCOURSE_FLOW_CHECKLIST}\n\n${HUMAN_POSITIVE_MARKERS_CHECKLIST}`
           : "";
         const fingerprintNote = depth !== "fast" ? modelFingerprintGuidance(credentials.provider, credentials.model) : "";
+        // Чужая модель для правки: сегмент, написанный основной моделью, она же
+        // переписывает «своими словами» — детектор снова видит её профиль.
+        const rewriteProvider = pickRewriteProvider(credentials.provider, credentials.keys);
         let rewrittenCount = 0;
         const resultSegments: string[] = [];
         for (const segment of segments) {
@@ -849,30 +863,48 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           // HUMAN/LIKELY_HUMAN/UNKNOWN не трогаем — это и есть «ратчет»: правим только
           // то, что реально помечено детектором, остальное сохраняем как есть.
           if (!isAiFlagged || !segmentText.trim()) { resultSegments.push(segmentText); continue; }
-          const rewritten = await generate({
-            provider: credentials.provider,
-            model: credentials.model,
-            apiKeys: credentials.keys,
-            maxTokens: humanizeMaxTokens(segmentText.length),
-            temperature: 0.9,
-            system: "Ты бережный литературный редактор. Правишь только присланный фрагмент из середины главы, не сочиняя вступление и не меняя её события.",
-            prompt: `${context}${humanize}${architectureNote}${fingerprintNote}\n\nФРАГМЕНТ НИЖЕ — кусок из середины уже написанной главы; детектор пометил именно его как ИИ-текст. Перепиши только этот фрагмент: живее, разнообразнее по ритму, без штампов и канцелярита, без нагромождения сравнений и лишних сенсорных деталей. Сохрани все события, факты, имена и объём (не раздувай ради «живости») — это цитата, а не новая сцена. Верни только исправленный фрагмент без пояснений.\n\nФРАГМЕНТ:\n${segmentText}`,
-          });
-          const hygiene = sanitizeGeneratedText(rewritten);
           const originalWords = countGeneratedWords(segmentText);
-          const candidateWords = countGeneratedWords(hygiene.text);
-          // Не принимаем результат, который заметно короче (обрезка — потеря событий)
-          // или заметно длиннее (раздувание сравнениями/деталями коррелирует с
-          // ухудшением у внешних детекторов) исходного фрагмента.
           const segBefore = auditHumanizedText(segmentText, genre, depthConfig.scoreGate);
-          const segAfter = auditHumanizedText(hygiene.text, genre, depthConfig.scoreGate);
-          const lengthOk = candidateWords >= Math.floor(originalWords * 0.7) && candidateWords <= maxAllowedGrowth(originalWords, 1.3);
-          // Принимаем правку только если она действительно уменьшила ИИ-сигнал
-          // (score ниже) или сделала ритм неровнее (burstiness выше). Пересказ
-          // «в пределах длины», но без улучшения, бесполезен для детекторов.
-          const accept = lengthOk && (segAfter.score < segBefore.score || segAfter.burstiness > segBefore.burstiness + 0.02 || segAfter.gatePassed);
-          resultSegments.push(accept ? hygiene.text : segmentText);
-          if (accept) rewrittenCount += 1;
+          let bestText = segmentText;
+          let bestAudit = segBefore;
+          // До двух попыток на сегмент: первая — бережная правка чужой моделью,
+          // вторая (если локальный гейт не увидел улучшения) — грубая реструктуризация
+          // синтаксиса с нуля при температуре 1.05.
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const useAltModel = attempt === 1 && rewriteProvider !== credentials.provider;
+            const rewritten = await generate({
+              provider: useAltModel ? rewriteProvider : credentials.provider,
+              model: useAltModel ? undefined : credentials.model,
+              apiKeys: credentials.keys,
+              maxTokens: humanizeMaxTokens(segmentText.length),
+              temperature: attempt === 0 ? 0.9 : 1.05,
+              system: attempt === 0
+                ? "Ты бережный литературный редактор. Правишь только присланный фрагмент из середины главы, не сочиняя вступление и не меняя её события."
+                : "Ты писатель, переписывающий чужой черновой фрагмент начисто. События и имена сохраняешь, но синтаксис перестраиваешь с нуля.",
+              prompt: attempt === 0
+                ? `${context}${humanize}${architectureNote}${fingerprintNote}\n\nФРАГМЕНТ НИЖЕ — кусок из середины уже написанной главы; детектор пометил именно его как ИИ-текст. Перепиши только этот фрагмент. Требования:\n- разные по длине предложения: после 2–3 длинных — короткое (3–6 слов);\n- соседние предложения не начинаются одинаково (не два подряд с имени героя, не два с «Он»);\n- ноль канцелярита и служебных связок («при этом», «кроме того», «в то же время»);\n- эмоции — действием, жестом, предметом; сравнений не больше одного на фрагмент;\n- сохрани все события, факты, имена и объём (не раздувай ради «живости») — это цитата, а не новая сцена.\nВерни только исправленный фрагмент без пояснений.\n\nФРАГМЕНТ:\n${segmentText}`
+                : `${context}${humanize}\n\nФРАГМЕНТ НИЖЕ детектор уверенно распознал как машинный текст — бережной правки было мало. Перепиши его заново, как будто пересказываешь сцену вслух и сразу записываешь:\n- полностью перестрой синтаксис: не сохраняй порядок слов и каркас исходных предложений;\n- чередуй ритм: длинный период — потом рубленые фразы по 3–6 слов;\n- начинай предложения по-разному: глагол, наречие, прямая речь, имя, «А», «Но», «И»;\n- добавь 1–2 разговорные вставки в духе героев (обрыв фразы, недоговорённость, вопрос самому себе);\n- выкини служебные связки и обобщающие хвосты («это значило…», «он понял, что…»);\n- события, имена и порядок фактов сохраняй; объём — не меньше 70% исходного.\nВерни только новый фрагмент без пояснений.\n\nФРАГМЕНТ:\n${segmentText}`,
+            });
+            const hygiene = sanitizeGeneratedText(rewritten);
+            const candidateWords = countGeneratedWords(hygiene.text);
+            // Не принимаем результат, который заметно короче (обрезка — потеря событий)
+            // или заметно длиннее (раздувание сравнениями/деталями коррелирует с
+            // ухудшением у внешних детекторов) исходного фрагмента.
+            const lengthOk = candidateWords >= Math.floor(originalWords * 0.7) && candidateWords <= maxAllowedGrowth(originalWords, 1.3);
+            if (!lengthOk) continue;
+            const candAudit = auditHumanizedText(hygiene.text, genre, depthConfig.scoreGate);
+            // Принимаем правку только если она действительно уменьшила ИИ-сигнал
+            // (score ниже) или сделала ритм неровнее (burstiness выше). Пересказ
+            // «в пределах длины», но без улучшения, бесполезен для детекторов.
+            const improved = candAudit.score < bestAudit.score
+              || candAudit.burstiness > bestAudit.burstiness + 0.02
+              || (candAudit.gatePassed && !bestAudit.gatePassed);
+            if (improved) { bestText = hygiene.text; bestAudit = candAudit; }
+            if (bestAudit.gatePassed) break;
+          }
+          const accepted = bestText !== segmentText;
+          resultSegments.push(bestText);
+          if (accepted) rewrittenCount += 1;
         }
         const assembled = resultSegments.join(" ").replace(/[ \t]+/g, " ").trim();
         const beforeAudit = auditHumanizedText(segments.map((segment) => String(segment?.text || "")).join(" "), genre, depthConfig.scoreGate);
