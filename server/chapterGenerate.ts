@@ -66,6 +66,13 @@ export interface HumanizePipelineReport {
   patternDensity: number;
   gatePassed: boolean;
   passesRun: number;
+  /** Какой маршрут sepia-пайплайна был исполнен: полноценная генерация,
+   *  перезапись детекторных сегментов или лёгкая доводка черновика. */
+  sepiaRoute?: "generate_full_chapter" | "rewrite_detector_segments" | "humanize_draft";
+  /** Число приёмочных review-раундов (просмотров текста на штампы/ритм). */
+  reviewPasses?: number;
+  /** Число пересозданных фрагментов (recreate block'ов/кандидатов). */
+  recreatePasses?: number;
   scenesGenerated: number;
   depth: HumanizeDepth;
   mode: "single" | "scenes";
@@ -947,6 +954,9 @@ export async function generateHumanizedChapter(
       patternDensity: after.patternDensity,
       gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
       passesRun: touchup.passesRun,
+      sepiaRoute: "generate_full_chapter",
+      reviewPasses: touchup.passesRun,
+      recreatePasses: touchup.refinedBlocks,
       scenesGenerated,
       depth: depth.id,
       mode,
@@ -1003,6 +1013,9 @@ export async function rewriteDetectorAiSegments(
         patternDensity: before.patternDensity,
         gatePassed: humanizeGatePassed(before, depth.scoreGate, depth.minBurstiness),
         passesRun: 0,
+        sepiaRoute: "rewrite_detector_segments",
+        reviewPasses: 0,
+        recreatePasses: 0,
         scenesGenerated: 0,
         depth: depth.id,
         mode: "single",
@@ -1106,6 +1119,9 @@ export async function rewriteDetectorAiSegments(
       patternDensity: after.patternDensity,
       gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
       passesRun: touchup.passesRun + 1,
+      sepiaRoute: "rewrite_detector_segments",
+      reviewPasses: touchup.passesRun + 1,
+      recreatePasses: touchup.refinedBlocks + rewrittenCount,
       scenesGenerated: 0,
       depth: depth.id,
       mode: "single",
@@ -1152,6 +1168,9 @@ export async function humanizeProseDraft(
       patternDensity: after.patternDensity,
       gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
       passesRun: touchup.passesRun,
+      sepiaRoute: "humanize_draft",
+      reviewPasses: touchup.passesRun,
+      recreatePasses: touchup.refinedBlocks,
       scenesGenerated: 0,
       depth: depth.id,
       mode: "single",
