@@ -18,5 +18,5 @@ test("generate_chapters action asks for JSON chapter plan covering Bible and plo
 });
 
 test("generate_chapters gets a generous token budget", () => {
-  assert.equal(maxTokensForAction("generate_chapters"), 3072);
+  assert.equal(maxTokensForAction("generate_chapters"), 8192);
 });
