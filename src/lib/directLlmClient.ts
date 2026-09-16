@@ -183,6 +183,14 @@ function shouldRotateKey(status: number): boolean {
   return status === 402 || status === 429;
 }
 
+// У Gemini перегрузка модели (503) и недоступность шлюза (504) раньше не ротировали
+// ключи — крутили только модели внутри одного ключа. Но перегрузка бывает привязана
+// к проекту ключа, а у автора их несколько: когда вся цепочка моделей легла на одном
+// ключе, честнее перебрать следующие ключи Gemini, прежде чем уходить к Groq.
+function shouldRotateProviderKey(provider: DirectProvider, status: number): boolean {
+  return shouldRotateKey(status) || (provider === "gemini" && (status === 503 || status === 504));
+}
+
 function nvidiaModelChain(primary: string): string[] {
   return [...new Set([primary, ...NVIDIA_FALLBACK_MODELS])].slice(0, NVIDIA_MAX_MODEL_ATTEMPTS);
 }
@@ -550,7 +558,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     }
 
     const rawProviderMessage = payload?.error?.message || payload?.error || `Ошибка ${providerLabel(provider)} (${response.status})`;
-    const providerMessage = shouldRotateKey(response.status) && index + 1 >= keyPool.length
+    const providerMessage = shouldRotateProviderKey(provider, response.status) && index + 1 >= keyPool.length
       ? `${rawProviderMessage}. Ротация ключей недоступна: сохранён только ключ ${index + 1}/${keyPool.length}.`
       : rawProviderMessage;
     if (response.ok) {
@@ -588,7 +596,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     const trace = traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, messageWithFallback, { chars: 0, finishReason: finishReasonFor(payload) });
     emitApiTrace(trace);
 
-    if (index + 1 < keyPool.length && shouldRotateKey(response.status)) {
+    if (index + 1 < keyPool.length && shouldRotateProviderKey(provider, response.status)) {
       notifyApiKeyRotation(provider, index + 1, index + 2, keyPool.length, response.status);
       continue;
     }
