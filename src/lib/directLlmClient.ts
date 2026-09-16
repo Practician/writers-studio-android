@@ -893,13 +893,15 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             const lengthOk = candidateWords >= Math.floor(originalWords * 0.7) && candidateWords <= maxAllowedGrowth(originalWords, 1.3);
             if (!lengthOk) continue;
             const candAudit = auditHumanizedText(hygiene.text, genre, depthConfig.scoreGate);
-            // Принимаем правку только если она действительно уменьшила ИИ-сигнал
-            // (score ниже) или сделала ритм неровнее (burstiness выше). Пересказ
-            // «в пределах длины», но без улучшения, бесполезен для детекторов.
+            // Локальный regex-аудит не видит главного эффекта чужой модели — смены
+            // токен-профиля, который ловит внешний детектор. Поэтому принимаем правку,
+            // если она строго улучшила метрики ИЛИ не сделала хуже, пройдя гейт.
+            const notWorse = candAudit.score <= bestAudit.score
+              && candAudit.burstiness >= bestAudit.burstiness - 0.02;
             const improved = candAudit.score < bestAudit.score
               || candAudit.burstiness > bestAudit.burstiness + 0.02
               || (candAudit.gatePassed && !bestAudit.gatePassed);
-            if (improved) { bestText = hygiene.text; bestAudit = candAudit; }
+            if (improved || (candAudit.gatePassed && notWorse)) { bestText = hygiene.text; bestAudit = candAudit; }
             if (bestAudit.gatePassed) break;
           }
           const accepted = bestText !== segmentText;
