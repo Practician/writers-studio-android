@@ -120,6 +120,10 @@ export interface HumanizeReport {
   candidateScores?: number[];
   chosenCandidate?: number;
   detectorSegmentsRewritten?: number;
+  /** Маршрут sepia-пайплайна и счётчики проходов (review → refactor/recreate → style). */
+  sepiaRoute?: string;
+  reviewPasses?: number;
+  recreatePasses?: number;
   textHygiene?: {
     removedHiddenCharacters: number;
     normalizedSpaces: number;

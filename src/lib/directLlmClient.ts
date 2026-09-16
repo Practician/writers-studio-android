@@ -12,9 +12,18 @@ import {
   NARRATIVE_ARCHITECTURE_CHECKLIST,
   resolveHumanizeDepth,
   runMultiDetectorGate,
+  voicePersonaBlock,
+  voicePresetById,
 } from "../../server/humanStyle";
 import type { GenreContext } from "../../server/humanStyleEnhanced";
 import { sanitizeGeneratedText } from "../../server/textHygiene";
+import {
+  generateHumanizedChapter,
+  humanizeProseDraft,
+  rewriteDetectorAiSegments,
+  type ChapterGenerateInput,
+  type GenerateFn,
+} from "../../server/chapterGenerate";
 
 export type DirectProvider = "auto" | "gemini" | "nvidia" | "groq" | "openrouter";
 
@@ -658,6 +667,10 @@ function needsHumanizePass(action: string, body: any): boolean {
   return Boolean(body?.humanize) && ["continue", "generate_full_chapter", "improve", "rewrite_detector_segments"].includes(action);
 }
 
+function normalizeHumanizeDepth(value: unknown, fallback: "fast" | "balanced" | "maximum" = "balanced"): "fast" | "balanced" | "maximum" {
+  return value === "fast" || value === "balanced" || value === "maximum" ? value : fallback;
+}
+
 const CHAPTER_TARGET_WORDS = 3_300;
 const MAX_CHAPTER_CONTINUATIONS = 6;
 
@@ -794,6 +807,35 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
     maxTokens: request.maxTokens ?? maxTokensForAction(body?.action),
   });
 
+  // Адаптер sepia-pipeline (server/chapterGenerate.ts) к прямому API-клиенту APK:
+  // те же сигнал и дефолтные лимиты токенов, что у обычного generate-вызова.
+  const pipelineGenerate: GenerateFn = (params) => directGenerate({
+    provider: credentials.provider,
+    model: params.model,
+    apiKeys: credentials.keys,
+    signal: init?.signal,
+    system: params.systemInstruction,
+    prompt: params.contents,
+    temperature: params.temperature,
+    maxTokens: params.maxOutputTokens ?? maxTokensForAction(body?.action),
+    json: params.responseMimeType === "application/json",
+  });
+
+  // Персона повествования для пайплайна: паспорт голоса автора или выбранный
+  // пресет голоса + адаптивные правила стиля — как в серверной версии.
+  const pipelinePersonaBlock = (() => {
+    const preset = voicePresetById(body?.voicePreset);
+    const persona = body?.voiceSheet
+      ? voicePersonaBlock(body.voiceSheet)
+      : preset
+        ? `ПЕРСОНА РАССКАЗЧИКА:\n${preset.directives}`
+        : "";
+    const adaptive = typeof body?.adaptiveStyleGuidance === "string"
+      ? String(body.adaptiveStyleGuidance).slice(0, 4_000)
+      : "";
+    return [persona, adaptive].filter(Boolean).join("\n\n");
+  })();
+
   try {
     if (path === "/api/llm/status") {
       return json({ geminiKeys: credentials.keys.gemini ? 1 : 0, groqConfigured: Boolean(credentials.keys.groq), nvidiaConfigured: Boolean(credentials.keys.nvidia), openrouterConfigured: Boolean(credentials.keys.openrouter) });
@@ -828,111 +870,77 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
     if (path.startsWith("/api/writer/ai")) {
       const action = body.action || "muse";
 
-      // "rewrite_detector_segments" получает от AuthorEditorPanel не body.text, а
-      // detectorSegments (пары text+label из импортированного JSON нейродетектора).
-      // Раньше это молча проваливалось в общую ветку promptForAction, которая читает
-      // только body.text — с пустым текстом на входе результат был непредсказуемым
-      // и заведомо хуже точечной посегментной правки, ради которой кнопка и существует.
+      // Точенчая правка только AI-сегментов отчёта нейродетектора теперь идёт через
+      // общий sepia-пайплайн (server/chapterGenerate.ts) — тот же маршрут, что и в
+      // серверной версии: батчами по 4 сегмента, приёмка по локальному аудиту,
+      // лёгкий touchup и финальная гигиена. Раньше здесь был отдельный ручной поток
+      // с «чужой моделью» и вторым проходом — он дублировал пайплайн и расходился
+      // с серверным поведением.
       if (action === "rewrite_detector_segments") {
         const segments: Array<{ text?: string; label?: string }> = Array.isArray(body.detectorSegments) ? body.detectorSegments : [];
         if (!segments.length) return json({ error: "Нет сегментов детектора для переписывания." }, 400);
-        const depth = body?.humanizeDepth === "fast" || body?.humanizeDepth === "balanced" || body?.humanizeDepth === "maximum"
-          ? body.humanizeDepth
-          : "maximum";
-        const depthConfig = resolveHumanizeDepth(depth);
-        const genre = mapGenreContext(body?.genre);
-        const context = compactContext(body);
-        const humanize = humanizeDirective({ ...body, humanize: true, humanizeDepth: depth });
-        // На «максимальной» глубине штампов и синтаксиса уже недостаточно — добавляем
-        // архитектурный уровень (тема/сюжет/развязка/связность абзацев/позитивные
-        // ориентиры), который локальный regex-аудит в принципе не ловит, только суждение
-        // модели при переписывании. Плюс тики именно этой модели (DeepSeek/Gemini) —
-        // применимо при любой глубине кроме «Быстро», это дёшево и всегда к месту.
-        const architectureNote = depth === "maximum"
-          ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}\n\n${DISCOURSE_FLOW_CHECKLIST}\n\n${HUMAN_POSITIVE_MARKERS_CHECKLIST}`
-          : "";
-        const fingerprintNote = depth !== "fast" ? modelFingerprintGuidance(credentials.provider, credentials.model) : "";
-        // Чужая модель для правки: сегмент, написанный основной моделью, она же
-        // переписывает «своими словами» — детектор снова видит её профиль.
-        const rewriteProvider = pickRewriteProvider(credentials.provider, credentials.keys);
-        let rewrittenCount = 0;
-        const resultSegments: string[] = [];
-        for (const segment of segments) {
-          const segmentText = String(segment?.text || "");
-          const isAiFlagged = segment?.label === "AI" || segment?.label === "LIKELY_AI";
-          // HUMAN/LIKELY_HUMAN/UNKNOWN не трогаем — это и есть «ратчет»: правим только
-          // то, что реально помечено детектором, остальное сохраняем как есть.
-          if (!isAiFlagged || !segmentText.trim()) { resultSegments.push(segmentText); continue; }
-          const originalWords = countGeneratedWords(segmentText);
-          const segBefore = auditHumanizedText(segmentText, genre, depthConfig.scoreGate);
-          let bestText = segmentText;
-          let bestAudit = segBefore;
-          // До двух попыток на сегмент: первая — бережная правка чужой моделью,
-          // вторая (если локальный гейт не увидел улучшения) — грубая реструктуризация
-          // синтаксиса с нуля при температуре 1.05.
-          for (let attempt = 0; attempt < 2; attempt += 1) {
-            const useAltModel = attempt === 1 && rewriteProvider !== credentials.provider;
-            const rewritten = await generate({
-              provider: useAltModel ? rewriteProvider : credentials.provider,
-              model: useAltModel ? undefined : credentials.model,
-              apiKeys: credentials.keys,
-              maxTokens: humanizeMaxTokens(segmentText.length),
-              temperature: attempt === 0 ? 0.9 : 1.05,
-              system: attempt === 0
-                ? "Ты бережный литературный редактор. Правишь только присланный фрагмент из середины главы, не сочиняя вступление и не меняя её события."
-                : "Ты писатель, переписывающий чужой черновой фрагмент начисто. События и имена сохраняешь, но синтаксис перестраиваешь с нуля.",
-              prompt: attempt === 0
-                ? `${context}${humanize}${architectureNote}${fingerprintNote}\n\nФРАГМЕНТ НИЖЕ — кусок из середины уже написанной главы; детектор пометил именно его как ИИ-текст. Перепиши только этот фрагмент. Требования:\n- разные по длине предложения: после 2–3 длинных — короткое (3–6 слов);\n- соседние предложения не начинаются одинаково (не два подряд с имени героя, не два с «Он»);\n- ноль канцелярита и служебных связок («при этом», «кроме того», «в то же время»);\n- эмоции — действием, жестом, предметом; сравнений не больше одного на фрагмент;\n- сохрани все события, факты, имена и объём (не раздувай ради «живости») — это цитата, а не новая сцена.\nВерни только исправленный фрагмент без пояснений.\n\nФРАГМЕНТ:\n${segmentText}`
-                : `${context}${humanize}\n\nФРАГМЕНТ НИЖЕ детектор уверенно распознал как машинный текст — бережной правки было мало. Перепиши его заново, как будто пересказываешь сцену вслух и сразу записываешь:\n- полностью перестрой синтаксис: не сохраняй порядок слов и каркас исходных предложений;\n- чередуй ритм: длинный период — потом рубленые фразы по 3–6 слов;\n- начинай предложения по-разному: глагол, наречие, прямая речь, имя, «А», «Но», «И»;\n- добавь 1–2 разговорные вставки в духе героев (обрыв фразы, недоговорённость, вопрос самому себе);\n- прямой диалог вплетай в текст без длинных тире и без формата «реплика с новой строки»: реплика живёт внутри абзаца вместе с действием;\n- разбавь описание бытовой вставкой с конкретным предметом или действием героя (не абзац пейзажа подряд);\n- сломай гладкие тройки прилагательных и перечисления: два элемента вместо трёх, или триада с обрывом на разговорном слове;\n- выкини служебные связки и обобщающие хвосты («это значило…», «он понял, что…»);\n- события, имена и порядок фактов сохраняй; объём — не меньше 70% исходного.\nВерни только новый фрагмент без пояснений.\n\nФРАГМЕНТ:\n${segmentText}`,
-            });
-            const hygiene = sanitizeGeneratedText(rewritten);
-            const candidateWords = countGeneratedWords(hygiene.text);
-            // Не принимаем результат, который заметно короче (обрезка — потеря событий)
-            // или заметно длиннее (раздувание сравнениями/деталями коррелирует с
-            // ухудшением у внешних детекторов) исходного фрагмента.
-            const lengthOk = candidateWords >= Math.floor(originalWords * 0.7) && candidateWords <= maxAllowedGrowth(originalWords, 1.3);
-            if (!lengthOk) continue;
-            const candAudit = auditHumanizedText(hygiene.text, genre, depthConfig.scoreGate);
-            // Локальный regex-аудит не видит главного эффекта чужой модели — смены
-            // токен-профиля, который ловит внешний детектор. Поэтому принимаем правку,
-            // если она строго улучшила метрики ИЛИ не сделала хуже, пройдя гейт.
-            const notWorse = candAudit.score <= bestAudit.score
-              && candAudit.burstiness >= bestAudit.burstiness - 0.02;
-            const improved = candAudit.score < bestAudit.score
-              || candAudit.burstiness > bestAudit.burstiness + 0.02
-              || (candAudit.gatePassed && !bestAudit.gatePassed);
-            if (improved || (candAudit.gatePassed && notWorse)) { bestText = hygiene.text; bestAudit = candAudit; }
-            if (bestAudit.gatePassed) break;
-          }
-          const accepted = bestText !== segmentText;
-          resultSegments.push(bestText);
-          if (accepted) rewrittenCount += 1;
-        }
-        const assembled = resultSegments.join(" ").replace(/[ \t]+/g, " ").trim();
-        const beforeAudit = auditHumanizedText(segments.map((segment) => String(segment?.text || "")).join(" "), genre, depthConfig.scoreGate);
-        const finalAudit = auditHumanizedText(assembled, genre, depthConfig.scoreGate);
-        const humanizeReport: HumanizeReport = {
-          scoreBefore: beforeAudit.score,
-          scoreAfter: finalAudit.score,
-          refinedBlocks: rewrittenCount,
-          flaggedLabels: beforeAudit.labels,
-          unresolvedLabels: finalAudit.gatePassed ? [] : finalAudit.labels,
-          burstiness: finalAudit.burstiness,
-          openerRepetition: finalAudit.openerRepetition,
-          patternDensity: finalAudit.patternDensity,
-          gatePassed: finalAudit.gatePassed,
-          passesRun: 1,
-          scenesGenerated: 0,
-          depth: depthConfig.id,
-          mode: "single",
-          detectorSegmentsRewritten: rewrittenCount,
-        };
+        const rewritten = await rewriteDetectorAiSegments(
+          segments.map((segment) => ({
+            text: String(segment?.text || ""),
+            label: String(segment?.label || "UNKNOWN"),
+          })),
+          pipelineGenerate,
+          {
+            model: credentials.model || "",
+            personaBlock: pipelinePersonaBlock,
+            humanizeDepth: normalizeHumanizeDepth(body?.humanizeDepth, "maximum"),
+          },
+        );
         return json({
-          result: assembled,
-          blocks: resultSegments,
-          rewrittenCount,
+          result: rewritten.text,
+          blocks: rewritten.blocks,
+          humanizeReport: rewritten.humanizeReport,
+          rewrittenCount: rewritten.rewrittenCount,
           model: credentials.model,
-          humanizeReport,
+        });
+      }
+
+      // Полная глава с humanize: единый sepia-pipeline (сцены/кандидаты → best-of-N
+      // → multi-pass touchup → гигиена), идентичный серверному. Раньше глава сначала
+      // собиралась продолжениями вручную, а потом целиком переписывалась отдельным
+      // «человеческим» проходом — теперь это один вызов пайплайна.
+      if (action === "generate_full_chapter" && Boolean(body?.humanize)) {
+        const input: ChapterGenerateInput = {
+          title: String(body?.title || ""),
+          genre: String(body?.genre || ""),
+          description: String(body?.description || ""),
+          currentChapterTitle: String(body?.currentChapterTitle || ""),
+          currentChapterSummary: String(body?.currentChapterSummary || ""),
+          previousChapter: String(body?.previousChapter || ""),
+          worldBible: String(body?.worldBible || ""),
+          bookPlan: String(body?.bookPlan || ""),
+          canonDossier: String(body?.canonDossier || ""),
+          customPrompt: String(body?.customPrompt || ""),
+          authorSample: typeof body?.authorSample === "string" ? body.authorSample : undefined,
+          voiceSheet: body?.voiceSheet,
+          voicePreset: typeof body?.voicePreset === "string" ? body.voicePreset : undefined,
+          humanizeDepth: normalizeHumanizeDepth(body?.humanizeDepth),
+          adaptiveStyleGuidance: typeof body?.adaptiveStyleGuidance === "string" ? String(body.adaptiveStyleGuidance).slice(0, 4_000) : undefined,
+          chapterCandidates: typeof body?.chapterCandidates === "number" ? body.chapterCandidates : undefined,
+          model: credentials.model || "",
+        };
+        const generated = await generateHumanizedChapter(input, pipelineGenerate);
+        const words = countGeneratedWords(generated.text);
+        notifyChapterVolume(words, generated.humanizeReport.scenesGenerated || 1, CHAPTER_TARGET_WORDS, words >= CHAPTER_TARGET_WORDS);
+        notifyHumanizePass(generated.humanizeReport.depth, generated.text.length, generated.text.length, {
+          scoreBefore: generated.humanizeReport.scoreBefore,
+          scoreAfter: generated.humanizeReport.scoreAfter,
+          gatePassed: generated.humanizeReport.gatePassed,
+          passesRun: generated.humanizeReport.passesRun,
+        });
+        return json({
+          result: generated.text,
+          humanizeReport: generated.humanizeReport,
+          humanizeApplied: true,
+          chapterWords: words,
+          chapterTargetWords: CHAPTER_TARGET_WORDS,
+          chapterSegments: generated.humanizeReport.scenesGenerated || 1,
+          model: credentials.model,
         });
       }
 
@@ -964,105 +972,58 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
 
       const humanizeApplied = needsHumanizePass(action, body);
       let humanizeReport: HumanizeReport | null = null;
-      if (humanizeApplied) {
-        const depth = body?.humanizeDepth === "fast" || body?.humanizeDepth === "balanced" || body?.humanizeDepth === "maximum"
-          ? body.humanizeDepth
-          : "balanced";
+      if (humanizeApplied && text.length > 200) {
+        // continue/improve: черновик уже сгенерирован общим promptForAction —
+        // доводка одной точкой через общий sepia-пайплайн (аудит → точечная правка
+        // блоков → ритм-проход → гигиена). Раньше вместо этого весь черновик
+        // переписывался одним длинным промптом с ручным ратчет-проходом.
+        const depth = normalizeHumanizeDepth(body?.humanizeDepth);
         const depthConfig = resolveHumanizeDepth(depth);
-        const genre = mapGenreContext(body?.genre);
-        const minWords = action === "generate_full_chapter" ? "3 000 слов и ориентир около 3 300 слов" : "исходный объём";
         const beforeChars = text.length;
         const beforeWords = countGeneratedWords(text);
-        const beforeAudit = auditHumanizedText(text, genre, depthConfig.scoreGate);
-        const rewriteMaxTokens = humanizeMaxTokens(beforeChars);
-        // На «максимальной» глубине штампов и синтаксиса уже недостаточно — добавляем
-        // архитектурный уровень (тема/сюжет/развязка/сеть персонажей), который локальный
-        // regex-аудит в принципе не ловит, только суждение модели при переписывании.
-        // На «максимальной» глубине штампов и синтаксиса уже недостаточно — добавляем
-        // архитектурный уровень (тема/сюжет/развязка/связность абзацев/позитивные
-        // ориентиры), который локальный regex-аудит в принципе не ловит, только суждение
-        // модели при переписывании. Плюс тики именно этой модели (DeepSeek/Gemini) —
-        // применимо при любой глубине кроме «Быстро», это дёшево и всегда к месту.
-        const architectureNote = depth === "maximum"
-          ? `\n\n${NARRATIVE_ARCHITECTURE_CHECKLIST}\n\n${DISCOURSE_FLOW_CHECKLIST}\n\n${HUMAN_POSITIVE_MARKERS_CHECKLIST}`
-          : "";
-        const fingerprintNote = depth !== "fast" ? modelFingerprintGuidance(credentials.provider, credentials.model) : "";
-        const humanizedText = await generate({
-          provider: credentials.provider,
-          model: credentials.model,
-          apiKeys: credentials.keys,
-          maxTokens: rewriteMaxTokens,
-          temperature: 0.85,
-          system: "Ты финальный литературный редактор. Верни только готовый русский художественный текст без комментариев.",
-          prompt: `${compactContext(body)}${humanizeDirective(body)}${architectureNote}${fingerprintNote}\n\nЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ:\n${text}\n\nПерепиши черновик живо и естественно. Сохрани события, факты, имена, канон, точку зрения и минимум ${minWords}. Не сокращай текст ради гладкости, но и не раздувай его: не нанизывай сравнения одно на другое («как будто X, словно Y»), не добавляй лишних сенсорных описаний ради «живости» — итоговый объём должен остаться близким к исходному, без искусственного разрастания. Верни только готовую версию.`,
-        });
-        // Полный постпроход иногда самовольно сокращает длинный черновик. В таком
-        // случае сохраняем объёмную версию, а не выдаём пользователю короткий текст.
-        const humanizedWords = countGeneratedWords(humanizedText);
-        // Раздутие текста при «очеловечивании» — не полировка, а обвес (лишние
-        // сравнения, сенсорные детали, каскады описаний). На практике именно
-        // разрастание текста на 30-40%+ коррелирует с ухудшением у внешних
-        // детекторов, даже когда наш локальный аудит показывает улучшение —
-        // поэтому режем рост так же, как режем чрезмерное сокращение.
-        const tooShort = action === "generate_full_chapter" && humanizedWords < Math.floor(beforeWords * 0.9);
-        const tooInflated = humanizedWords > maxAllowedGrowth(beforeWords, 1.25);
-        const acceptHumanized = !tooShort && !tooInflated;
-        if (acceptHumanized) text = humanizedText;
-
-        // Локальный аудит (каталог human-touch-max: базовые + расширенные ~130 паттернов,
-        // ритм, пассивный залог, разнообразие словаря и связок) — без сетевых вызовов.
-        const hygiene = sanitizeGeneratedText(text);
-        text = hygiene.text;
-        let finalAudit = auditHumanizedText(text, genre, depthConfig.scoreGate);
-        let passesRun = 1;
-
-        // «Ратчет»: если gate не пройден и глубина не «Быстро», делаем один точечный
-        // корректирующий проход по конкретным замечаниям аудита, не переписывая всё заново.
-        if (depth !== "fast" && !finalAudit.gatePassed) {
-          const correction = await generate({
-            provider: credentials.provider,
-            model: credentials.model,
-            apiKeys: credentials.keys,
-            maxTokens: humanizeMaxTokens(text.length),
-            system: "Ты точечный литературный редактор. Правишь только отмеченные проблемы, не переписывая текст заново.",
-            prompt: `ТЕКСТ:\n${text}\n\nЛокальный аудит нашёл проблемы:\n${finalAudit.gateDetails.join("\n") || "признаки ИИ-текста выше порога"}\n${finalAudit.labels.length ? `Замеченные штампы: ${finalAudit.labels.join(", ")}.` : ""}\n\nТочечно исправь только эти места (ритм фраз, лексику, штампы), не меняя события, имена, канон, точку зрения и объём текста; не добавляй новых сравнений и описаний сверх исходных. Верни только исправленный текст целиком.`,
+        try {
+          const polished = await humanizeProseDraft(text, pipelineGenerate, {
+            model: credentials.model || "",
+            personaBlock: pipelinePersonaBlock,
+            humanizeDepth: depth,
           });
-          const correctedHygiene = sanitizeGeneratedText(correction);
-          const correctedAudit = auditHumanizedText(correctedHygiene.text, genre, depthConfig.scoreGate);
-          const correctedWords = countGeneratedWords(correctedHygiene.text);
-          const acceptCorrection = correctedWords >= Math.floor(countGeneratedWords(text) * 0.85)
-            && correctedWords <= maxAllowedGrowth(countGeneratedWords(text), 1.25)
-            && correctedAudit.score <= finalAudit.score;
-          if (acceptCorrection) {
-            text = correctedHygiene.text;
-            finalAudit = correctedAudit;
-            passesRun = 2;
+          const polishedWords = countGeneratedWords(polished.text);
+          // Постпроход иногда разгоняет текст (лишние сравнения/описания — обвес,
+          // коррелирующий с ухудшением у внешних детекторов): такой вариант не берём.
+          if (polished.text.trim() && polishedWords <= maxAllowedGrowth(beforeWords, 1.25)) {
+            text = polished.text;
           }
+          humanizeReport = polished.humanizeReport;
+        } catch (touchupError) {
+          console.warn("Авто-доводка continue не удалась:", touchupError);
+          const score = aiTellScore(text);
+          const hygiene = sanitizeGeneratedText(text);
+          text = hygiene.text;
+          humanizeReport = {
+            scoreBefore: score.score,
+            scoreAfter: score.score,
+            refinedBlocks: 0,
+            flaggedLabels: [...new Set(score.hits.map((hit) => hit.label))].slice(0, 10),
+            unresolvedLabels: [],
+            burstiness: score.burstiness,
+            openerRepetition: score.openerRepetition,
+            patternDensity: score.patternDensity,
+            gatePassed: false,
+            passesRun: 0,
+            scenesGenerated: 0,
+            depth: depthConfig.id,
+            mode: "single",
+            textHygiene: hygiene.report,
+          };
         }
-
-        humanizeReport = {
-          scoreBefore: beforeAudit.score,
-          scoreAfter: finalAudit.score,
-          refinedBlocks: 0,
-          flaggedLabels: beforeAudit.labels,
-          unresolvedLabels: finalAudit.gatePassed ? [] : finalAudit.labels,
-          burstiness: finalAudit.burstiness,
-          openerRepetition: finalAudit.openerRepetition,
-          patternDensity: finalAudit.patternDensity,
-          gatePassed: finalAudit.gatePassed,
-          passesRun,
-          scenesGenerated: 0,
-          depth: depthConfig.id,
-          mode: "single",
-          textHygiene: hygiene.report,
-        };
         notifyHumanizePass(depth, beforeChars, text.length, {
-          scoreBefore: beforeAudit.score,
-          scoreAfter: finalAudit.score,
-          gatePassed: finalAudit.gatePassed,
-          passesRun,
+          scoreBefore: humanizeReport?.scoreBefore ?? 0,
+          scoreAfter: humanizeReport?.scoreAfter ?? 0,
+          gatePassed: humanizeReport?.gatePassed ?? false,
+          passesRun: humanizeReport?.passesRun ?? 0,
         });
       }
+
       const chapterWords = action === "generate_full_chapter" ? countGeneratedWords(text) : undefined;
       return json({ result: text, humanizeReport, humanizeApplied, ...(chapterWords !== undefined ? { chapterWords, chapterTargetWords: CHAPTER_TARGET_WORDS, chapterSegments } : {}) });
     }

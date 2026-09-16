@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { directApi, directGenerate } from "../src/lib/directLlmClient";
 import { splitApiKeyPool } from "../src/lib/directLlmClient";
+import { HUMANIZE_DEPTHS } from "../server/humanStyle";
 
 async function withMockFetch<T>(handler: (url: string, init?: RequestInit) => Promise<Response>, run: () => Promise<T>): Promise<T> {
   const originalFetch = globalThis.fetch;
@@ -177,13 +178,12 @@ test("HTTP 200 without a text field becomes a visible local error with zero-outp
   assert.equal(payload.error.includes("не передал текст"), true);
 });
 
-test("autonomous writer applies a second humanize pass after drafting prose", async () => {
+test("continue with humanize returns a pipeline report after the humanize-drafted continuation", async () => {
   const prompts: string[] = [];
   const response = await withMockFetch(async (_url, init) => {
     const body = JSON.parse(String(init?.body || "{}"));
     prompts.push(body.messages?.[1]?.content || "");
-    const text = prompts.length === 1 ? "Черновик с ровным ритмом." : "Живой текст с неровным ритмом и деталью.";
-    return new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), { status: 200 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Живой фрагмент продолжения с неровным ритмом и конкретной деталью. ".repeat(8).trim() } }] }), { status: 200 });
   }, () => directApi("/api/writer/ai", {
     method: "POST",
     body: JSON.stringify({
@@ -198,25 +198,27 @@ test("autonomous writer applies a second humanize pass after drafting prose", as
   }));
   const payload = await response.json();
   assert.equal(response.status, 200);
-  assert.equal(payload.result, "Живой текст с неровным ритмом и деталью.");
-  assert.equal(payload.humanizeApplied, true);
-  assert.equal(prompts.length, 2);
-  assert.equal(prompts[0].includes("РЕЖИМ ОЧЕЛОВЕЧИВАНИЯ (MAXIMUM)"), true);
-  assert.equal(prompts[1].includes("ЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ"), true);
-  assert.equal(prompts[1].includes("Черновик с ровным ритмом."), true);
-  assert.equal(typeof payload.humanizeReport?.scoreBefore, "number");
-  assert.equal(typeof payload.humanizeReport?.scoreAfter, "number");
-  assert.equal(payload.humanizeReport?.depth, "maximum");
+  assert.equal(payload.humanizeApplied, true, "humanizeApplied");
+  assert.equal(payload.humanizeReport?.depth, "maximum", "report depth");
+  assert.equal(typeof payload.humanizeReport?.scoreBefore, "number", "scoreBefore");
+  assert.equal(prompts[0].includes("РЕЖИМ ОЧЕЛОВЕЧИВАНИЯ (MAXIMUM)"), true, "humanize directive in draft prompt");
+  assert.equal(typeof payload.result, "string");
+  assert.equal(payload.result.length > 0, true);
 });
 
-test("humanize local audit runs a corrective ratchet pass when the gate fails, but rejects a too-short correction", async () => {
-  const stampyDraft = "Не просто шёл, а словно нехотя. Не просто шёл, а словно нехотя. Не просто шёл, а словно нехотя. Не просто шёл, а словно нехотя.";
+test("pipeline keeps the stampy segment when the rewrite brings no improvement", async () => {
+  const stampyBlock = "Не просто шёл, а словно нехотя. ";
+  const stampyDraft = stampyBlock.repeat(30).trim();
   const calls: string[] = [];
   const response = await withMockFetch(async (_url, init) => {
     const body = JSON.parse(String(init?.body || "{}"));
-    calls.push(body.messages?.[1]?.content || "");
-    // Первый вызов (humanize-проход) и корректирующий ратчет-проход оба
-    // возвращают тот же перегруженный штампами текст без улучшения.
+    const promptText = body.messages?.[1]?.content || "";
+    calls.push(promptText);
+    if (promptText.includes("priority-blocks")) {
+      // Пайплайн предлагает тот же текст — локальная приёмка не видит улучшения
+      // и не принимает правку; сегмент остаётся в исходном виде.
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ blocks: [stampyDraft] }) } }] }), { status: 200 });
+    }
     return new Response(JSON.stringify({ choices: [{ message: { content: stampyDraft } }] }), { status: 200 });
   }, () => directApi("/api/writer/ai", {
     method: "POST",
@@ -230,11 +232,10 @@ test("humanize local audit runs a corrective ratchet pass when the gate fails, b
   }));
   const payload = await response.json();
   assert.equal(response.status, 200);
-  assert.equal(calls.length, 3); // черновик + humanize-проход + один корректирующий ратчет-проход
   assert.equal(payload.humanizeReport.gatePassed, false);
-  assert.equal(payload.humanizeReport.passesRun, 2); // корректирующий проход принят (не короче, score не хуже), но сам gate так и не пройден
   assert.equal(payload.humanizeReport.unresolvedLabels.length > 0, true);
-  assert.equal(calls[2].includes("Локальный аудит нашёл проблемы"), true);
+  assert.equal(payload.result.includes("словно"), true);
+  assert.equal(calls.length >= 2, true);
 });
 
 test("OpenRouter falls back when the selected model returns HTTP 200 without visible content", async () => {
@@ -486,28 +487,35 @@ test("full chapter is extended in segments until it reaches the 3300-word target
   assert.equal(payload.chapterSegments, 6);
 });
 
-test("full chapter keeps the assembled draft when humanize pass is much shorter", async () => {
-  const chunk = Array.from({ length: 700 }, () => "фрагмент").join(" ");
+test("generate_full_chapter + humanize runs the sepia pipeline through the bridge", async () => {
+  // Выбираем глубину без сценового планирования — детерминированный путь:
+  // один черновик + пайплайн touchup, без бит-плана с JSON-парсингом.
+  const depthId = (["fast", "balanced", "maximum"] as const).find((d) => !HUMANIZE_DEPTHS[d].sceneGeneration) ?? "fast";
+  const chunk = Array.from({ length: 300 }, () => "фрагмент").join(" ");
   let calls = 0;
   const response = await withMockFetch(async () => {
     calls += 1;
-    const content = calls <= 5 ? chunk : "Слишком короткая редактура.";
-    return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: chunk } }] }), { status: 200 });
   }, () => directApi("/api/writer/ai", {
     method: "POST",
     body: JSON.stringify({
       action: "generate_full_chapter",
+      title: "Тестовая книга",
+      genre: "боевик",
+      description: "Одна глава для проверки моста.",
+      currentChapterTitle: "Глава 1",
       humanize: true,
-      humanizeDepth: "maximum",
+      humanizeDepth: depthId,
       llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
     }),
   }));
   const payload = await response.json();
   assert.equal(response.status, 200);
-  assert.equal(calls, 7);
-  assert.equal(payload.chapterWords, 3500);
+  assert.equal(payload.humanizeApplied, true);
+  assert.equal(payload.humanizeReport?.depth, depthId);
+  assert.equal(typeof payload.chapterWords, "number");
   assert.equal(payload.result.includes("фрагмент"), true);
-  assert.equal(payload.result.includes("Слишком короткая редактура."), false);
+  assert.equal(calls >= 1, true);
 });
 
 test("Gemini sends the selected literary profile to its matching endpoint", async () => {
@@ -620,10 +628,10 @@ test("a hanging NVIDIA request is aborted client-side and rotates instead of wai
   assert.equal(calls.length, 2);
 });
 
-test("full-chapter humanize pass requests a token budget scaled to the draft length, not the per-chunk cap", async () => {
+test("long-draft improve uses the action token budget for the draft and returns a pipeline report", async () => {
   const requestedMaxTokens: number[] = [];
   const longDraft = "Слово ".repeat(4_100).trim(); // ~26 000 символов, как собранная глава.
-  await withMockFetch(async (_url, init) => {
+  const response = await withMockFetch(async (_url, init) => {
     const body = JSON.parse(String(init?.body || "{}"));
     requestedMaxTokens.push(body.max_tokens);
     return new Response(JSON.stringify({ choices: [{ message: { content: longDraft } }] }), { status: 200 });
@@ -633,71 +641,74 @@ test("full-chapter humanize pass requests a token budget scaled to the draft len
       action: "improve",
       text: longDraft,
       humanize: true,
-      humanizeDepth: "fast", // "fast" — без ратчет-прохода, проверяем именно бюджет основного прохода.
-      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
-    }),
-  }));
-  // Черновик длиной ~26 000 символов не должен получить лимит "как для одного чанка" (6 144).
-  assert.equal(requestedMaxTokens[1] > 6_144, true);
-});
-
-test("maximum-depth humanize prompt includes the narrative-architecture checklist, balanced does not", async () => {
-  const prompts: string[] = [];
-  async function runWithDepth(depth: string) {
-    await withMockFetch(async (_url, init) => {
-      const body = JSON.parse(String(init?.body || "{}"));
-      prompts.push(body.messages?.[1]?.content || "");
-      return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный текст." } }] }), { status: 200 });
-    }, () => directApi("/api/writer/ai", {
-      method: "POST",
-      body: JSON.stringify({
-        action: "improve",
-        text: "Короткий черновик для проверки.",
-        humanize: true,
-        humanizeDepth: depth,
-        llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
-      }),
-    }));
-  }
-  await runWithDepth("maximum");
-  await runWithDepth("balanced");
-  assert.equal(prompts[1].includes("Тема: не проговаривай мораль впрямую"), true);
-  assert.equal(prompts[3].includes("Тема: не проговаривай мораль впрямую"), false);
-});
-
-test("rewrite_detector_segments rewrites only AI/LIKELY_AI segments and preserves HUMAN ones verbatim", async () => {
-  const rewriteCalls: string[] = [];
-  const response = await withMockFetch(async (_url, init) => {
-    const requestBody = JSON.parse(String(init?.body || "{}"));
-    const promptText = requestBody.messages?.[1]?.content || "";
-    rewriteCalls.push(promptText);
-    return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный человечный вариант фрагмента с тем же смыслом событий." } }] }), { status: 200 });
-  }, () => directApi("/api/writer/ai", {
-    method: "POST",
-    body: JSON.stringify({
-      action: "rewrite_detector_segments",
       humanizeDepth: "balanced",
-      detectorSegments: [
-        { text: "Человеческий фрагмент, который детектор не тронул.", label: "HUMAN" },
-        { text: "Штампованный ИИ-фрагмент про коридор и тепловизор, который нужно переписать.", label: "AI" },
-        { text: "Ещё один человеческий кусок диалога.", label: "HUMAN" },
-        { text: "Вероятно ИИ-фрагмент с канцеляритом.", label: "LIKELY_AI" },
-      ],
       llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
     }),
   }));
   const payload = await response.json();
   assert.equal(response.status, 200);
-  // Переписаны ровно 2 фрагмента (AI + LIKELY_AI), HUMAN-фрагменты не отправлялись в generate().
-  assert.equal(rewriteCalls.length, 2);
-  assert.equal(rewriteCalls.every((prompt) => prompt.includes("ФРАГМЕНТ:")), true);
+  assert.equal(requestedMaxTokens[0], 2_048, "draft uses action budget");
+  assert.equal(payload.humanizeApplied, true, "humanizeApplied");
+  assert.equal(payload.humanizeReport?.depth, "balanced", "report depth");
+  assert.equal(typeof payload.humanizeReport?.scoreBefore, "number", "scoreBefore");
+});
+
+test("maximum depth without an author style sample is rejected in the bridge pipeline", async () => {
+  const response = await withMockFetch(async () => new Response(JSON.stringify({ choices: [{ message: { content: "Глава." } }] }), { status: 200 }), () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "generate_full_chapter",
+      humanize: true,
+      humanizeDepth: "maximum",
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(response.status, 400);
+  assert.equal(payload.error.includes("образец стиля"), true);
+});
+
+test("rewrite_detector_segments batches AI segments through the pipeline and keeps HUMAN verbatim", async () => {
+  const rewriteCalls: string[] = [];
+  const requestedModels: string[] = [];
+  const response = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    requestedModels.push(body.model);
+    const promptText = body.messages?.[1]?.content || "";
+    rewriteCalls.push(promptText);
+    if (promptText.includes("ai-segments")) {
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ blocks: ["Он свернул к воротам.", "Голос стих за дверью."] }) } }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Иной ответ." } }] }), { status: 200 });
+  }, () => directApi("/api/writer/ai", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "rewrite_detector_segments",
+      humanizeDepth: "maximum",
+      detectorSegments: [
+        { text: "Человеческий фрагмент, который детектор не тронул.", label: "HUMAN" },
+        { text: "Не просто шёл, а словно нехотя, при этом следил за коридором.", label: "AI" },
+        { text: "Ещё один человеческий кусок диалога.", label: "HUMAN" },
+        { text: "Кроме того, данная ситуация в целом была достаточно сложной.", label: "LIKELY_AI" },
+      ],
+      llmApiFields: { llmProvider: "nvidia", model: "deepseek-ai/deepseek-v4-flash-0731", apiKeys: { nvidia: "nvapi-test" } },
+    }),
+  }));
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  // Два AI-сегмента уходят одним батч-вызовом пайплайна (не по одному на сегмент).
+  assert.equal(rewriteCalls.length, 1);
+  assert.equal(rewriteCalls[0].includes("ai-segments"), true);
+  assert.equal(rewriteCalls[0].includes("ФРАГМЕНТ:"), false);
+  // Пайплайн получает выбранную модель провайдера.
+  assert.equal(requestedModels[0], "deepseek-ai/deepseek-v4-flash-0731");
+  // HUMAN-сегменты сохраняются дословно и не отправлялись на переписывание.
+  assert.equal(payload.blocks[0], "Человеческий фрагмент, который детектор не тронул.");
+  assert.equal(payload.blocks[2], "Ещё один человеческий кусок диалога.");
   assert.equal(payload.rewrittenCount, 2);
-  assert.equal(payload.result.includes("Человеческий фрагмент, который детектор не тронул."), true);
-  assert.equal(payload.result.includes("Ещё один человеческий кусок диалога."), true);
-  assert.equal(payload.result.includes("Переписанный человечный вариант фрагмента"), true);
-  assert.equal(payload.result.includes("Штампованный ИИ-фрагмент"), false);
   assert.equal(payload.humanizeReport.detectorSegmentsRewritten, 2);
-  assert.equal(typeof payload.humanizeReport.scoreBefore, "number");
+  assert.equal(payload.result.includes("Он свернул к воротам."), true);
+  assert.equal(payload.result.includes("Не просто шёл, а словно нехотя"), false);
 });
 
 test("rewrite_detector_segments keeps the original segment when the rewrite is truncated too short", async () => {
@@ -718,33 +729,38 @@ test("rewrite_detector_segments keeps the original segment when the rewrite is t
   assert.equal(payload.result, originalSegment);
 });
 
-test("maximum-depth humanize prompt also includes discourse-flow and human-positive checklists", async () => {
+test("improve drafts by task and never falls back to the legacy manual humanize prompt", async () => {
   const prompts: string[] = [];
-  await withMockFetch(async (_url, init) => {
-    const requestBody = JSON.parse(String(init?.body || "{}"));
-    prompts.push(requestBody.messages?.[1]?.content || "");
-    return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный текст." } }] }), { status: 200 });
+  const response = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    const promptText = body.messages?.[1]?.content || "";
+    prompts.push(promptText);
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Живой отредактированный текст с неровным ритмом и конкретной деталью. ".repeat(8).trim() } }] }), { status: 200 });
   }, () => directApi("/api/writer/ai", {
     method: "POST",
     body: JSON.stringify({
       action: "improve",
       text: "Короткий черновик для проверки.",
       humanize: true,
-      humanizeDepth: "maximum",
-      llmApiFields: { llmProvider: "nvidia", model: "deepseek-ai/deepseek-v4-flash-0731", apiKeys: { nvidia: "nvapi-test" } },
+      humanizeDepth: "balanced",
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
     }),
   }));
-  const humanizePrompt = prompts[1];
-  assert.equal(humanizePrompt.includes("Уровень связности между абзацами"), true);
-  assert.equal(humanizePrompt.includes("Позитивные ориентиры человеческого письма"), true);
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(prompts[0].includes("Перепиши текст по задаче"), true, "task directive");
+  assert.equal(prompts.every((prompt) => !prompt.includes("ЧЕРНОВИК ДЛЯ ФИНАЛЬНОГО ОЧЕЛОВЕЧИВАНИЯ")), true, "legacy manual pass removed");
+  assert.equal(prompts.every((prompt) => !prompt.includes("Локальный аудит нашёл проблемы")), true, "legacy ratchet removed");
+  assert.equal(payload.result.includes("неровным ритмом"), true);
+  assert.equal(payload.humanizeReport?.depth, "balanced", "report depth");
 });
 
-test("humanize prompt adds DeepSeek-specific fingerprint notes only for a DeepSeek model", async () => {
-  const prompts: string[] = [];
-  await withMockFetch(async (_url, init) => {
-    const requestBody = JSON.parse(String(init?.body || "{}"));
-    prompts.push(requestBody.messages?.[1]?.content || "");
-    return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный текст." } }] }), { status: 200 });
+test("bridge forwards the selected provider model into pipeline calls", async () => {
+  const requestedModels: string[] = [];
+  const response = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    requestedModels.push(body.model);
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Текст. ".repeat(120).trim() } }] }), { status: 200 });
   }, () => directApi("/api/writer/ai", {
     method: "POST",
     body: JSON.stringify({
@@ -755,27 +771,37 @@ test("humanize prompt adds DeepSeek-specific fingerprint notes only for a DeepSe
       llmApiFields: { llmProvider: "nvidia", model: "deepseek-ai/deepseek-v4-flash-0731", apiKeys: { nvidia: "nvapi-test" } },
     }),
   }));
-  assert.equal(prompts[1].includes("Особенности именно этой модели (DeepSeek)"), true);
-  assert.equal(prompts[1].includes("Особенности именно этой модели (Gemini)"), false);
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(requestedModels[0], "deepseek-ai/deepseek-v4-flash-0731", "selected model reaches provider");
+  assert.equal(payload.humanizeReport?.depth, "balanced", "report depth");
 });
 
-test("rewrite_detector_segments per-segment prompt includes DeepSeek fingerprint notes when using NVIDIA/DeepSeek", async () => {
-  const prompts: string[] = [];
-  await withMockFetch(async (_url, init) => {
-    const requestBody = JSON.parse(String(init?.body || "{}"));
-    prompts.push(requestBody.messages?.[1]?.content || "");
-    return new Response(JSON.stringify({ choices: [{ message: { content: "Переписанный человечный фрагмент с тем же смыслом." } }] }), { status: 200 });
+test("rewrite_detector_segments keeps the segment when the pipeline finds no tell reduction", async () => {
+  const originalSegment = "Не просто шёл, а словно нехотя. Не просто шёл, а словно нехотя.";
+  const response = await withMockFetch(async (_url, init) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    const promptText = body.messages?.[1]?.content || "";
+    if (promptText.includes("ai-segments")) {
+      // Модель вернула тот же текст — приёмка по локальному аудиту не засчитывает
+      // правку, оригинал остаётся в результате.
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ blocks: [originalSegment] }) } }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: originalSegment } }] }), { status: 200 });
   }, () => directApi("/api/writer/ai", {
     method: "POST",
     body: JSON.stringify({
       action: "rewrite_detector_segments",
       humanizeDepth: "maximum",
-      detectorSegments: [{ text: "Штампованный фрагмент про коридор.", label: "AI" }],
-      llmApiFields: { llmProvider: "nvidia", model: "deepseek-ai/deepseek-v4-flash-0731", apiKeys: { nvidia: "nvapi-test" } },
+      detectorSegments: [{ text: originalSegment, label: "AI" }],
+      llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
     }),
   }));
-  assert.equal(prompts[0].includes("Особенности именно этой модели (DeepSeek)"), true);
-  assert.equal(prompts[0].includes("Уровень связности между абзацами"), true);
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.rewrittenCount, 0);
+  assert.equal(payload.result, originalSegment);
+  assert.equal(payload.humanizeReport.detectorSegmentsRewritten, 0);
 });
 
 test("provider cascade never bounces back to an already-failed provider and reaches OpenRouter", async () => {

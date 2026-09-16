@@ -1114,6 +1114,13 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
                     {humanizeReport.depth ? `режим: ${humanizeReport.depth}` : ""}
                     {humanizeReport.burstiness != null ? ` · ритм ${humanizeReport.burstiness.toFixed(2)}` : ""}
                     {humanizeReport.passesRun ? ` · проходов: ${humanizeReport.passesRun}` : ""}
+                    {humanizeReport.sepiaRoute || humanizeReport.reviewPasses != null || humanizeReport.recreatePasses != null ? (
+                      <>
+                        {humanizeReport.sepiaRoute ? ` · маршрут: ${humanizeReport.sepiaRoute}` : ""}
+                        {humanizeReport.reviewPasses != null ? ` · review: ${humanizeReport.reviewPasses}` : ""}
+                        {humanizeReport.recreatePasses != null ? ` · recreate: ${humanizeReport.recreatePasses}` : ""}
+                      </>
+                    ) : ""}
                   </p>
                 )}
                 {(humanizeReport.unresolvedLabels?.length ?? 0) > 0 && (
