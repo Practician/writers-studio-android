@@ -1100,11 +1100,17 @@ export default function App() {
             // Extract parsed chapters
             if (parsed.chapters && Array.isArray(parsed.chapters) && parsed.chapters.length > 0) {
               parsed.chapters.forEach((ch: any) => {
+                // Фрагмент плана — это НЕ готовая глава: раньше модель возвращала
+                // его в content, и в списке глав висели «главы по 40 слов» —
+                // огрызки плана вместо чистого листа. Фрагмент уходит в синопсис,
+                // content остаётся пустым под будущий текст главы.
+                const planExcerpt = String(ch.content || "").trim();
+                const summary = String(ch.summary || "").trim() || planExcerpt || "Синопсис из плана";
                 initialChapters.push({
                   id: "chapter-ext-" + Math.random().toString(36).substr(2, 9),
                   title: ch.title || "Новая глава",
-                  summary: ch.summary || "Синопсис из плана",
-                  content: ch.content || ""
+                  summary,
+                  content: ""
                 });
               });
               hasParsedChapters = true;
