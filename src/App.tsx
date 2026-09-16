@@ -42,8 +42,12 @@ import {
   mergeLabyrinthCanonIntoStories,
   shouldSeedLabyrinthAuthorProfile,
 } from "./data/labyrinthCanon";
-import { loadGlobalAuthorProfile, saveGlobalAuthorProfile } from "./lib/authorStorage";
-import { isAutonomousApk } from "./lib/directLlmClient";
+import {
+  loadAuthorProfile,
+  migrateGlobalAuthorProfileToStories,
+  saveAuthorProfile,
+} from "./lib/authorStorage";
+import { isAutonomousApk, safeJson } from "./lib/directLlmClient";
 import { fetchOpenRouterRoleplayModels, type OpenRouterCatalogModel } from "./lib/openrouterCatalog";
 import {
   defaultModelForProvider,
@@ -602,10 +606,12 @@ export default function App() {
           (s) => /лабиринт/i.test(s.title || "") && /путь\s*домой/i.test(s.title || ""),
         );
       if (!lab) return;
-      void loadGlobalAuthorProfile(lab.id)
+      // Профиль теперь хранится для конкретной книги: сеем образец голоса
+      // только в её собственную запись (storyId этой книги).
+      void loadAuthorProfile(lab.id)
         .then((existing) => {
           if (!shouldSeedLabyrinthAuthorProfile(existing)) return;
-          return saveGlobalAuthorProfile(buildLabyrinthAuthorProfile());
+          return saveAuthorProfile({ ...buildLabyrinthAuthorProfile(), storyId: lab.id });
         })
         .catch((err) => console.warn("Labyrinth author profile seed skipped", err));
     };
@@ -619,6 +625,9 @@ export default function App() {
           setStories(merged);
           localStorage.setItem("writers_studio_stories", JSON.stringify(merged));
           seedAuthorStyle(merged);
+          // Однократная миграция: у существующих книг появляется своя копия
+          // legacy-общего профиля, чтобы их голос не потерялся после обновления.
+          void migrateGlobalAuthorProfileToStories(merged.map((s: any) => s.id)).catch(() => {});
 
           const savedStoryId = localStorage.getItem("writers_studio_selected_story_id");
           const savedChapterId = localStorage.getItem("writers_studio_selected_chapter_id");
@@ -987,6 +996,17 @@ export default function App() {
     let initialChapters: Chapter[] = [];
     let generatedChapters: { title: string; summary: string }[] = [];
     let hasParsedChapters = false;
+    // Причина, по которой главы из Библии/плана не распознались, — чтобы не
+    // падать молча, а показать пользователю, что произошло.
+    let chapterBuildNotice = "";
+
+    // В APK ключи ИИ приезжают из Keystore асинхронно: если их ещё нет,
+    // запросы гарантированно провалятся — не тратим их и честно сообщаем.
+    const aiExtractionWanted = Boolean(newWorldBible.trim() || newBookPlan.trim());
+    const aiExtractionReady = aiExtractionWanted && llmKeysReady;
+    if (aiExtractionWanted && !llmKeysReady) {
+      chapterBuildNotice = "Ключи ИИ ещё не загрузились при создании книги — главы из Библии и плана не распознаны. Подождите пару секунд и создайте главы кнопкой «Применить план к главам» в настройках книги.";
+    }
 
     if (newWorldBible.trim()) {
       initialWorldRules.push({
@@ -996,7 +1016,7 @@ export default function App() {
       });
     }
 
-    if (newWorldBible.trim() || newBookPlan.trim()) {
+    if (aiExtractionReady) {
       try {
         // Run both evaluation and extraction in parallel for fast loading
         const [evalResponse, parseResponse, chaptersResponse] = await Promise.all([
@@ -1045,7 +1065,10 @@ export default function App() {
         if (parseResponse.ok) {
           const parseData = await parseResponse.json();
           try {
-            const parsed = JSON.parse(parseData.result);
+            // Модели часто оборачивают JSON в ```-фенсы: safeJson срезает их,
+            // иначе разбор молча проваливался и главы по плану не создавались.
+            const parsed = safeJson(parseData.result, null);
+            if (!parsed) throw new Error("Ответ ИИ не является JSON");
             
             // Extract parsed characters
             if (parsed.characters && Array.isArray(parsed.characters)) {
@@ -1086,15 +1109,17 @@ export default function App() {
               });
               hasParsedChapters = true;
             }
-          } catch (e) {
+          } catch (e: any) {
             console.error("Failed to parse extracted JSON from Gemini", e);
+            chapterBuildNotice = "Не удалось разобрать ответ ИИ при извлечении глав/персонажей из Библии и плана" + (e?.message ? `: ${e.message}` : "") + ".";
           }
         }
 
         if (chaptersResponse.ok) {
           try {
             const chaptersData = await chaptersResponse.json();
-            const chaptersPayload = JSON.parse(chaptersData.result || "{}");
+            const chaptersPayload = safeJson(chaptersData.result, null);
+            if (!chaptersPayload) throw new Error("Ответ ИИ не является JSON");
             if (chaptersPayload?.chapters && Array.isArray(chaptersPayload.chapters)) {
               generatedChapters = chaptersPayload.chapters
                 .filter((ch: any) => ch && (ch.title || ch.summary))
@@ -1104,8 +1129,10 @@ export default function App() {
                 }))
                 .filter((ch) => ch.title || ch.summary);
             }
-          } catch (e) {
+          } catch (e: any) {
             console.error("Failed to parse generated chapters response", e);
+            chapterBuildNotice = chapterBuildNotice
+              || "Не удалось разобрать поглавный план, сгенерированный ИИ" + (e?.message ? `: ${e.message}` : "") + ".";
           }
         }
       } catch (err) {
@@ -1113,7 +1140,11 @@ export default function App() {
       }
     }
 
-    if (generatedChapters.length > 0) {
+    // Главы, распознанные из загруженного плана (parse_import), приоритетнее:
+    // раньше они перетирались сгенерированными (generate_chapters) и терялось
+    // их содержимое. Генерированный список используем, только если из плана
+    // ничего не распозналось.
+    if (generatedChapters.length > 0 && initialChapters.length === 0) {
       initialChapters = generatedChapters.map((ch, index) => ({
         id: "chapter-gen-" + Math.random().toString(36).substr(2, 9),
         title: ch.title,
@@ -1133,6 +1164,9 @@ export default function App() {
           summary: "План и структура книги.",
           content: newBookPlan
         });
+        if (!chapterBuildNotice) {
+          chapterBuildNotice = "Главы из плана не распознаны — план сохранён одной главой «План сюжета». Разбить его на главы можно кнопкой «Применить план к главам» в настройках книги.";
+        }
       } else {
         initialChapters.push({
           id: "chapter-1",
@@ -1140,6 +1174,10 @@ export default function App() {
           summary: "Первая вводная глава.",
           content: ""
         });
+      }
+      if (chapterBuildNotice) {
+        // Книга всё равно создаётся, но причина провала больше не молчаливая.
+        window.alert(chapterBuildNotice);
       }
     }
 
@@ -2299,6 +2337,7 @@ export default function App() {
         <AuthorProfileModal
           open={showAuthorProfile}
           onClose={() => setShowAuthorProfile(false)}
+          storyId={activeStory?.id}
           fallbackStoryId={activeStory?.id}
           selectedModel={selectedModel}
           llmProvider={llmProvider}

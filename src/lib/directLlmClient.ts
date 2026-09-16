@@ -708,12 +708,22 @@ ${body?.bookPlan || "не заполнен"}
   return { system: "Ты литературный помощник.", prompt: `${context}\n\n${body?.customPrompt || "Помоги автору с текстом."}\n\n${text}` };
 }
 
-function safeJson(text: string, fallback: any) {
-  try {
-    return JSON.parse(text.replace(/^```json\s*|```$/g, "").trim());
-  } catch {
-    return fallback;
+/** Парсит JSON из ответа модели: срезает ```-фенсы, пояснения до/после JSON. */
+export function safeJson(text: string, fallback: any) {
+  const raw = String(text || "").trim();
+  const attempts = [
+    raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/g, "").trim(),
+    raw.slice(Math.max(raw.indexOf("{"), 0), raw.lastIndexOf("}") + 1),
+  ];
+  for (const attempt of attempts) {
+    if (!attempt || (!attempt.startsWith("{") && !attempt.startsWith("["))) continue;
+    try {
+      return JSON.parse(attempt);
+    } catch {
+      // пробуем следующий вариант
+    }
   }
+  return fallback;
 }
 
 function defaultAudit(result: string): AuthorEditAudit {
@@ -739,8 +749,10 @@ function createVoiceSheet(text: string): AuthorVoiceSheet {
 export function maxTokensForAction(action?: string): number {
   if (action === "generate_full_chapter") return 6_144;
   if (action === "continue") return 2_560;
-  if (action === "generate_chapters") return 3_072;
-  if (action === "parse_import") return 3_072;
+  // Поглавный план на 20 глав с синопсисами и разбор Библии мира на кириллице
+  // не влезают в 3 072 токена — ответ обрезался по length и терял главы.
+  if (action === "generate_chapters") return 8_192;
+  if (action === "parse_import") return 6_144;
   return 2_048;
 }
 

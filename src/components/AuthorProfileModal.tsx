@@ -3,14 +3,19 @@ import mammoth from "mammoth";
 import { CheckCircle2, Fingerprint, Loader2, Save, Trash2, Upload, X } from "lucide-react";
 import type { AuthorProfileRecord, AuthorVoiceSheet } from "../types";
 import {
-  deleteGlobalAuthorProfile,
+  adoptGlobalAuthorProfile,
+  deleteAuthorProfile,
+  loadAuthorProfile,
   loadGlobalAuthorProfile,
-  saveGlobalAuthorProfile,
+  saveAuthorProfile,
 } from "../lib/authorStorage";
 
 interface AuthorProfileModalProps {
   open: boolean;
   onClose: () => void;
+  /** Книга, для которой редактируется профиль (обязателен для сохранения). */
+  storyId?: string;
+  /** Устаревшее имя пропа, оставлено для совместимости. */
   fallbackStoryId?: string;
   selectedModel?: string;
   llmProvider?: "auto" | "gemini" | "nvidia" | "groq" | "openrouter";
@@ -38,11 +43,13 @@ function VoiceSheetSummary({ voiceSheet }: { voiceSheet: AuthorVoiceSheet }) {
 export default function AuthorProfileModal({
   open,
   onClose,
+  storyId,
   fallbackStoryId,
   selectedModel,
   llmProvider = "auto",
   llmApiFields,
 }: AuthorProfileModalProps) {
+  const effectiveStoryId = storyId || fallbackStoryId || "";
   const [sample, setSample] = useState("");
   const [sampleFileName, setSampleFileName] = useState("");
   const [styleDescription, setStyleDescription] = useState("");
@@ -51,6 +58,7 @@ export default function AuthorProfileModal({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState("");
+  const [legacyGlobalAvailable, setLegacyGlobalAvailable] = useState(false);
 
   const hydrate = (profile?: AuthorProfileRecord) => {
     setSample(profile?.sample || "");
@@ -64,14 +72,25 @@ export default function AuthorProfileModal({
     if (!open) return;
     let cancelled = false;
     setStatus("");
-    loadGlobalAuthorProfile(fallbackStoryId)
+    // Читаем профиль ВЫБРАННОЙ книги; как legacy-фолбэк, если своей записи ещё
+    // нет, показываем (только для просмотра) старый общий профиль.
+    loadAuthorProfile(effectiveStoryId)
       .then((profile) => { if (!cancelled) hydrate(profile); })
       .catch(() => { if (!cancelled) setStatus("Не удалось открыть профиль автора"); });
+    if (effectiveStoryId) {
+      loadGlobalAuthorProfile()
+        .then((legacy) => {
+          if (!cancelled && legacy) setLegacyGlobalAvailable(true);
+        })
+        .catch(() => {});
+    }
     return () => { cancelled = true; };
-  }, [open, fallbackStoryId]);
+  }, [open, effectiveStoryId]);
 
   const persist = async (changes?: Partial<AuthorProfileRecord>) => {
-    const profile = {
+    if (!effectiveStoryId) throw new Error("Сначала выберите книгу — профиль хранится для каждой книги отдельно.");
+    const profile: AuthorProfileRecord = {
+      storyId: effectiveStoryId,
       sample,
       sampleFileName,
       styleDescription,
@@ -80,7 +99,7 @@ export default function AuthorProfileModal({
       updatedAt: Date.now(),
       ...changes,
     };
-    await saveGlobalAuthorProfile(profile);
+    await saveAuthorProfile(profile);
     return profile;
   };
 
@@ -89,9 +108,9 @@ export default function AuthorProfileModal({
     setStatus("");
     try {
       await persist();
-      setStatus("Профиль автора сохранён и подключён ко всем книгам.");
-    } catch {
-      setStatus("Не удалось сохранить профиль автора.");
+      setStatus("Профиль автора сохранён для выбранной книги.");
+    } catch (error: any) {
+      setStatus(error?.message || "Не удалось сохранить профиль автора.");
     } finally {
       setSaving(false);
     }
@@ -147,7 +166,7 @@ export default function AuthorProfileModal({
       if (!response.ok) throw new Error(data.error || "Не удалось построить паспорт");
       setVoiceSheet(data.profile);
       await persist({ voiceSheet: data.profile });
-      setStatus("Паспорт голоса готов и будет использоваться во всех книгах.");
+      setStatus("Паспорт голоса готов и сохранён для выбранной книги.");
     } catch (error: any) {
       setStatus(error.message || "Не удалось построить паспорт");
     } finally {
@@ -156,13 +175,25 @@ export default function AuthorProfileModal({
   };
 
   const clearProfile = async () => {
-    if (!window.confirm("Удалить общий образец и паспорт голоса для всех книг?")) return;
+    if (!window.confirm("Удалить профиль автора для выбранной книги? Общий (устаревший) профиль других книг не затрагивается.")) return;
     try {
-      await deleteGlobalAuthorProfile();
+      await deleteAuthorProfile(effectiveStoryId);
       hydrate(undefined);
-      setStatus("Общий профиль автора удалён.");
+      setStatus("Профиль автора выбранной книги удалён.");
     } catch {
       setStatus("Не удалось удалить профиль автора.");
+    }
+  };
+
+  const adoptLegacyProfile = async () => {
+    if (!effectiveStoryId) return;
+    try {
+      const profile = await adoptGlobalAuthorProfile(effectiveStoryId);
+      hydrate(profile);
+      setLegacyGlobalAvailable(false);
+      setStatus("Общий профиль скопирован в эту книгу как отдельная копия — правки больше не затронут другие книги.");
+    } catch {
+      setStatus("Не удалось скопировать общий профиль.");
     }
   };
 
@@ -181,7 +212,7 @@ export default function AuthorProfileModal({
             </div>
             <div>
               <h2 id="author-profile-modal-title" className="text-base font-bold text-slate-100">Профиль автора</h2>
-              <p className="mt-1 text-xs leading-relaxed text-slate-400">Загрузите собственный текст один раз. Голос и защищённые термины будут доступны во всех книгах и сценариях редактора.</p>
+              <p className="mt-1 text-xs leading-relaxed text-slate-400">Профиль хранится отдельно для выбранной книги. Загрузите её собственный текст — голос и защищённые термины будут применяться только здесь.</p>
             </div>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-100" title="Закрыть профиль автора">
@@ -241,10 +272,17 @@ export default function AuthorProfileModal({
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 bg-slate-950/30 px-6 py-4">
-          <button type="button" onClick={() => { void clearProfile(); }} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold text-red-400 hover:bg-red-950/30">
-            <Trash2 className="h-3.5 w-3.5" />
-            Удалить профиль
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => { void clearProfile(); }} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold text-red-400 hover:bg-red-950/30">
+              <Trash2 className="h-3.5 w-3.5" />
+              Удалить профиль
+            </button>
+            {legacyGlobalAvailable && (
+              <button type="button" onClick={() => { void adoptLegacyProfile(); }} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800">
+                Использовать общий профиль для этой книги
+              </button>
+            )}
+          </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => { void saveProfile(); }} disabled={saving} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-800 disabled:opacity-50">
               {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}

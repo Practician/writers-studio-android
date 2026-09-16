@@ -120,19 +120,78 @@ export async function deleteGlobalAuthorProfile(): Promise<void> {
   notifyAuthorProfileUpdated();
 }
 
-/** Совместимость со старыми потребителями: все они теперь читают единый профиль. */
+/**
+ * Профиль автора принадлежит КНИГЕ, а не автору целиком: каждая книга хранит
+ * собственную запись под своим storyId. Глобальная запись
+ * (GLOBAL_AUTHOR_PROFILE_ID) остаётся только как наследие старых версий —
+ * она больше не подставляется автоматически другим книгам.
+ */
 export async function loadAuthorProfile(storyId: string): Promise<AuthorProfileRecord | undefined> {
-  return loadGlobalAuthorProfile(storyId);
+  if (!storyId || storyId === GLOBAL_AUTHOR_PROFILE_ID) return readProfile(GLOBAL_AUTHOR_PROFILE_ID);
+  return readProfile(storyId);
 }
 
-/** Совместимость со старыми потребителями: запись всегда становится глобальной. */
 export async function saveAuthorProfile(profile: AuthorProfileRecord): Promise<void> {
-  return saveGlobalAuthorProfile(profile);
+  if (!profile?.storyId) throw new Error("Профиль автора сохраняется только для конкретной книги (storyId обязателен).");
+  const database = await openDatabase();
+  try {
+    const transaction = database.transaction(PROFILES, "readwrite");
+    await requestResult(transaction.objectStore(PROFILES).put(profile));
+  } finally {
+    database.close();
+  }
+  notifyAuthorProfileUpdated(profile.storyId);
 }
 
-/** Совместимость со старыми потребителями: удаляется единый профиль автора. */
-export async function deleteAuthorProfile(_storyId: string): Promise<void> {
-  return deleteGlobalAuthorProfile();
+/** Удаляет профиль только выбранной книги; общий (legacy) профиль не затрагивается. */
+export async function deleteAuthorProfile(storyId: string): Promise<void> {
+  if (!storyId || storyId === GLOBAL_AUTHOR_PROFILE_ID) return;
+  const database = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const request = database.transaction(PROFILES, "readwrite").objectStore(PROFILES).delete(storyId);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    database.close();
+  }
+  notifyAuthorProfileUpdated(storyId);
+}
+
+/**
+ * Явно скопировать legacy-общий профиль в конкретную книгу (кнопка
+ * «Использовать общий профиль» в модалке). После копирования книга живёт
+ * своей независимой копией.
+ */
+export async function adoptGlobalAuthorProfile(storyId: string): Promise<AuthorProfileRecord | undefined> {
+  const global = await readProfile(GLOBAL_AUTHOR_PROFILE_ID);
+  if (!global || !storyId || storyId === GLOBAL_AUTHOR_PROFILE_ID) return undefined;
+  const perBook: AuthorProfileRecord = { ...global, storyId, updatedAt: Date.now() };
+  await saveAuthorProfile(perBook);
+  return perBook;
+}
+
+/**
+ * Одноразовая миграция при обновлении со старой версии: у всех УЖЕ
+ * существующих книг появляется собственная копия общего профиля, чтобы их
+ * голос не потерялся. Книги, созданные после миграции, ничего не наследуют.
+ */
+export async function migrateGlobalAuthorProfileToStories(storyIds: string[]): Promise<boolean> {
+  if (typeof localStorage === "undefined") return false;
+  const flagKey = "writers_studio_author_perbook_migrated_v1";
+  if (localStorage.getItem(flagKey)) return false;
+  localStorage.setItem(flagKey, "1");
+  const global = await readProfile(GLOBAL_AUTHOR_PROFILE_ID);
+  if (!global) return false;
+  for (const storyId of storyIds) {
+    if (!storyId || storyId === GLOBAL_AUTHOR_PROFILE_ID) continue;
+    const existing = await readProfile(storyId);
+    if (!existing) {
+      await saveAuthorProfile({ ...global, storyId, updatedAt: Date.now() });
+    }
+  }
+  return true;
 }
 
 export async function saveAuthorRevision(revision: AuthorRevisionRecord): Promise<void> {
