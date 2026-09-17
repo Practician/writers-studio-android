@@ -190,10 +190,13 @@ export function isKeyOnCooldown(key: string): boolean {
 }
 
 /** Порядок по актуальной доступности; uniquePreserve уберёт повтор primary. */
+// Снятые с провода модели (gemini-2.5-flash: HTTP 404 «no longer available to new
+// users») из встроенной цепочки вычищены: недоступная модель в голове списка
+// закрывала всю Gemini-руку до того, как опробовались остальные ключи.
 const BUILTIN_GEMINI_FALLBACKS = [
   "gemini-3.8-flash",
   "gemini-flash-latest",
-  "gemini-2.5-flash-lite",
+  "gemini-3.6-flash",
   "gemini-3.5-flash-lite",
 ];
 

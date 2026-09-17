@@ -31,7 +31,7 @@ export const GEMINI_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
   { id: DEFAULT_GEMINI_MODEL, label: "Литературный авто — Gemini 3.8 Flash", description: "Новейшая Flash-модель (релиз 2 сентября 2026), бесплатный тариф ключа AI Studio; первая в цепочке ротации Gemini." },
   { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash — основной профиль", description: "Проверенный быстрый профиль для русской прозы и продолжения сцен; второй в цепочке ротации." },
   { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash — баланс", description: "Стабильный баланс между темпом, связностью и стоимостью." },
-  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — большая квота", description: "Более старая, но стабильная модель с заметно большей дневной квотой на бесплатном тарифе — надёжный резерв, когда свежие модели упираются в лимиты." },
+  { id: "gemini-flash-latest", label: "Gemini Flash Latest — авто-резерв", description: "Скользящий псевдоним Google на самую свежую Flash-модель: не снимается с прода, поэтому замыкает цепочку ротации. Прежний резерв gemini-2.5-flash отдаёт HTTP 404 «no longer available to new users»." },
 ];
 
 export const GROQ_LITERARY_MODELS: readonly LiteraryModelProfile[] = [

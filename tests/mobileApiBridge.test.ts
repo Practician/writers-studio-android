@@ -403,7 +403,7 @@ test("Gemini HTTP 503 (high demand) rotates its own models before falling back t
   assert.equal(calls[0].url.includes("models/gemini-3.7-flash:generateContent"), true);
   assert.equal(calls[1].url.includes("models/gemini-3.8-flash:generateContent"), true);
   assert.equal(calls[2].url.includes("models/gemini-3.6-flash:generateContent"), true);
-  assert.equal(calls[3].url.includes("models/gemini-2.5-flash:generateContent"), true);
+  assert.equal(calls[3].url.includes("models/gemini-flash-latest:generateContent"), true);
   assert.equal(calls[4].url, "https://api.groq.com/openai/v1/chat/completions");
 });
 
@@ -425,6 +425,34 @@ test("Gemini recovers on its second literary model after the first returns HTTP 
   assert.equal(text, "Ответ от резервной модели Gemini.");
   assert.equal(calls.length, 2);
   assert.equal(calls[1].includes("models/gemini-3.8-flash:generateContent"), true);
+});
+
+test("Gemini 404 по всей цепочке моделей переводит на следующий ключ, а не закрывает руку", async () => {
+  const calls: string[] = [];
+  const text = await withMockFetch(async (url) => {
+    calls.push(url);
+    // Первый ключ: модель снята с провода для проекта этого ключа (живой 404
+    // из журнала APK). Второй ключ — рабочий.
+    if (url.includes("key=AIza-one")) {
+      return new Response(JSON.stringify({ error: { message: "This model is no longer available to new users. Please update your code to use models/gemini-3.6-flash." } }), { status: 404 });
+    }
+    if (url.includes("models/gemini-3.7-flash:generateContent")) {
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Ответ второго ключа Gemini." }] } }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: { message: "непредвиденный маршрут" } }), { status: 500 });
+  }, () => directGenerate({
+    provider: "gemini",
+    model: "gemini-3.7-flash",
+    apiKeys: { gemini: "AIza-one,AIza-two" },
+    prompt: "Тест ротации ключей Gemini после 404.",
+    maxTokens: 2_048,
+  }));
+  assert.equal(text, "Ответ второго ключа Gemini.");
+  // 4 модели цепочки на первом ключе (все 404) + успешный вызов второго ключа.
+  assert.equal(calls.length, 5);
+  assert.equal(calls.slice(0, 4).every((call) => call.includes("key=AIza-one")), true);
+  assert.equal(calls[4].includes("key=AIza-two"), true);
+  assert.equal(calls[4].includes("models/gemini-3.7-flash:generateContent"), true);
 });
 
 test("all NVIDIA 504 diagnostics show model rotations and the Groq handoff", async () => {

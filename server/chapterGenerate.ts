@@ -98,6 +98,22 @@ export type GenerateFn = (params: {
   maxOutputTokens?: number;
 }) => Promise<string>;
 
+/** Доводка действительно переписала блок, а не поправила пробелы и пунктуацию.
+ *  Нужна последнему ярусу приёмки: провайдер без JSON-режима отдаёт текст, где
+ *  аудит не снизился, но блок реально переработан — такие блоки раньше отбрасывались. */
+function isRealRewrite(before: string, after: string): boolean {
+  const normalize = (text: string) => text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  const source = normalize(before);
+  const candidate = normalize(after);
+  if (!candidate || source === candidate) return false;
+  const sourceWords = new Set(source.split(" "));
+  const freshWords = candidate.split(" ").filter((word) => !sourceWords.has(word));
+  return freshWords.length >= Math.max(3, Math.round(candidate.split(" ").length * 0.05));
+}
+
 /** Model-dependent temperature: DeepSeek лучше при более низкой (自然的 ритм),
  *  Gemini — при более высокой (ломает предсказуемость). */
 function modelTemperature(model: string, base: number, candidateIndex = 0): number {
@@ -442,7 +458,17 @@ export async function runTouchupPipeline(
               const afterBurst = sentenceBurstiness(candidate);
               if (afterBurst > beforeBurst + 0.08) {
                 result.set(blockIndex, candidate);
+                return;
               }
+            }
+            // Последний ярус приёмки. Провайдер без JSON-режима (в журнале APK —
+            // openrouter/free) отдаёт переписанный блок, который не снижает локальный
+            // аудит: строгие правила выше отбрасывали все блоки подряд, и вся доводка
+            // главы превращалась в пустой проход (15539 → 15539 символов, 27 → 27
+            // попаданий, gate не пройден). Здесь принимаем реально переработанный
+            // текст, если аудит не вырос: «не стало хуже» вместо «обязательно лучше».
+            if (afterHits <= beforeHits && isRealRewrite(blocks[blockIndex], candidate)) {
+              result.set(blockIndex, candidate);
             }
           }
         });

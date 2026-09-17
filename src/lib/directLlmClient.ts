@@ -219,8 +219,14 @@ function shouldRotateKey(status: number): boolean {
 // ключи — крутили только модели внутри одного ключа. Но перегрузка бывает привязана
 // к проекту ключа, а у автора их несколько: когда вся цепочка моделей легла на одном
 // ключе, честнее перебрать следующие ключи Gemini, прежде чем уходить к Groq.
+// 404/410 у Gemini тоже ротируют ключ. Недоступность модели бывает привязана к
+// проекту ключа (404 «no longer available to new users»): снятая с провода модель
+// отдаёт 404 на одном ключе, но остаётся рабочей на другом. Раньше после исчерпания
+// цепочки моделей 404 закрывал всю Gemini-руку, и второй/третий ключ автора не
+// опробовался ни разу.
 function shouldRotateProviderKey(provider: DirectProvider, status: number): boolean {
-  return shouldRotateKey(status) || (provider === "gemini" && (status === 503 || status === 504));
+  return shouldRotateKey(status)
+    || (provider === "gemini" && (status === 404 || status === 410 || status === 503 || status === 504));
 }
 
 // Детекторы ловят в первую очередь «пальцы» конкретной модели: переписывать сегмент
