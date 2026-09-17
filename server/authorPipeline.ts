@@ -353,11 +353,72 @@ export function deterministicChecks(original: string, revised: string, protected
   return { missingTerms, missingNumbers, addedNumbers };
 }
 
-export function parseJsonResponse<T>(text: string | undefined, label: string): T {
-  if (!text?.trim()) throw new Error(`${label}: модель вернула пустой ответ`);
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    throw new Error(`${label}: модель вернула некорректный JSON`);
+/** Достать JSON из ответа модели, не роняя вызов: строгий JSON, снятая ```-обёртка,
+ *  объект или массив внутри прозы, ответ с незаэкранированными переводами строк.
+ *  Провайдеры без JSON-схемы (OpenRouter, NVIDIA, часть Groq) отвечают в свободной
+ *  форме; живой прогон показал, что строгий разбор терял целый раунд доводки. */
+export function tolerantJson<T>(text: string | undefined): T | null {
+  const raw = String(text ?? "").trim();
+  if (!raw) return null;
+  const unfenced = raw.replace(/^```[a-z]*\s*/i, "").replace(/```\s*$/i, "").trim();
+  const span = (value: string): string => {
+    const starts = [value.indexOf("{"), value.indexOf("[")].filter((index) => index >= 0);
+    if (!starts.length) return value;
+    const start = Math.min(...starts);
+    const end = Math.max(value.lastIndexOf("}"), value.lastIndexOf("]"), start);
+    return value.slice(start, end + 1);
+  };
+  const repair = (value: string): string => {
+    let out = "";
+    let inString = false;
+    let escaped = false;
+    for (const char of value) {
+      if (escaped) {
+        out += char;
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        out += char;
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        out += char;
+        continue;
+      }
+      if (inString && (char === "\n" || char === "\r")) {
+        out += "\\n";
+        continue;
+      }
+      if (inString && char === "\t") {
+        out += "\\t";
+        continue;
+      }
+      if (inString && char.charCodeAt(0) < 32) {
+        out += " ";
+        continue;
+      }
+      out += char;
+    }
+    return out;
+  };
+  const candidates = [raw, unfenced, span(unfenced), repair(unfenced), repair(span(unfenced))];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed != null) return parsed as T;
+    } catch {
+      // пробуем следующую форму ответа
+    }
   }
+  return null;
+}
+
+export function parseJsonResponse<T>(text: string | undefined, label: string): T {
+  const parsed = tolerantJson<T>(text);
+  if (parsed != null) return parsed;
+  if (!text?.trim()) throw new Error(`${label}: модель вернула пустой ответ`);
+  throw new Error(`${label}: модель вернула некорректный JSON`);
 }

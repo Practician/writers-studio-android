@@ -4,6 +4,7 @@ import {
   rewriteSchema,
   selectStyleExcerpts,
   splitTextStructure,
+  tolerantJson,
   parseJsonResponse,
 } from "./authorPipeline";
 import {
@@ -112,6 +113,114 @@ function isRealRewrite(before: string, after: string): boolean {
   const sourceWords = new Set(source.split(" "));
   const freshWords = candidate.split(" ").filter((word) => !sourceWords.has(word));
   return freshWords.length >= Math.max(3, Math.round(candidate.split(" ").length * 0.05));
+}
+
+/** Предел роста блока при доводке: переписанный абзац не должен «обвешиваться» вдвое. */
+const TOUCHUP_MAX_GROWTH = 1.3;
+
+/** Достать переписанные блоки из ответа модели в любой разумной форме.
+ *  Провайдер без JSON-схемы (OpenRouter, NVIDIA, часть Groq) отдаёт не
+ *  { blocks: ["…"] }, а { blocks: [{ text }] }, [{ index, text }], ["…"] или
+ *  { results: […] }. Строгий разбор ронял такой ответ целиком, и вся доводка
+ *  главы превращалась в пустой проход — живой прогон показал refinedBlocks 0. */
+export function extractRewrittenBlocks(raw: string, expected: number): Array<string | null> {
+  const out: Array<string | null> = new Array(expected).fill(null);
+  if (expected <= 0) return out;
+  const payload = tolerantJson<unknown>(raw);
+  if (payload == null) return out;
+  const list: unknown[] = Array.isArray(payload)
+    ? payload
+    : (() => {
+        const record = (payload || {}) as Record<string, unknown>;
+        for (const key of ["blocks", "results", "rewritten", "items", "texts", "paragraphs", "variants", "data"]) {
+          if (Array.isArray(record[key])) return record[key] as unknown[];
+        }
+        return [];
+      })();
+  const positional: string[] = [];
+  for (const entry of list) {
+    const text = (() => {
+      if (typeof entry === "string") return entry;
+      if (entry && typeof entry === "object") {
+        const record = entry as Record<string, unknown>;
+        for (const key of ["text", "block", "rewritten", "content", "value", "result"]) {
+          if (typeof record[key] === "string") return record[key] as string;
+        }
+      }
+      return "";
+    })().trim();
+    if (!text) continue;
+    const index = (() => {
+      if (!entry || typeof entry !== "object") return null;
+      const value = (entry as Record<string, unknown>).index;
+      return typeof value === "number" && Number.isInteger(value) && value >= 0 && value < expected ? value : null;
+    })();
+    if (index != null) out[index] = text;
+    else positional.push(text);
+  }
+  if (positional.length === expected) {
+    positional.forEach((text, position) => {
+      if (out[position] == null) out[position] = text;
+    });
+    return out;
+  }
+  let cursor = 0;
+  for (const text of positional) {
+    while (cursor < expected && out[cursor] != null) cursor += 1;
+    if (cursor >= expected) break;
+    out[cursor] = text;
+    cursor += 1;
+  }
+  return out;
+}
+
+/** Провайдер проигнорировал JSON-режим и ответил прозой (в живом прогоне так вёл себя
+ *  deepseek через OpenAI-совместимый шлюз): для одного блока весь ответ и есть правка,
+ *  для нескольких — абзацы по порядку. Без этого раунд доводки снова становился пустым. */
+function applyProseFallback(candidates: Array<string | null>, raw: string): void {
+  if (!candidates.length || candidates.some((value) => value != null)) return;
+  const cleaned = String(raw ?? "")
+    .replace(/^```[a-z]*\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .split("\n")
+    .filter((line) => !/^\s*(вот|готово|переработанн|ниже|результат)\b/i.test(line))
+    .join("\n")
+    .trim();
+  if (!cleaned || /[{}]/.test(cleaned)) return;
+  const parts = cleaned
+    .split(/\n{2,}/)
+    .map((part) => part.trim().replace(/^\s*\d+[.)]\s*/, ""))
+    .filter((part) => part.length >= 20);
+  if (parts.length === candidates.length) {
+    parts.forEach((part, index) => {
+      candidates[index] = part;
+    });
+  } else if (candidates.length === 1) {
+    candidates[0] = cleaned;
+  }
+}
+
+/** Приёмка одного переписанного блока по локальному аудиту.
+ *  Ярусы: (1) штампов строго меньше; (2) столько же, но ритм ближе к цели или заметно
+ *  живее; (3) столько же, но score не вырос, блок реально переработан и не раздут.
+ *  Третий ярус нужен провайдерам без JSON-схемы — иначе проход вырождается в пустой,
+ *  но принимать «не хуже по штампам при худшем score» нельзя: аудит главы считает score. */
+export function isAcceptableRewrite(source: string, candidate: string, targetBurstiness?: number): boolean {
+  if (!candidate.trim() || candidate.trim() === source.trim()) return false;
+  if (blockQualityIssues(source, candidate).length) return false;
+  if (candidate.length > source.length * TOUCHUP_MAX_GROWTH) return false;
+  const beforeHits = detectAiTells(source).length;
+  const afterHits = detectAiTells(candidate).length;
+  if (afterHits > beforeHits) return false;
+  if (afterHits < beforeHits) return true;
+  const beforeBurst = sentenceBurstiness(source);
+  const afterBurst = sentenceBurstiness(candidate);
+  if (targetBurstiness != null) {
+    if (Math.abs(afterBurst - targetBurstiness) < Math.abs(beforeBurst - targetBurstiness)) return true;
+  } else if (afterBurst > beforeBurst + 0.08) {
+    return true;
+  }
+  return isRealRewrite(source, candidate) && aiTellScore(candidate).score <= aiTellScore(source).score;
 }
 
 /** Model-dependent temperature: DeepSeek лучше при более низкой (自然的 ритм),
@@ -432,46 +541,18 @@ export async function runTouchupPipeline(
         responseSchema: rewriteSchema(indexes.length),
         maxOutputTokens: 24576,
       });
-      const payload = parseJsonResponse<{ blocks: string[] }>(raw, "Авто-доводка");
-      if (Array.isArray(payload.blocks) && payload.blocks.length === indexes.length) {
+      const candidates = extractRewrittenBlocks(raw, indexes.length);
+      applyProseFallback(candidates, raw);
+      if (candidates.some((value) => value != null)) {
         indexes.forEach((blockIndex, position) => {
-          const candidate = payload.blocks[position];
-          if (typeof candidate === "string" && candidate.trim() && !blockQualityIssues(blocks[blockIndex], candidate).length) {
-            const beforeHits = detectAiTells(blocks[blockIndex]).length;
-            const afterHits = detectAiTells(candidate).length;
-            if (afterHits < beforeHits) {
-              result.set(blockIndex, candidate);
-              return;
-            }
-            // Rhythm Pass: если задана цель и мы приблизились к ней
-            if (afterHits === beforeHits && options.targetBurstiness) {
-              const beforeDiff = Math.abs(sentenceBurstiness(blocks[blockIndex]) - options.targetBurstiness);
-              const afterDiff = Math.abs(sentenceBurstiness(candidate) - options.targetBurstiness);
-              if (afterDiff < beforeDiff) {
-                result.set(blockIndex, candidate);
-                return;
-              }
-            }
-            // Или по старому правилу - если burstiness вырос (если нет target)
-            if (afterHits === beforeHits && !options.targetBurstiness) {
-              const beforeBurst = sentenceBurstiness(blocks[blockIndex]);
-              const afterBurst = sentenceBurstiness(candidate);
-              if (afterBurst > beforeBurst + 0.08) {
-                result.set(blockIndex, candidate);
-                return;
-              }
-            }
-            // Последний ярус приёмки. Провайдер без JSON-режима (в журнале APK —
-            // openrouter/free) отдаёт переписанный блок, который не снижает локальный
-            // аудит: строгие правила выше отбрасывали все блоки подряд, и вся доводка
-            // главы превращалась в пустой проход (15539 → 15539 символов, 27 → 27
-            // попаданий, gate не пройден). Здесь принимаем реально переработанный
-            // текст, если аудит не вырос: «не стало хуже» вместо «обязательно лучше».
-            if (afterHits <= beforeHits && isRealRewrite(blocks[blockIndex], candidate)) {
-              result.set(blockIndex, candidate);
-            }
+          const candidate = candidates[position];
+          if (!candidate) return;
+          if (isAcceptableRewrite(blocks[blockIndex], candidate, options.targetBurstiness)) {
+            result.set(blockIndex, candidate);
           }
         });
+      } else {
+        console.warn("Авто-доводка: ответ модели не содержит блоков", raw.slice(0, 200));
       }
 
       return result;
@@ -1083,33 +1164,18 @@ export async function rewriteDetectorAiSegments(
         responseSchema: rewriteSchema(batch.length),
         maxOutputTokens: 24576,
       });
-      const payload = parseJsonResponse<{ blocks: string[] }>(raw, "AI-сегменты");
-      if (Array.isArray(payload.blocks) && payload.blocks.length === batch.length) {
-        batch.forEach((segmentIndex, position) => {
-          const candidate = payload.blocks[position];
-          if (
-            typeof candidate === "string"
-            && candidate.trim()
-            && !blockQualityIssues(segments[segmentIndex].text, candidate).length
-          ) {
-            const beforeHits = detectAiTells(segments[segmentIndex].text).length;
-            const afterHits = detectAiTells(candidate).length;
-            // Принимаем если штампов стало строго меньше
-            if (afterHits < beforeHits) {
-              revised[segmentIndex] = candidate;
-              rewrittenCount += 1;
-            } else if (afterHits === beforeHits) {
-              // Или если burstiness显著 вырос — ритм стал живее
-              const beforeBurst = sentenceBurstiness(segments[segmentIndex].text);
-              const afterBurst = sentenceBurstiness(candidate);
-              if (afterBurst > beforeBurst + 0.08) {
-                revised[segmentIndex] = candidate;
-                rewrittenCount += 1;
-              }
-            }
-          }
-        });
-      }
+      // Ответ модели приходит в любой форме ({blocks:[…]}, [{index,text}], […]) —
+      // разбираем толерантно и принимаем по тем же правилам, что и авто-доводка.
+      const candidates = extractRewrittenBlocks(raw, batch.length);
+      applyProseFallback(candidates, raw);
+      batch.forEach((segmentIndex, position) => {
+        const candidate = candidates[position];
+        if (!candidate) return;
+        if (isAcceptableRewrite(segments[segmentIndex].text, candidate)) {
+          revised[segmentIndex] = candidate;
+          rewrittenCount += 1;
+        }
+      });
     } catch (error) {
       console.warn("Detector segment batch failed:", error);
     }

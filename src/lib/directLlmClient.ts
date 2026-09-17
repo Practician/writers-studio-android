@@ -837,7 +837,11 @@ function normalizeHumanizeDepth(value: unknown, fallback: "fast" | "balanced" | 
 }
 
 const CHAPTER_TARGET_WORDS = 3_300;
-const MAX_CHAPTER_CONTINUATIONS = 6;
+// Модели отвечают короткими фрагментами (в живом журнале глава вставала на 2326 словах
+// из 3300), поэтому попыток дописывания больше, а фрагмент короче 120 слов считается
+// застоем и повторяется с жёстким требованием объёма.
+const MAX_CHAPTER_CONTINUATIONS = 10;
+const MIN_CONTINUATION_WORDS = 120;
 
 function countGeneratedWords(text: string): number {
   return (text.match(/[A-Za-zА-Яа-яЁё0-9]+(?:[-'][A-Za-zА-Яа-яЁё0-9]+)*/gu) || []).length;
@@ -1117,20 +1121,35 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
       // указанный объём. Для полной главы измеряем фактические слова и дописываем сцены.
       let chapterSegments = 1;
       if (action === "generate_full_chapter") {
+        let stalls = 0;
         for (let continuation = 0; continuation < MAX_CHAPTER_CONTINUATIONS && countGeneratedWords(text) < CHAPTER_TARGET_WORDS; continuation += 1) {
           const currentWords = countGeneratedWords(text);
           const remaining = Math.max(1, CHAPTER_TARGET_WORDS - currentWords);
-          const next = await generate({
-            provider: credentials.provider,
-            model: credentials.model,
-            apiKeys: credentials.keys,
-            system: `Ты продолжаешь уже начатую художественную главу. Верни только новый фрагмент прозы на русском, без заголовка, повтора и комментариев.${humanizeDirective(body)}`,
-            prompt: `${compactContext(body)}\n\nНАПИСАНО УЖЕ: около ${currentWords} слов. ЦЕЛЬ ГЛАВЫ: около ${CHAPTER_TARGET_WORDS} слов.\n\nХвост текущей главы:\n${text.slice(-6500)}\n\nПродолжи строго с этого места. Не пересказывай и не повторяй написанное. Напиши следующую законченную сцену или развитие сцены объёмом не менее ${Math.min(900, remaining)} слов; двигай сюжет к завершённому повороту главы.`,
-          });
-          const beforeWords = currentWords;
+          const askWords = Math.min(900, remaining);
+          const system = `Ты продолжаешь уже начатую художественную главу. Верни только новый фрагмент прозы на русском, без заголовка, повтора и комментариев.${humanizeDirective(body)}`;
+          const promptFor = (firm: boolean) => [
+            compactContext(body),
+            `НАПИСАНО УЖЕ: около ${currentWords} слов. ЦЕЛЬ ГЛАВЫ: около ${CHAPTER_TARGET_WORDS} слов.`,
+            `Хвост текущей главы:\n${text.slice(-6500)}`,
+            "Продолжи строго с этого места. Не пересказывай и не повторяй написанное.",
+            firm
+              ? `Прошлый фрагмент вышел слишком коротким. Напиши одну законченную сцену не менее ${askWords} слов: диалог или действие, новая деталь обстановки, поворот. Не завершай главу, пока не наберёшь объём.`
+              : `Напиши следующую законченную сцену или развитие сцены объёмом не менее ${askWords} слов; двигай сюжет к завершённому повороту главы.`,
+          ].join("\n\n");
+          let next = await generate({ provider: credentials.provider, model: credentials.model, apiKeys: credentials.keys, system, prompt: promptFor(false) });
+          let gained = countGeneratedWords(next);
+          if (gained < MIN_CONTINUATION_WORDS && continuation < MAX_CHAPTER_CONTINUATIONS - 1) {
+            const firmer = await generate({ provider: credentials.provider, model: credentials.model, apiKeys: credentials.keys, system, prompt: promptFor(true) });
+            if (countGeneratedWords(firmer) > gained) {
+              next = firmer;
+              gained = countGeneratedWords(next);
+            }
+          }
+          if (gained <= 0) break;
           text = `${text.trim()}\n\n${next.trim()}`;
           chapterSegments += 1;
-          if (countGeneratedWords(text) <= beforeWords) break;
+          stalls = gained < MIN_CONTINUATION_WORDS ? stalls + 1 : 0;
+          if (stalls >= 2) break;
         }
         notifyChapterVolume(countGeneratedWords(text), chapterSegments, CHAPTER_TARGET_WORDS, countGeneratedWords(text) >= CHAPTER_TARGET_WORDS);
       }
