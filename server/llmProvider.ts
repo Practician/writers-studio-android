@@ -1341,6 +1341,23 @@ async function callGeminiOnce(
   return { text, provider: "gemini", model: modelName, finishReason };
 }
 
+/**
+ * Порядок моделей Gemini по выученному состоянию: живые — вперёд, остывающие —
+ * в хвост, недоступные ключу/проекту не тратят попытку. Зеркало APK-памяти:
+ * ротация моделей должна учитывать то, что уже известно о каждой из них.
+ */
+function orderGeminiModelsForHealth(models: string[]): string[] {
+  const available: string[] = [];
+  const cooling: string[] = [];
+  for (const model of models) {
+    const key = `gemini:${model}`;
+    if (isNvidiaModelOnCooldown(key)) cooling.push(model);
+    else available.push(model);
+  }
+  if (!available.length && !cooling.length) return models;
+  return [...available, ...cooling];
+}
+
 async function generateViaGemini(params: LlmGenerateParams): Promise<LlmGenerateResult> {
   const allKeys = collectGeminiKeys();
   const keys = allKeys.filter((k) => !isKeyOnCooldown(k));
@@ -1349,7 +1366,7 @@ async function generateViaGemini(params: LlmGenerateParams): Promise<LlmGenerate
     throw new Error("GEMINI_API_KEY is not configured.");
   }
 
-  const models = geminiModelChain(params.model);
+  const models = orderGeminiModelsForHealth(geminiModelChain(params.model));
   let lastError: any = null;
   let attempts = 0;
 

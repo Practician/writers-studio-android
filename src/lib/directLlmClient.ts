@@ -45,6 +45,17 @@ type DirectRequest = {
 };
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+/**
+ * Адрес шлюза Gemini можно подменить — это нужно живому стенду и тестам: полный
+ * цикл «парковка ключа → пропуск → добор рабочим ключом → обрезка ответа» надо
+ * прогнать на реальном HTTP, а не на подмене fetch. В APK значение всегда
+ * остаётся адресом Google, подмена живёт только внутри процесса теста.
+ */
+let geminiBaseUrl = GEMINI_URL;
+
+export function __setGeminiBaseUrlForTests(value?: string | null): void {
+  geminiBaseUrl = value || GEMINI_URL;
+}
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
@@ -210,6 +221,33 @@ export function geminiKeyPauseUntil(key: string): number {
   return geminiMemoryFor(key).keyPauseUntil ?? 0;
 }
 
+/**
+ * Состояние памяти для окна настроек: какие ключи Gemini на паузе (и почему),
+ * какие модели признаны недоступными или остывают. Ключ показывается только
+ * последними четырьмя знаками — как и везде в журнале.
+ */
+export type GeminiHealthSummary = {
+  paused: Array<{ suffix: string; until: number; reason: string }>;
+  dead: string[];
+  cooling: string[];
+};
+
+export function geminiHealthSummary(): GeminiHealthSummary {
+  const now = Date.now();
+  const memory = loadGeminiMemory();
+  const paused: Array<{ suffix: string; until: number; reason: string }> = [];
+  const dead = new Set<string>();
+  const cooling = new Set<string>();
+  for (const [suffix, entry] of Object.entries(memory || {})) {
+    if (!entry) continue;
+    if ((entry.keyPauseUntil ?? 0) > now) paused.push({ suffix, until: entry.keyPauseUntil as number, reason: entry.pauseReason || "квота" });
+    for (const [model, until] of Object.entries(entry.dead || {})) if (until > now) dead.add(model);
+    for (const [model, until] of Object.entries(entry.cooling || {})) if (until > now) cooling.add(model);
+  }
+  paused.sort((a, b) => a.until - b.until);
+  return { paused, dead: [...dead], cooling: [...cooling] };
+}
+
 function parkGeminiKey(key: string, pauseUntil: number, reason: string): void {
   const memory = geminiMemoryFor(key);
   memory.keyPauseUntil = Math.max(memory.keyPauseUntil ?? 0, pauseUntil);
@@ -302,6 +340,34 @@ function recordGeminiOutcome(key: string, model: string, status: number, ok: boo
   }
 }
 
+// --- Бюджет вывода и «размышления» модели ------------------------------------
+// У моделей Gemini с размышлениями thinking-токены тратят тот же maxOutputTokens,
+// что и текст. В живом журнале APK это выглядело так: HTTP 200, но глава приходит
+// фрагментом 478-2 470 символов с finishReason MAX_TOKENS — лимит съедали
+// размышления, а не проза, и дописывание главы крутилось лишние проходы.
+// Отключаем размышления там, где модель это принимает: весь бюджет уходит в текст.
+const geminiThinkingUnsupported = new Set<string>();
+
+function geminiSendsThinkingConfig(model: string): boolean {
+  const id = String(model || "").toLowerCase();
+  if (!id.includes("gemini")) return false;
+  if (geminiThinkingUnsupported.has(id)) return false;
+  // 2.5+ и любые thinking-профили понимают thinkingConfig. Если конкретный ключ
+  // или модель поле не принимает (400 Invalid JSON payload), модель попадёт в
+  // этот набор после первой ошибки и больше его не получит.
+  return /gemini-(2\.5|[3-9])/.test(id) || id.includes("thinking") || id.includes("-latest");
+}
+
+function isThinkingConfigError(status: number, payload: any): boolean {
+  if (status !== 400) return false;
+  const text = String(payload?.error?.message || payload?.error || "").toLowerCase();
+  return text.includes("thinking");
+}
+
+function hasTruncatedFinishReason(payload: any): boolean {
+  return /MAX_TOKENS|LENGTH/i.test(String(finishReasonFor(payload) || ""));
+}
+
 type ApiTrace = {
   provider: Exclude<DirectProvider, "auto">;
   model: string;
@@ -334,7 +400,7 @@ function hasProviderKey(keys: ApiKeys, provider: Exclude<DirectProvider, "auto">
 }
 
 function endpointFor(provider: Exclude<DirectProvider, "auto">, model: string, key: string): string {
-  if (provider === "gemini") return `${GEMINI_URL}/${encodeURIComponent(model)}:generateContent`;
+  if (provider === "gemini") return `${geminiBaseUrl}/${encodeURIComponent(model)}:generateContent`;
   if (provider === "openrouter") return OPENROUTER_URL;
   if (provider === "groq") return GROQ_URL;
   return NVIDIA_URL;
@@ -665,7 +731,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     const systemForCall = request.json ? ensureJsonKeyword(system, request.prompt) : system;
     // Модели Gemini вызываются одинаково и на первом шаге, и при ротации,
     // поэтому запрос вынесен в одну функцию.
-    const callGemini = (targetModel: string) => fetchWithTimeout(`${GEMINI_URL}/${encodeURIComponent(targetModel)}:generateContent?key=${encodeURIComponent(key)}`, {
+    const callGemini = (targetModel: string) => fetchWithTimeout(`${geminiBaseUrl}/${encodeURIComponent(targetModel)}:generateContent?key=${encodeURIComponent(key)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -675,6 +741,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
           temperature: request.temperature ?? 0.75,
           maxOutputTokens: maxTokens,
           responseMimeType: request.json ? "application/json" : "text/plain",
+          ...(geminiSendsThinkingConfig(targetModel) ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
         },
       }),
     });
@@ -710,6 +777,16 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
 
     payload = await response.json().catch(() => ({}));
 
+    // Ключ/модель не понимают thinkingConfig (400 Invalid JSON payload) — помечаем
+    // модель и повторяем ровно один раз без поля. Иначе лечение обрезки само стало
+    // бы причиной отказа, и автор получил бы ошибку вместо главы.
+    if (provider === "gemini" && isThinkingConfigError(response.status, payload)) {
+      geminiThinkingUnsupported.add(effectiveModel.toLowerCase());
+      emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `${effectiveModel} не принимает thinkingConfig: повтор без отключения размышлений.`, { chars: 0 }));
+      response = await callGemini(effectiveModel);
+      payload = await response.json().catch(() => ({}));
+    }
+
     // Вся цепочка литературных профилей Gemini на том же ключе — управляемая
     // деградация вместо зависания на временной перегрузке (HTTP 503), лимите (429)
     // или модели, недоступной ключу (404). Состав и порядок цепочки учитывают
@@ -738,6 +815,15 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         payload = await response.json().catch(() => ({}));
         recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload), payload?.error?.message || payload?.error);
       }
+    }
+
+    // Автор должен видеть причину короткой главы прямо в журнале: ответ дошёл,
+    // но модель упёрлась в лимит вывода. Это не ошибка ротации — дописывание
+    // продолжит главу, а строка объясняет, почему фрагмент короткий.
+    if (provider === "gemini" && response.ok && hasTruncatedFinishReason(payload)) {
+      let chars = 0;
+      try { chars = responseText(payload).length; } catch { chars = 0; }
+      emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `Ответ обрезан по лимиту вывода (${finishReasonFor(payload)}): ${chars} символов; продолжение допишется следующим проходом.`, { chars, finishReason: finishReasonFor(payload) }));
     }
 
     // NVIDIA: повтор на том же ключе при 504 убран. Шлюз держит соединение до 90 с

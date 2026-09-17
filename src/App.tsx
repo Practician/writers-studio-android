@@ -47,7 +47,12 @@ import {
   migrateGlobalAuthorProfileToStories,
   saveAuthorProfile,
 } from "./lib/authorStorage";
-import { isAutonomousApk, safeJson } from "./lib/directLlmClient";
+import {
+  isAutonomousApk,
+  safeJson,
+  geminiHealthSummary,
+  resetGeminiModelMemory,
+} from "./lib/directLlmClient";
 import { fetchOpenRouterRoleplayModels, type OpenRouterCatalogModel } from "./lib/openrouterCatalog";
 import {
   defaultModelForProvider,
@@ -121,6 +126,10 @@ export default function App() {
   const [openrouterCatalogError, setOpenrouterCatalogError] = useState("");
   const [openrouterFallbackNotice, setOpenrouterFallbackNotice] = useState<string | null>(null);
   const [showLlmSettings, setShowLlmSettings] = useState(false);
+  // Память ключей и моделей Gemini показывается в окне настроек: автор видит,
+  // какие ключи на паузе и почему, и может сбросить память вручную.
+  const [geminiHealth, setGeminiHealth] = React.useState<ReturnType<typeof geminiHealthSummary> | null>(null);
+  React.useEffect(() => { if (showLlmSettings) setGeminiHealth(geminiHealthSummary()); }, [showLlmSettings]);
   const [showAuthorProfile, setShowAuthorProfile] = useState(false);
   const [showAgent, setShowAgent] = useState(false);
   // На телефоне главы и инструменты открываются как отдельные панели, не как постоянные колонки.
@@ -2477,6 +2486,32 @@ export default function App() {
                   {GEMINI_LITERARY_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
                 </select>
                 <p className="text-[10px] leading-relaxed text-slate-400">{GEMINI_LITERARY_MODELS.find((model) => model.id === geminiModelDraft)?.description}</p>
+              </div>
+
+              <div className="rounded-xl border border-slate-600/40 bg-slate-950/40 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="font-semibold text-slate-100 text-[12px]">Память ключей и моделей Gemini</label>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-md border border-slate-700 bg-slate-900/60 text-slate-300">ведётся сама</span>
+                </div>
+                <p className="text-[10px] leading-relaxed text-slate-400">
+                  Приложение запоминает, какие модели недоступны конкретному ключу и какой ключ упёрся в дневную квоту: такой ключ снимается с работы, а не перепробуется на каждом запросе. Если ключ уже ожил (например, квота обновилась) — сбросьте память.
+                </p>
+                <div className="space-y-1 text-[10px]">
+                  {geminiHealth && geminiHealth.paused.length > 0 ? geminiHealth.paused.map((item) => (
+                    <p key={item.suffix} className="text-amber-200">Ключ ··{item.suffix} на паузе до {new Date(item.until).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })} — {item.reason}.</p>
+                  )) : (
+                    <p className="text-emerald-300">Ключи Gemini на паузе не числятся.</p>
+                  )}
+                  {geminiHealth && geminiHealth.dead.length > 0 && <p className="text-slate-400">Недоступны этому ключу: {geminiHealth.dead.join(", ")}.</p>}
+                  {geminiHealth && geminiHealth.cooling.length > 0 && <p className="text-slate-400">Остывают: {geminiHealth.cooling.join(", ")}.</p>}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { resetGeminiModelMemory(); setGeminiHealth(geminiHealthSummary()); }}
+                  className="text-[10px] px-2.5 py-1.5 rounded-lg border border-slate-600/60 text-slate-200 hover:border-amber-500/60 hover:text-amber-200 cursor-pointer"
+                >
+                  Сбросить память и перепробовать все ключи заново
+                </button>
               </div>
 
               <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/20 p-3.5 space-y-2.5">
