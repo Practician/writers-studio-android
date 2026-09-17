@@ -247,8 +247,10 @@ test("gate requires burstiness when minBurstiness set", () => {
   const score = aiTellScore(uniform);
   // без штампов, но ровный ритм — gate по score может пройти, по burstiness — нет
   if (score.burstiness < 0.45 && score.score <= 18) {
-    assert.equal(humanizeGatePassed(score, 18, 0.45), false);
-    assert.equal(humanizeGatePassed(score, 18, 0), true);
+    // Ритм спрашиваем только на измеримом объёме: объявляем его явно, иначе
+    // короткий текст (burstiness — шум) проходил бы gate мимо проверки ритма.
+    assert.equal(humanizeGatePassed({ ...score, words: 500 }, 18, 0.45), false);
+    assert.equal(humanizeGatePassed({ ...score, words: 500 }, 18, 0), true);
   }
   const lively = aiTellScore("Тихо. Он вошёл в зал, где под потолком ещё жила пыль праздников, и замер. Шаг. Ещё один. Ключ звенит.");
   assert.ok(lively.burstiness >= 0.45 || lively.score < 5);

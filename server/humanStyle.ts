@@ -230,6 +230,8 @@ export interface AiTellScore {
   patternDensity: number; // взвешенные попадания на 1000 слов
   burstiness: number;
   openerRepetition: number;
+  /** Объём текста, по которому считался ритм (на коротком фрагменте burstiness шумит). */
+  words?: number;
   hits: AiTellHit[];
 }
 
@@ -326,7 +328,7 @@ export function aiTellScore(text: string): AiTellScore {
       100,
     ),
   );
-  return { score, patternDensity, burstiness, openerRepetition, hits };
+  return { score, patternDensity, burstiness, openerRepetition, words: wordsOf(text).length, hits };
 }
 
 /** 3+ последовательных описаний физики пространства — инвентарь локации.
@@ -377,6 +379,13 @@ export function paragraphAiTellScore(block: string): AiTellScore {
 /** Минимальная «живость» ритма для gate (ниже — ещё один pass). */
 export const DEFAULT_MIN_BURSTINESS = 0.45;
 
+/**
+ * Ниже этого объёма ритм-метрика не измеряется: burstiness на 2-3 предложениях —
+ * шум (в живой приёмке 2026-09 короткий фрагмент дал gatePassed=false при падении
+ * score втрое, 27 → 10, только из-за низкого разброса длин предложений).
+ */
+export const MIN_BURSTINESS_WORDS = 200;
+
 export function heavyStampHits(score: AiTellScore): AiTellHit[] {
   return score.hits.filter((hit) => {
     const entry = AI_TELL_CATALOG.find((item) => item.id === hit.id);
@@ -392,7 +401,10 @@ export function humanizeGatePassed(
   if (score.score > maxScore) return false;
   if (heavyStampHits(score).length > 0) return false;
   // Для коротких текстов вызывающий код может передать minBurstiness=0.
-  if (minBurstiness > 0 && score.burstiness < minBurstiness) return false;
+  // Ритм спрашиваем только там, где он измерим: если объём известен и меньше
+  // порога — низкий burstiness не повод считать gate непройденным.
+  const rhythmMeasurable = typeof score.words !== "number" || score.words >= MIN_BURSTINESS_WORDS;
+  if (rhythmMeasurable && minBurstiness > 0 && score.burstiness < minBurstiness) return false;
   return true;
 }
 

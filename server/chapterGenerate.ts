@@ -29,6 +29,7 @@ import {
   type HumanizeDepthConfig,
   voicePersonaBlock,
   voicePresetById,
+  MIN_BURSTINESS_WORDS,
 } from "./humanStyle";
 import { sanitizeGeneratedText, type TextHygieneReport } from "./textHygiene";
 
@@ -633,8 +634,10 @@ export async function runTouchupPipeline(
     const score = aiTellScore(current);
     if (humanizeGatePassed(score, options.depth.scoreGate, options.depth.minBurstiness)) break;
 
-    // Отдельный pass: низкий burstiness при уже чистых штампах
-    if (score.burstiness < options.depth.minBurstiness && heavyStampsClear(score)) {
+    // Отдельный pass: низкий burstiness при уже чистых штампах.
+    // На коротком тексте разброс длин предложений — шум, поэтому не гоним пасс.
+    if ((score.words ?? 0) >= MIN_BURSTINESS_WORDS
+      && score.burstiness < options.depth.minBurstiness && heavyStampsClear(score)) {
       const structure = splitTextStructure(current);
       const rhythmFlags = flagBlocksForTouchup(structure.blocks, {
         maximum: Math.min(8, options.depth.maxTouchupBlocks),

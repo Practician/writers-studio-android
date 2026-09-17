@@ -807,6 +807,157 @@ function schemaHint(schema: unknown): string {
   return "\n\nВерни ТОЛЬКО валидный JSON без markdown-оградки и без пояснений.";
 }
 
+// --- «Размышления» reasoning-моделей на OpenAI-совместимых провайдерах --------
+// Симптом тот же, что у Gemini до правки thinkingBudget=0: HTTP 200, а прозы нет —
+// finish_reason=length и пустой content, потому что весь max_tokens съели скрытые
+// рассуждения (в живой приёмке 2026-09 так пропадали целые раунды доводки).
+// Поле отключения размышлений здесь не универсально, поэтому три ступени:
+//   1) гасим размышления там, где провайдер это документирует (reasoning_effort /
+//      reasoning.enabled);
+//   2) если модель поля не принимает (400) — снимаем его и повторяем один раз;
+//   3) если бюджет всё равно ушёл в размышления — один повтор с удвоенным бюджетом
+//      вместо потерянного раунда.
+const reasoningDisableUnsupported = new Set<string>();
+
+/** Верхняя граница бюджета вывода при повторе после пустого ответа. */
+export const REASONING_RETRY_MAX_TOKENS = 32_768;
+
+/** Модели, которые тратят max_tokens и на скрытые рассуждения. */
+export function isReasoningModel(model: string): boolean {
+  return /(deepseek|gpt-oss|qwq|qwen3|reasoner|thinking|magistral|glm-?4|kimi|r1)/i.test(String(model || ""));
+}
+
+/**
+ * Поля запроса, гасящие размышления. Пусто, если модель не reasoning или провайдер
+ * уже отказался принимать эти поля — тогда лечение само стало бы причиной отказа.
+ */
+export function reasoningDisableFields(provider: string, model: string): Record<string, unknown> {
+  const id = `${provider}:${String(model || "").toLowerCase()}`;
+  if (!isReasoningModel(model) || reasoningDisableUnsupported.has(id)) return {};
+  // OpenRouter: унифицированный reasoning{enabled:false}.
+  if (provider === "openrouter") return { reasoning: { enabled: false } };
+  // NVIDIA NIM (deepseek-v4 и др.) и Groq: reasoning_effort=none гасит thinking.
+  return { reasoning_effort: "none" };
+}
+
+/** Модель больше не получит поле отключения размышлений. */
+export function markReasoningDisableUnsupported(provider: string, model: string): void {
+  reasoningDisableUnsupported.add(`${provider}:${String(model || "").toLowerCase()}`);
+}
+
+function isReasoningDisableError(status: number, body: string): boolean {
+  if (status !== 400) return false;
+  return /reasoning_effort|reasoning|chat_template_kwargs|enable_thinking|thinking/i.test(String(body || ""));
+}
+
+/** Бюджет для повтора после пустого ответа: удвоение, но без ломки TPM у Groq. */
+export function reasoningRetryBudget(provider: string, model: string, current: number): number {
+  const base = Number.isFinite(current) && current > 0 ? Math.floor(current) : 8192;
+  if (provider === "groq") return Math.min(base * 2, GROQ_MAX_OUTPUT_TOKENS);
+  return Math.min(base * 2, REASONING_RETRY_MAX_TOKENS);
+}
+
+/**
+ * Один логический вызов OpenAI-совместимого провайдера со ступенями защиты от
+ * «размышлений» (см. блок выше).
+ */
+/** Экспортирован для тестов: ступени защиты от «размышлений» проверяются стендом на фиктивном fetch. */
+export async function callOpenAiStyleGuarded(opts: {
+  provider: "groq" | "openrouter" | "nvidia";
+  label: string;
+  url: string;
+  headers: Record<string, string>;
+  model: string;
+  params: LlmGenerateParams;
+  maxTokens: number;
+  timeoutMs: number;
+  withJsonFormat: boolean;
+  buildBody: (budget: number, extra: Record<string, unknown>) => Record<string, unknown>;
+}): Promise<LlmGenerateResult> {
+  const { provider, label, url, headers, model, params, timeoutMs } = opts;
+  let extra = reasoningDisableFields(provider, model);
+  let budget = opts.maxTokens;
+  let emptyReason = "";
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    throwIfAborted(params.abortSignal);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const requestSignal = combineAbortSignals(params.abortSignal, controller.signal);
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(opts.buildBody(budget, extra)),
+        signal: requestSignal,
+      });
+    } catch (error: any) {
+      clearTimeout(timer);
+      if (params.abortSignal?.aborted) throw abortError();
+      if (error?.name === "AbortError" || /aborted|timeout/i.test(String(error?.message || ""))) {
+        const err = new Error(`${label} API timeout after ${timeoutMs}ms (${model})`);
+        (err as any).status = 408;
+        (err as any).body = "timeout";
+        throw err;
+      }
+      const err = new Error(`${label} network: ${String(error?.message || error).slice(0, 200)}`);
+      (err as any).status = 503;
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const raw = await response.text();
+    if (!response.ok) {
+      // Поле отключения размышлений не поддержано — снимаем и повторяем один раз.
+      if (Object.keys(extra).length && isReasoningDisableError(response.status, raw)) {
+        markReasoningDisableUnsupported(provider, model);
+        llmLog("warn", `${label} «${model}» не принимает поле отключения размышлений (${response.status}) → повтор без него`, provider);
+        extra = {};
+        continue;
+      }
+      const err = new Error(`${label} API ${response.status}: ${raw.slice(0, 500)}`);
+      (err as any).status = response.status;
+      (err as any).body = raw;
+      throw err;
+    }
+
+    const data = JSON.parse(raw) as {
+      choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> }; finish_reason?: string }>;
+    };
+    const content = data.choices?.[0]?.message?.content;
+    let text = "";
+    if (typeof content === "string") text = content;
+    else if (Array.isArray(content)) {
+      text = content.map((part) => (typeof part === "string" ? part : part.text || "")).join("");
+    }
+    text = text.trim();
+    if (text) {
+      text = text.replace(/^```(?:json|JSON)?\s*/u, "").replace(/\s*```$/u, "").trim();
+      return {
+        text,
+        provider,
+        model,
+        finishReason: data.choices?.[0]?.finish_reason,
+      };
+    }
+
+    // HTTP 200 и пустая проза: бюджет съели скрытые рассуждения.
+    const finish = String(data.choices?.[0]?.finish_reason || "?");
+    emptyReason = `finish_reason=${finish}`;
+    const bigger = reasoningRetryBudget(provider, model, budget);
+    if (bigger > budget && attempt < 2) {
+      llmLog("warn", `${label} «${model}»: пустой ответ (${emptyReason}) → повтор с бюджетом ${bigger}`, provider);
+      budget = bigger;
+      continue;
+    }
+    throw new Error(`${label} API: пустой ответ (${emptyReason})`);
+  }
+
+  throw new Error(`${label} API: пустой ответ (${emptyReason})`);
+}
+
 async function callNvidiaOnce(
   model: string,
   key: string,
@@ -824,85 +975,38 @@ async function callNvidiaOnce(
     ? Math.min(baseTimeout, 25_000)
     : Math.min(baseTimeout, 40_000);
 
-  const body: Record<string, unknown> = {
-    model,
-    messages: [
-      ...(params.systemInstruction
-        ? [{ role: "system", content: params.systemInstruction }]
-        : []),
-      { role: "user", content: userContent },
-    ],
-    temperature: params.temperature ?? 0.7,
-    max_tokens: maxTok,
-    stream: false,
-  };
-  if (wantsJson && withJsonFormat) {
-    body.response_format = { type: "json_object" };
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const requestSignal = combineAbortSignals(params.abortSignal, controller.signal);
-  let response: Response;
-  try {
-    response = await fetch(`${nvidiaBaseUrl()}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(body),
-      signal: requestSignal,
-    });
-  } catch (error: any) {
-    clearTimeout(timer);
-    if (params.abortSignal?.aborted) throw abortError();
-    if (error?.name === "AbortError" || /aborted|timeout/i.test(String(error?.message || ""))) {
-      const err = new Error(`NVIDIA API timeout after ${timeoutMs}ms (${model})`);
-      (err as any).status = 408;
-      (err as any).body = "timeout";
-      throw err;
-    }
-    const err = new Error(`NVIDIA network: ${String(error?.message || error).slice(0, 200)}`);
-    (err as any).status = 503;
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-
-  const raw = await response.text();
-  if (!response.ok) {
-    const err = new Error(`NVIDIA API ${response.status}: ${raw.slice(0, 500)}`);
-    (err as any).status = response.status;
-    (err as any).body = raw;
-    throw err;
-  }
-
-  const data = JSON.parse(raw) as {
-    choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> }; finish_reason?: string }>;
-  };
-  const content = data.choices?.[0]?.message?.content;
-  let text = "";
-  if (typeof content === "string") text = content;
-  else if (Array.isArray(content)) {
-    text = content.map((part) => (typeof part === "string" ? part : part.text || "")).join("");
-  }
-  text = text.trim();
-  if (!text) throw new Error("NVIDIA API: пустой ответ");
-  text = text.replace(/^```(?:json|JSON)?\s*/u, "").replace(/\s*```$/u, "").trim();
-  return {
-    text,
+  return callOpenAiStyleGuarded({
     provider: "nvidia",
+    label: "NVIDIA",
+    url: `${nvidiaBaseUrl()}/chat/completions`,
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
     model,
-    finishReason: data.choices?.[0]?.finish_reason,
-  };
+    params,
+    maxTokens: maxTok,
+    timeoutMs,
+    withJsonFormat,
+    buildBody: (budget, extra) => ({
+      model,
+      messages: [
+        ...(params.systemInstruction
+          ? [{ role: "system", content: params.systemInstruction }]
+          : []),
+        { role: "user", content: userContent },
+      ],
+      temperature: params.temperature ?? 0.7,
+      max_tokens: budget,
+      stream: false,
+      ...(wantsJson && withJsonFormat ? { response_format: { type: "json_object" } } : {}),
+      ...extra,
+    }),
+  });
 }
 
-/**
- * NVIDIA: перебор моделей (DeepSeek → Qwen → Mistral → Llama…) и ключей.
- * 404/410 — модель «мёртвая» до рестарта; 503/timeout — cooldown, чтобы не ждать по кругу.
- */
+
 async function generateViaNvidia(params: LlmGenerateParams): Promise<LlmGenerateResult> {
   const allKeys = collectNvidiaKeys();
   const keys = allKeys.filter((k) => !isKeyOnCooldown(k));
@@ -1065,79 +1169,34 @@ async function callOpenAiCompatOnce(
         ? Math.min(baseTimeout, 45_000)
         : Math.min(Math.max(baseTimeout, 60_000), 60_000 + Math.floor(maxTok / 8));
 
-  const body: Record<string, unknown> = {
-    model,
-    messages: [
-      ...(systemContent
-        ? [{ role: "system", content: systemContent }]
-        : []),
-      { role: "user", content: userContent },
-    ],
-    temperature: params.temperature ?? 0.7,
-    max_tokens: maxTok,
-    stream: false,
-  };
-  if (wantsJson && withJsonFormat) {
-    body.response_format = { type: "json_object" };
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const requestSignal = combineAbortSignals(params.abortSignal, controller.signal);
-  let response: Response;
-  try {
-    response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        ...(extraHeaders || {}),
-      },
-      body: JSON.stringify(body),
-      signal: requestSignal,
-    });
-  } catch (error: any) {
-    clearTimeout(timer);
-    if (params.abortSignal?.aborted) throw abortError();
-    if (error?.name === "AbortError" || /aborted|timeout/i.test(String(error?.message || ""))) {
-      const err = new Error(`${provider} timeout after ${timeoutMs}ms (${model})`);
-      (err as any).status = 408;
-      throw err;
-    }
-    const err = new Error(`${provider} network: ${String(error?.message || error).slice(0, 200)}`);
-    (err as any).status = 503;
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-
-  const raw = await response.text();
-  if (!response.ok) {
-    const err = new Error(`${provider} API ${response.status}: ${raw.slice(0, 500)}`);
-    (err as any).status = response.status;
-    (err as any).body = raw;
-    throw err;
-  }
-
-  const data = JSON.parse(raw) as {
-    choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> }; finish_reason?: string }>;
-  };
-  const content = data.choices?.[0]?.message?.content;
-  let text = "";
-  if (typeof content === "string") text = content;
-  else if (Array.isArray(content)) {
-    text = content.map((part) => (typeof part === "string" ? part : part.text || "")).join("");
-  }
-  text = text.trim();
-  if (!text) throw new Error(`${provider} API: пустой ответ`);
-  text = text.replace(/^```(?:json|JSON)?\s*/u, "").replace(/\s*```$/u, "").trim();
-  return {
-    text,
+  return callOpenAiStyleGuarded({
     provider,
+    label: provider,
+    url: `${baseUrl}/chat/completions`,
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(extraHeaders || {}),
+    },
     model,
-    finishReason: data.choices?.[0]?.finish_reason,
-  };
+    params,
+    maxTokens: maxTok,
+    timeoutMs,
+    withJsonFormat,
+    buildBody: (budget, extra) => ({
+      model,
+      messages: [
+        ...(systemContent ? [{ role: "system", content: systemContent }] : []),
+        { role: "user", content: userContent },
+      ],
+      temperature: params.temperature ?? 0.7,
+      max_tokens: budget,
+      stream: false,
+      ...(wantsJson && withJsonFormat ? { response_format: { type: "json_object" } } : {}),
+      ...extra,
+    }),
+  });
 }
 
 async function generateViaOpenAiChain(
