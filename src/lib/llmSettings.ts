@@ -46,6 +46,10 @@ export const OPENROUTER_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
   { id: "openrouter/free", label: "Бесплатный router — OpenRouter", description: "OpenRouter сам выбирает доступную бесплатную текстовую модель; состав пула меняется." },
 ];
 
+// Состав перепроверен живыми вызовами (17.09.2026): `z-ai/glm-5.2` и
+// `minimaxai/minimax-m3` сняты NVIDIA с прода (HTTP 410 Gone), `meta/llama-3.3-70b-instruct`
+// больше не отдаётся аккаунту (HTTP 404 «Function not found for account»). Сохранённый
+// выбор снятой модели откатывается на DEFAULT_NVIDIA_MODEL через loadProfile().
 export const NVIDIA_LITERARY_MODELS = [
   {
     id: DEFAULT_NVIDIA_MODEL,
@@ -53,19 +57,19 @@ export const NVIDIA_LITERARY_MODELS = [
     description: "Рекомендуется для русской прозы; первый в автоматической цепочке NVIDIA.",
   },
   {
-    id: "z-ai/glm-5.2",
-    label: "GLM 5.2 — сложная проза",
-    description: "Альтернатива для более обстоятельных сцен и диалогов.",
+    id: "nvidia/nemotron-3-super-120b-a12b",
+    label: "Nemotron 3 Super 120B — длинная сцена",
+    description: "Крупная MoE-модель NVIDIA: держит длинный контекст, когда нужно продолжить большую сцену.",
   },
   {
-    id: "minimaxai/minimax-m3",
-    label: "MiniMax M3 — вариативный стиль",
-    description: "Резервный литературный вариант при недоступности предыдущих.",
+    id: "nvidia/nemotron-3-ultra-550b-a55b",
+    label: "Nemotron 3 Ultra 550B — сложная проза",
+    description: "Самая крупная модель, доступная аккаунту; вариант для стилистически сложных глав.",
   },
   {
-    id: "meta/llama-3.3-70b-instruct",
-    label: "Llama 3.3 70B — совместимый запасной",
-    description: "Универсальная модель; прежний стартовый вариант APK.",
+    id: "google/gemma-4-31b-it",
+    label: "Gemma 4 31B — быстрый резерв",
+    description: "Лёгкая и стабильно доступная модель для правок и коротких продолжений.",
   },
 ] as const;
 /** Одноразовая миграция: старый default NVIDIA → auto (Groq-first). */

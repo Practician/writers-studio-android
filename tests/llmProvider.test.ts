@@ -101,7 +101,8 @@ test("nvidia model chain starts with default and continues with fallbacks", () =
   const chain = nvidiaModelChain("meta/llama-3.1-70b-instruct");
   assert.equal(chain[0], "meta/llama-3.1-70b-instruct");
   assert.ok(chain.length >= 3);
-  assert.ok(chain.includes("meta/llama-3.1-8b-instruct") || chain.includes("meta/llama-3.3-70b-instruct"));
+  assert.ok(chain.includes("deepseek-ai/deepseek-v4-flash-0731"));
+  assert.ok(chain.includes("google/gemma-4-31b-it"));
   // unique
   assert.equal(new Set(chain.map((m) => m.toLowerCase())).size, chain.length);
 });
@@ -115,12 +116,17 @@ test("nvidia failover errors cover quota and unavailable models", () => {
   assert.equal(isNvidiaModelFailoverError(Object.assign(new Error("gone"), { status: 410 })), true);
 });
 
-test("nvidia RU rotation chain includes deepseek qwen mistral", () => {
+test("nvidia rotation chain keeps only live models and has no duplicates", () => {
   const chain = nvidiaModelChain();
   assert.ok(chain.some((m) => m.includes("deepseek")));
-  assert.ok(chain.some((m) => m.includes("qwen")));
-  assert.ok(chain.some((m) => m.includes("mistral")));
-  assert.ok(chain.length >= 10);
+  assert.ok(chain.some((m) => m.includes("gemma")));
+  // Модели со снятия с прода (410 Gone) и недоступные аккаунту (404) из цепочки убраны:
+  // каждая из них стоила лишнего раунд-трипа на ротации.
+  assert.equal(chain.some((m) => m.includes("minimax")), false);
+  assert.equal(chain.some((m) => m.includes("stepfun")), false);
+  assert.equal(chain.some((m) => m.includes("glm-5.2")), false);
+  assert.equal(chain.some((m) => m.includes("qwen")), false);
+  assert.equal(new Set(chain.map((m) => m.toLowerCase())).size, chain.length);
 });
 
 test("normalizeProviderPreference accepts UI aliases", () => {

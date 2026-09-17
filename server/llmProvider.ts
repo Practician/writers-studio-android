@@ -144,29 +144,21 @@ const BUILTIN_OPENROUTER_FALLBACKS = [
 ];
 
 /**
- * Встроенная ротация NVIDIA для русской прозы (из live-каталога /v1/models).
- * Порядок: сильный RU/мультиязык → быстрые Mistral → Llama → лёгкий запас.
- * Не включаем модели, которые на probe отвечали по-английски (nemotron-3-*) или часто 404.
+ * Встроенная ротация NVIDIA для русской прозы.
+ * Состав перепроверен живыми вызовами (17.09.2026): `z-ai/glm-5.2`,
+ * `minimaxai/minimax-m3` и `stepfun-ai/step-3.7-flash` сняты с прода (HTTP 410 Gone),
+ * а `qwen/qwen3-235b-a22b-instruct-2507`, `moonshotai/kimi-k2.6`,
+ * `mistralai/mistral-large-2-instruct`, `mistralai/mistral-large`,
+ * `meta/llama-3.3-70b-instruct`, `nvidia/llama-3.3-nemotron-super-49b-v1.5` и
+ * `meta/llama-3.1-70b-instruct` больше не выдаются аккаунту
+ * (HTTP 404 «Function not found for account»). Каждая такая модель стоила лишнего
+ * раунд-трипа на ротации, поэтому из цепочки убрана. Остались только ответившие 200.
  */
 const BUILTIN_NVIDIA_FALLBACKS = [
-  // Tier A — лучшие для RU (DeepSeek / GLM / MiniMax / StepFun)
   "deepseek-ai/deepseek-v4-flash-0731",
-  "z-ai/glm-5.2",
-  "minimaxai/minimax-m3",
-  "stepfun-ai/step-3.7-flash",
-  "qwen/qwen3-235b-a22b-instruct-2507",
-  "moonshotai/kimi-k2.6",
-  // Tier B — быстрые, стабильно отдают русский (Mistral family)
-  "mistralai/mistral-nemotron",
-  "mistralai/mistral-large-2-instruct",
-  "mistralai/mistral-large",
-  // Tier C — Llama / Nemotron-super (RU ок)
-  "meta/llama-3.3-70b-instruct",
-  "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-  "nvidia/llama-3.3-nemotron-super-49b-v1",
-  "meta/llama-3.1-70b-instruct",
   "google/gemma-4-31b-it",
-  "google/gemma-3-12b-it",
+  "google/diffusiongemma-26b-a4b-it",
+  "meta/llama-3.2-11b-vision-instruct",
 ];
 
 /** Временный cooldown: model → timestamp до которого не трогаем. */

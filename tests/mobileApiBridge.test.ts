@@ -83,7 +83,7 @@ test("direct bridge preserves provider HTTP status and returns non-secret diagno
   assert.equal(payload.error, "Маршрут не найден");
   assert.deepEqual(payload.diagnostics, {
     provider: "nvidia",
-    model: "stepfun-ai/step-3.7-flash",
+    model: "nvidia/nemotron-3-super-120b-a12b",
     endpoint: "integrate.api.nvidia.com/v1/chat/completions",
     keyPresent: true,
     keySuffix: "1234",
@@ -276,15 +276,15 @@ test("OpenRouter sends the selected literary profile instead of a hidden default
   assert.equal(requestedModel, "deepseek/deepseek-v3.2");
 });
 
-test("NVIDIA retries once with a smaller output budget after HTTP 504", async () => {
-  const tokenBudgets: number[] = [];
+test("NVIDIA rotates to the next model right away after HTTP 504 (no duplicate retry on the same model)", async () => {
+  const models: string[] = [];
   const text = await withMockFetch(async (_url, init) => {
     const body = JSON.parse(String(init?.body || "{}"));
-    tokenBudgets.push(body.max_tokens);
-    if (tokenBudgets.length === 1) {
+    models.push(body.model);
+    if (models.length === 1) {
       return new Response(JSON.stringify({ error: { message: "Gateway timeout" } }), { status: 504 });
     }
-    return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ после повтора NVIDIA." } }] }), { status: 200 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ после ротации NVIDIA." } }] }), { status: 200 });
   }, () => directGenerate({
     provider: "nvidia",
     model: "meta/llama-3.3-70b-instruct",
@@ -292,8 +292,13 @@ test("NVIDIA retries once with a smaller output budget after HTTP 504", async ()
     prompt: "Тест 504.",
     maxTokens: 6_144,
   }));
-  assert.equal(text, "Ответ после повтора NVIDIA.");
-  assert.deepEqual(tokenBudgets, [6_144, 4_096]);
+  assert.equal(text, "Ответ после ротации NVIDIA.");
+  // Шлюз держал соединение по 90 с и отдавал тот же 504 — повтор на той же модели
+  // удалён, поэтому вторая попытка идёт уже на следующей модели цепочки.
+  assert.deepEqual(models, [
+    "meta/llama-3.3-70b-instruct",
+    "deepseek-ai/deepseek-v4-flash-0731",
+  ]);
 });
 
 test("full chapter request targets 3300 words", async () => {
@@ -328,7 +333,7 @@ test("single OpenRouter key reports that rotation cannot run after quota error",
   assert.equal(payload.error.includes("сохранён только ключ 1/1"), true);
 });
 
-test("NVIDIA rotates to a backup model after its retry also times out", async () => {
+test("NVIDIA walks the model chain while the gateway keeps timing out", async () => {
   const models: string[] = [];
   const text = await withMockFetch(async (_url, init) => {
     const body = JSON.parse(String(init?.body || "{}"));
@@ -345,8 +350,8 @@ test("NVIDIA rotates to a backup model after its retry also times out", async ()
   assert.equal(text, "Ответ резервной NVIDIA-модели.");
   assert.deepEqual(models, [
     "meta/llama-3.3-70b-instruct",
-    "meta/llama-3.3-70b-instruct",
     "deepseek-ai/deepseek-v4-flash-0731",
+    "google/gemma-4-31b-it",
   ]);
 });
 
@@ -369,9 +374,8 @@ test("NVIDIA falls through to Groq after all bounded NVIDIA model attempts fail"
   assert.equal(text, "Ответ Groq после NVIDIA.");
   assert.deepEqual(calls.map((call) => call.model), [
     "meta/llama-3.3-70b-instruct",
-    "meta/llama-3.3-70b-instruct",
     "deepseek-ai/deepseek-v4-flash-0731",
-    "minimaxai/minimax-m3",
+    "google/gemma-4-31b-it",
     "openai/gpt-oss-120b",
   ]);
   assert.equal(calls.at(-1)?.url, "https://api.groq.com/openai/v1/chat/completions");
@@ -423,7 +427,7 @@ test("Gemini recovers on its second literary model after the first returns HTTP 
   assert.equal(calls[1].includes("models/gemini-3.8-flash:generateContent"), true);
 });
 
-test("all NVIDIA 504 diagnostics show retry, model rotations, and Groq handoff", async () => {
+test("all NVIDIA 504 diagnostics show model rotations and the Groq handoff", async () => {
   const globals = globalThis as any;
   const savedWindow = globals.window;
   const savedCustomEvent = globals.CustomEvent;
@@ -454,9 +458,10 @@ test("all NVIDIA 504 diagnostics show retry, model rotations, and Groq handoff",
       maxTokens: 6_144,
     }));
     assert.equal(result, "Groq завершил запрос.");
-    assert.equal(events.some((trace) => trace.message?.includes("повтор с лимитом 4096")), true);
+    // Повтор на той же модели после 504 удалён: журнал показывает сразу ротацию моделей.
+    assert.equal(events.some((trace) => trace.message?.includes("повтор с лимитом")), false);
     assert.equal(events.some((trace) => trace.message?.includes("meta/llama-3.3-70b-instruct → deepseek-ai/deepseek-v4-flash-0731")), true);
-    assert.equal(events.some((trace) => trace.message?.includes("deepseek-ai/deepseek-v4-flash-0731 → minimaxai/minimax-m3")), true);
+    assert.equal(events.some((trace) => trace.message?.includes("deepseek-ai/deepseek-v4-flash-0731 → google/gemma-4-31b-it")), true);
     assert.equal(events.some((trace) => trace.message?.includes("переход к Groq")), true);
     assert.equal(events.at(-1)?.provider, "groq");
     assert.equal(events.at(-1)?.status, 200);
@@ -600,7 +605,7 @@ test("NVIDIA HTTP 410 (retired model) continues rotating to the next model inste
     prompt: "Тест ротации после 410.",
   }));
   assert.equal(text, "Ответ от следующей модели после 410.");
-  assert.deepEqual(models, ["deepseek-ai/deepseek-v4-flash-0731", "minimaxai/minimax-m3"]);
+  assert.deepEqual(models, ["deepseek-ai/deepseek-v4-flash-0731", "google/gemma-4-31b-it"]);
 });
 
 test("a hanging NVIDIA request is aborted client-side and rotates instead of waiting for the real gateway", async (t) => {

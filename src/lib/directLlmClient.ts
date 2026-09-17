@@ -52,19 +52,42 @@ const OPENROUTER_FREE_ROUTER = "openrouter/free";
 
 // Та же проверенная цепочка, что использует серверная версия. В APK пробуем
 // максимум три модели за запрос, чтобы не превращать один сбой в долгий цикл.
-// `z-ai/glm-5.2` снята NVIDIA с прода (стабильно отвечает HTTP 410 Gone) и
-// исключена из цепочки, чтобы не тратить впустую раунд-трип на каждой ротации.
+// Состав перепроверен живыми вызовами (17.09.2026): `z-ai/glm-5.2`,
+// `minimaxai/minimax-m3` и `stepfun-ai/step-3.7-flash` сняты с прода (HTTP 410 Gone),
+// а `qwen/qwen3-235b-a22b-instruct-2507`, `moonshotai/kimi-k2.6`,
+// `mistralai/mistral-nemotron`, `mistralai/mistral-large-2-instruct` и
+// `meta/llama-3.3-70b-instruct` недоступны аккаунту (HTTP 404 «Function not found
+// for account»). Мёртвые модели убраны: каждая из них стоила лишнего раунд-трипа
+// на ротации. Вместо них — только модели, ответившие 200 с видимым текстом.
+// Порядок фолбэков: первым идёт Gemma 4 — на пробе она отдала чистый текст без
+// «размышлений»; крупные Nemotron 3 отвечают, но на короткой пробе отдавали
+// англоязычный reasoning-префикс, поэтому стоят ниже, как дальний резерв.
 const NVIDIA_FALLBACK_MODELS = [
   "deepseek-ai/deepseek-v4-flash-0731",
-  "minimaxai/minimax-m3",
-  "stepfun-ai/step-3.7-flash",
-  "qwen/qwen3-235b-a22b-instruct-2507",
-  "moonshotai/kimi-k2.6",
-  "mistralai/mistral-nemotron",
-  "mistralai/mistral-large-2-instruct",
-  "meta/llama-3.3-70b-instruct",
+  "google/gemma-4-31b-it",
+  "nvidia/nemotron-3-super-120b-a12b",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "google/diffusiongemma-26b-a4b-it",
+  "meta/llama-3.2-11b-vision-instruct",
 ];
 const NVIDIA_MAX_MODEL_ATTEMPTS = 3;
+
+// Groq отклоняет `response_format: json_object` с HTTP 400, если слово «json» ни
+// разу не встречается в messages: провайдер выпадал из каскада на каждом
+// JSON-вызове (авто-доводка, план битов, редакторская проверка). Серверная рука
+// лечит это повтором без response_format (server/llmProvider.ts); в APK добавляем
+// к промпту явный контракт формата и оставляем такой же страховочный повтор.
+const JSON_FORMAT_HINT = "Формат ответа: JSON.";
+
+function ensureJsonKeyword(system: string, prompt: string): string {
+  if (/\bjson\b/i.test(system) || /\bjson\b/i.test(prompt)) return system;
+  return system ? `${system}\n${JSON_FORMAT_HINT}` : JSON_FORMAT_HINT;
+}
+
+function isJsonKeywordError(payload: any): boolean {
+  const message = String(payload?.error?.message || payload?.error || "");
+  return /response_format|json_object|word 'json'/i.test(message);
+}
 
 // Собственные литературные профили Gemini (та же четвёрка, что в настройках приложения).
 // При перегрузке/недоступности основной модели пробуем следующую, прежде чем
@@ -401,6 +424,9 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     let effectiveModel = model;
     let response: Response;
     let payload: any;
+    // Для JSON-режима гарантируем слово «json» в messages (требование Groq),
+    // не переписывая исходный промпт пайплайна.
+    const systemForCall = request.json ? ensureJsonKeyword(system, request.prompt) : system;
 
     if (provider === "gemini") {
       response = await fetchWithTimeout(`${GEMINI_URL}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
@@ -426,7 +452,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         },
         body: JSON.stringify({
           model,
-          messages: [{ role: "system", content: system }, { role: "user", content: request.prompt }],
+          messages: [{ role: "system", content: systemForCall }, { role: "user", content: request.prompt }],
           temperature: request.temperature ?? 0.75,
           max_tokens: maxTokens,
           ...(request.json ? { response_format: { type: "json_object" } } : {}),
@@ -474,29 +500,38 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       }
     }
 
-    // 504 означает, что NVIDIA не отдала результат. Повтор безопасен: текста ответа
-    // ещё нет. Во второй попытке сокращаем лимит, чтобы снизить нагрузку на gateway.
-    if (provider === "nvidia" && response.status === 504) {
-      const retryMaxTokens = Math.min(maxTokens, 4_096);
+    // NVIDIA: повтор на том же ключе при 504 убран. Шлюз держит соединение до 90 с
+    // и отдаёт тот же 504 — в живом APK это давало ~180 с простоя на один вызов,
+    // прежде чем начиналась ротация моделей. Теперь сразу идём к следующей модели
+    // цепочки, а если легла вся цепочка — каскад переходит к следующему провайдеру.
+    //
+    // Вместо него — страховка для JSON-режима: Groq (и любой OpenAI-совместимый
+    // провайдер) отвечает 400, если response_format: json_object запрошен без слова
+    // «json» в messages. Промпт выше уже дополнен контрактом формата; здесь повтор
+    // без response_format, симметрично серверной руке (server/llmProvider.ts).
+    if (response.status === 400 && request.json && isJsonKeywordError(payload)) {
       emitApiTrace(traceFor(
         provider,
-        model,
+        effectiveModel,
         key,
         index + 1,
         keyPool.length,
         response.status,
-        `NVIDIA не ответила вовремя; повтор с лимитом ${retryMaxTokens} токенов.`,
+        `Повтор ${providerLabel(provider)} без response_format: json_object.`,
         { chars: 0 },
       ));
-      response = await fetchWithTimeout(NVIDIA_URL, {
+      response = await fetchWithTimeout(endpointFor(provider, effectiveModel, key), {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+          ...(provider === "openrouter" ? { "HTTP-Referer": "https://github.com/Practician/writers-studio-android", "X-OpenRouter-Title": "Writers Studio Android" } : {}),
+        },
         body: JSON.stringify({
-          model,
-          messages: [{ role: "system", content: system }, { role: "user", content: request.prompt }],
+          model: effectiveModel,
+          messages: [{ role: "system", content: systemForCall }, { role: "user", content: request.prompt }],
           temperature: request.temperature ?? 0.75,
-          max_tokens: retryMaxTokens,
-          ...(request.json ? { response_format: { type: "json_object" } } : {}),
+          max_tokens: maxTokens,
         }),
       });
       payload = await response.json().catch(() => ({}));
@@ -526,7 +561,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
           body: JSON.stringify({
             model: effectiveModel,
-            messages: [{ role: "system", content: system }, { role: "user", content: request.prompt }],
+            messages: [{ role: "system", content: systemForCall }, { role: "user", content: request.prompt }],
             temperature: request.temperature ?? 0.75,
             max_tokens: Math.min(maxTokens, 4_096),
             ...(request.json ? { response_format: { type: "json_object" } } : {}),
@@ -568,7 +603,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         },
         body: JSON.stringify({
           model: effectiveModel,
-          messages: [{ role: "system", content: system }, { role: "user", content: request.prompt }],
+          messages: [{ role: "system", content: systemForCall }, { role: "user", content: request.prompt }],
           temperature: request.temperature ?? 0.75,
           max_tokens: maxTokens,
           ...(request.json ? { response_format: { type: "json_object" } } : {}),
