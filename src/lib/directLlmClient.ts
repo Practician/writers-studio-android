@@ -368,6 +368,40 @@ function hasTruncatedFinishReason(payload: any): boolean {
   return /MAX_TOKENS|LENGTH/i.test(String(finishReasonFor(payload) || ""));
 }
 
+// --- «Размышления» reasoning-моделей (NVIDIA / Groq / OpenRouter) -------------
+// Симптом тот же, что у Gemini до thinkingBudget=0: HTTP 200, finish_reason=length,
+// а content пустой — весь max_tokens ушёл в скрытые рассуждения, и раунд доводки
+// пропадал целиком (живая приёмка 2026-09). Три ступени: гасим размышления там, где
+// провайдер это документирует; снимаем поле после 400; повторяем с удвоенным
+// бюджетом, если рассуждения всё равно съели вывод.
+const reasoningDisableUnsupported = new Set<string>();
+const REASONING_RETRY_MAX_TOKENS = 32_768;
+
+function reasoningModelLikely(model: string): boolean {
+  return /(deepseek|gpt-oss|qwq|qwen3|reasoner|thinking|magistral|glm-?4|kimi|r1)/i.test(String(model || ""));
+}
+
+/** Поля запроса, гасящие размышления (пусто — модель не reasoning или поле снято). */
+function reasoningDisableFields(provider: Exclude<DirectProvider, "auto">, model: string): Record<string, unknown> {
+  const id = `${provider}:${String(model || "").toLowerCase()}`;
+  if (!reasoningModelLikely(model) || reasoningDisableUnsupported.has(id)) return {};
+  // OpenRouter: унифицированный reasoning{enabled:false}. NVIDIA NIM и Groq: reasoning_effort=none.
+  if (provider === "openrouter") return { reasoning: { enabled: false } };
+  return { reasoning_effort: "none" };
+}
+
+function isReasoningDisableError(status: number, payload: any): boolean {
+  if (status !== 400) return false;
+  return /reasoning_effort|reasoning|chat_template_kwargs|enable_thinking|thinking/i.test(String(payload?.error?.message || payload?.error || ""));
+}
+
+/** Бюджет повтора после пустого ответа: удвоение; у Groq сверху TPM-потолок. */
+function reasoningRetryBudget(provider: Exclude<DirectProvider, "auto">, current: number): number {
+  const base = Number.isFinite(current) && current > 0 ? Math.floor(current) : 8192;
+  const doubled = Math.min(base * 2, REASONING_RETRY_MAX_TOKENS);
+  return provider === "groq" ? Math.min(doubled, 8_192) : doubled;
+}
+
 type ApiTrace = {
   provider: Exclude<DirectProvider, "auto">;
   model: string;
@@ -729,6 +763,25 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     // Для JSON-режима гарантируем слово «json» в messages (требование Groq),
     // не переписывая исходный промпт пайплайна.
     const systemForCall = request.json ? ensureJsonKeyword(system, request.prompt) : system;
+
+    // OpenAI-совместимый запрос вынесен в одну функцию: он нужен и на первом шаге,
+    // и при повторе без поля отключения размышлений, и при повторе с большим бюджетом.
+    const callOpenAiCompat = (budget: number, extraFields: Record<string, unknown>) => fetchWithTimeout(endpointFor(provider, effectiveModel, key), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+        ...(provider === "openrouter" ? { "HTTP-Referer": "https://github.com/Practician/writers-studio-android", "X-OpenRouter-Title": "Writers Studio Android" } : {}),
+      },
+      body: JSON.stringify({
+        model: effectiveModel,
+        messages: [{ role: "system", content: systemForCall }, { role: "user", content: request.prompt }],
+        temperature: request.temperature ?? 0.75,
+        max_tokens: budget,
+        ...(request.json ? { response_format: { type: "json_object" } } : {}),
+        ...extraFields,
+      }),
+    });
     // Модели Gemini вызываются одинаково и на первом шаге, и при ротации,
     // поэтому запрос вынесен в одну функцию.
     const callGemini = (targetModel: string) => fetchWithTimeout(`${geminiBaseUrl}/${encodeURIComponent(targetModel)}:generateContent?key=${encodeURIComponent(key)}`, {
@@ -758,24 +811,32 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     if (provider === "gemini") {
       response = await callGemini(effectiveModel);
     } else {
-      response = await fetchWithTimeout(endpointFor(provider, model, key), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`,
-          ...(provider === "openrouter" ? { "HTTP-Referer": "https://github.com/Practician/writers-studio-android", "X-OpenRouter-Title": "Writers Studio Android" } : {}),
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: "system", content: systemForCall }, { role: "user", content: request.prompt }],
-          temperature: request.temperature ?? 0.75,
-          max_tokens: maxTokens,
-          ...(request.json ? { response_format: { type: "json_object" } } : {}),
-        }),
-      });
+      response = await callOpenAiCompat(maxTokens, reasoningDisableFields(provider, model));
     }
 
     payload = await response.json().catch(() => ({}));
+
+    // Поле отключения размышлений не поддержано (400) — снимаем его и повторяем один
+    // раз, иначе лечение «пустого раунда» само стало бы причиной отказа.
+    if (provider !== "gemini" && isReasoningDisableError(response.status, payload)) {
+      reasoningDisableUnsupported.add(`${provider}:${String(effectiveModel).toLowerCase()}`);
+      emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `${providerLabel(provider)} «${effectiveModel}» не принимает поле отключения размышлений: повтор без него.`, { chars: 0 }));
+      response = await callOpenAiCompat(maxTokens, {});
+      payload = await response.json().catch(() => ({}));
+    }
+
+    // HTTP 200 и пустая проза: у reasoning-моделей весь бюджет ушёл в скрытые
+    // рассуждения (finish_reason=length). Один повтор с удвоенным бюджетом —
+    // вместо потерянного раунда доводки.
+    if (provider !== "gemini" && response.ok && !hasVisibleResponseText(payload)) {
+      const emptyFinish = finishReasonFor(payload) || "?";
+      const bigger = reasoningRetryBudget(provider, maxTokens);
+      if (bigger > maxTokens) {
+        emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `Пустой ответ (${emptyFinish}): размышления съели бюджет вывода — повтор с ${bigger} токенами.`, { chars: 0, finishReason: String(emptyFinish) }));
+        response = await callOpenAiCompat(bigger, reasoningDisableFields(provider, effectiveModel));
+        payload = await response.json().catch(() => ({}));
+      }
+    }
 
     // Ключ/модель не понимают thinkingConfig (400 Invalid JSON payload) — помечаем
     // модель и повторяем ровно один раз без поля. Иначе лечение обрезки само стало

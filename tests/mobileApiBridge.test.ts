@@ -41,6 +41,8 @@ test("auto mode chooses NVIDIA and its compatible model despite stale Gemini mod
       ],
       temperature: 0.75,
       max_tokens: 2048,
+      // reasoning-модели получают поле, гасящее размышления (иначе бюджет уходит в них).
+      reasoning_effort: "none",
     },
   }]);
 });
@@ -262,7 +264,8 @@ test("OpenRouter falls back when the selected model returns HTTP 200 without vis
   }));
 
   assert.equal(text, "Текст от free-router.");
-  assert.deepEqual(calls, ["openrouter/example-primary", "openrouter/free"]);
+  // Пустой ответ получает один повтор с удвоенным бюджетом, и только потом fallback.
+  assert.deepEqual(calls, ["openrouter/example-primary", "openrouter/example-primary", "openrouter/free"]);
 });
 
 test("OpenRouter sends the selected literary profile instead of a hidden default", async () => {
