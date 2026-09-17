@@ -403,14 +403,17 @@ test("Gemini HTTP 503 (high demand) rotates its own models before falling back t
     maxTokens: 2_048,
   }));
   assert.equal(text, "Ответ Groq после перегрузки Gemini.");
-  // Все 5 литературных профилей Gemini перегружены (503), затем переход к Groq.
-  assert.equal(calls.length, 6);
-  assert.equal(calls.slice(0, 5).every((call) => call.url.includes("generativelanguage.googleapis.com")), true);
+  // Цепочка из 8 литературных профилей Gemini перегружена (503). Первая модель
+  // пробуется трижды (вызов + два повтора с backoff — транзиентный 503 не должен
+  // сразу расходовать остальные модели), затем ротация по остальным 7, затем Groq.
+  assert.equal(calls.length, 11);
+  assert.equal(calls.slice(0, 10).every((call) => call.url.includes("generativelanguage.googleapis.com")), true);
   assert.equal(calls[0].url.includes("models/gemini-3.7-flash:generateContent"), true);
-  assert.equal(calls[1].url.includes("models/gemini-3.8-flash:generateContent"), true);
-  assert.equal(calls[2].url.includes("models/gemini-3.6-flash:generateContent"), true);
-  assert.equal(calls[3].url.includes("models/gemini-flash-latest:generateContent"), true);
-  assert.equal(calls[5].url, "https://api.groq.com/openai/v1/chat/completions");
+  assert.equal(calls[1].url.includes("models/gemini-3.7-flash:generateContent"), true);
+  assert.equal(calls[2].url.includes("models/gemini-3.7-flash:generateContent"), true);
+  assert.equal(calls[3].url.includes("models/gemini-3.8-flash:generateContent"), true);
+  assert.equal(calls[4].url.includes("models/gemini-3.6-flash:generateContent"), true);
+  assert.equal(calls[10].url, "https://api.groq.com/openai/v1/chat/completions");
 });
 
 test("Gemini recovers on its second literary model after the first returns HTTP 503", async () => {
@@ -429,8 +432,11 @@ test("Gemini recovers on its second literary model after the first returns HTTP 
     maxTokens: 2_048,
   }));
   assert.equal(text, "Ответ от резервной модели Gemini.");
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1].includes("models/gemini-3.8-flash:generateContent"), true);
+  // Перегруженная модель не сдаётся сразу: два повтора с backoff на ней же, и
+  // только потом переход к следующей модели цепочки.
+  assert.equal(calls.length, 4);
+  assert.ok(calls.slice(0, 3).every((call) => call.includes("models/gemini-3.7-flash:generateContent")));
+  assert.equal(calls[3].includes("models/gemini-3.8-flash:generateContent"), true);
 });
 
 test("Gemini 404 по всей цепочке моделей переводит на следующий ключ, а не закрывает руку", async () => {
@@ -454,12 +460,17 @@ test("Gemini 404 по всей цепочке моделей переводит 
     maxTokens: 2_048,
   }));
   assert.equal(text, "Ответ второго ключа Gemini.");
-  // 5 моделей цепочки на первом ключе (все 404, включая gemini-2.5-flash в хвосте)
-  // + успешный вызов второго ключа.
-  assert.equal(calls.length, 6);
-  assert.equal(calls.slice(0, 5).every((call) => call.includes("key=AIza-one")), true);
-  assert.equal(calls[5].includes("key=AIza-two"), true);
-  assert.equal(calls[5].includes("models/gemini-3.7-flash:generateContent"), true);
+  // Ключ 1 получил 404 на всей цепочке моделей (модель снята с провода для проекта
+  // этого ключа) — рука Gemini НЕ закрывается, запрос уходит на рабочий ключ 2.
+  // Проверяем факты, а не индексы: на первом ключе должна быть опробована вся
+  // цепочка моделей, а второй ключ — ответить первой же моделью.
+  const keyOneCalls = calls.filter((call) => call.includes("key=AIza-one"));
+  const keyTwoCalls = calls.filter((call) => call.includes("key=AIza-two"));
+  assert.ok(keyOneCalls.length >= 5, `на первом ключе должна быть опробована цепочка моделей, а не один вызов: ${keyOneCalls.length}`);
+  assert.equal(keyOneCalls.length, calls.length - keyTwoCalls.length);
+  assert.equal(keyTwoCalls.length, 1);
+  assert.equal(keyTwoCalls[0].includes("models/gemini-3.7-flash:generateContent"), true);
+  assert.ok(calls[0].includes("key=AIza-one"), "первый вызов идёт на первый ключ");
 });
 
 test("all NVIDIA 504 diagnostics show model rotations and the Groq handoff", async () => {
@@ -871,8 +882,12 @@ test("Gemini HTTP 429 on one model still rotates to the next model (per-model qu
   const text = await withMockFetch(async (url) => {
     const model = url.match(/models\/([^:]+):generateContent/)?.[1] || "";
     models.push(model);
+    // У Gemini квота считается по КАЖДОЙ модели отдельно, поэтому 429 на одной
+    // модели — не повод уходить к другому провайдеру: ротируем модель.
+    // (Транзиентный 503 ведёт себя иначе: сначала повтор на той же модели с backoff —
+    // см. тест «Gemini recovers on its second literary model after the first returns HTTP 503».)
     if (model === "gemini-3.7-flash") {
-      return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      return new Response(JSON.stringify({ error: { message: "Quota exceeded for metric" } }), { status: 429 });
     }
     if (model === "gemini-3.6-flash") {
       return new Response(JSON.stringify({ error: { message: "Quota exceeded for metric" } }), { status: 429 });
@@ -941,10 +956,11 @@ test("Gemini: при квоте на первых двух ключах пере
     });
     console.log("KEYS_USED=" + JSON.stringify(keysUsed));
     assert.equal(text, "Ответ третьим ключом Gemini.");
-    // На каждом ключе сначала перебирается вся цепочка моделей 3.8→3.7→3.6→flash-latest→2.5,
+    // На каждом ключе сначала перебирается вся цепочка моделей (8 профилей:
+    // 3.8 → 3.7 → 3.6 → flash-latest → 2.5-flash → 2.5-flash-lite → 3.1-flash-lite → 2.0-flash),
     // затем идёт переход к следующему ключу.
-    assert.equal(keysUsed.filter((k) => k === "AIza-key1").length, 5);
-    assert.equal(keysUsed.filter((k) => k === "AIza-key2").length, 5);
+    assert.equal(keysUsed.filter((k) => k === "AIza-key1").length, 8);
+    assert.equal(keysUsed.filter((k) => k === "AIza-key2").length, 8);
     assert.equal(keysUsed.filter((k) => k === "AIza-key3").length, 1);
     assert.deepEqual([...new Set(keysUsed)], ["AIza-key1", "AIza-key2", "AIza-key3"]);
   } finally {
@@ -1020,7 +1036,7 @@ test("Gemini: исчерпанная дневная квота паркует к
     const key = String(url).match(/[?&]key=([^&]+)/)?.[1] || "";
     keysUsed.push(key);
     if (key === "AIza-quota") {
-      return new Response(JSON.stringify({ error: { message: "You exceeded your current quota, please check your plan and billing details. Quota exceeded for metric: generativelanguage.googleapis.com" } }), { status: 429 });
+      return new Response(JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "You exceeded your current quota, please check your plan and billing details.", details: [{ "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{ quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests", quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier" }] }] } }), { status: 429 });
     }
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Ответ рабочего ключа." }] } }] }), { status: 200 });
   }, async () => {
@@ -1041,7 +1057,7 @@ test("Gemini: когда все ключи на паузе, каскад сра�
     const target = String(url);
     hits.push(target.includes("generativelanguage") ? "gemini" : "groq");
     if (target.includes("generativelanguage")) {
-      return new Response(JSON.stringify({ error: { message: "Quota exceeded for metric: generativelanguage.googleapis.com" } }), { status: 429 });
+      return new Response(JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "You exceeded your current quota, please check your plan and billing details.", details: [{ "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{ quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests", quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier" }] }] } }), { status: 429 });
     }
     return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ Groq." } }] }), { status: 200 });
   }, async () => {

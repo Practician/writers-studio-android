@@ -104,9 +104,12 @@ function isJsonKeywordError(payload: any): boolean {
 // При перегрузке/недоступности основной модели пробуем следующую, прежде чем
 // уходить к другому провайдеру — так временный HTTP 503 не выглядит зависанием.
 const GEMINI_FALLBACK_MODELS = GEMINI_LITERARY_MODELS.map((profile) => profile.id);
-// 5 слотов = четыре живых профиля плюс gemini-2.5-flash в хвосте: она недоступна
-// ключам новых проектов (404), но на ключах старых проектов даёт запасную квоту.
-const GEMINI_MAX_MODEL_ATTEMPTS = 5;
+// 8 слотов = четыре живых профиля плюс запасные модели с СОБСТВЕННЫМИ дневными
+// бакетами (2.5-flash, 2.5-flash-lite, 3.1-flash-lite, 2.0-flash): у Google квота
+// считается по каждой модели отдельно, поэтому исчерпанная квота 3.8 не означает
+// исчерпанную квоту проекта. Часть запасных ключам новых проектов отвечает 404 —
+// такие модели запоминаются как недоступные и больше не тратят попытку.
+const GEMINI_MAX_MODEL_ATTEMPTS = 8;
 
 // --- Адаптивная память моделей Gemini по ключу ---------------------------------
 // Переключение моделей полностью автоматическое: приложение само уходит на резервную
@@ -123,6 +126,47 @@ const GEMINI_QUOTA_COOLDOWN_MS = 3 * 60 * 1000;
 const GEMINI_QUOTA_COOLDOWN_HARD_MS = 30 * 60 * 1000;
 /** 500/502/503/504 и пустой ответ — перегрузка: пауза на минуту. */
 const GEMINI_OVERLOAD_COOLDOWN_MS = 60 * 1000;
+/**
+ * Паузы перед повтором ТОЙ ЖЕ модели при транзиентных 5xx. Раньше APK на 503/504
+ * сразу менял модель, и в живом журнале это выглядело циклом 3.8 → 3.6 →
+ * flash-latest → 3.8, потому что перегруженная секунду назад модель возвращалась
+ * в цепочку. Небольшой backoff с разбросом отдаёт перегрузку серверу, а не
+ * расходует попытки на всех моделях ключа.
+ */
+const GEMINI_SERVER_RETRY_DELAYS_MS = [800, 2_000];
+
+function isTransientGeminiStatus(status: number): boolean {
+  return status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+/** Потолок ожидания, которое имеет смысл переждать внутри одного запроса (см. retry-after Groq). */
+const RETRY_AFTER_MAX_WAIT_MS = 25_000;
+
+/**
+ * Точный срок ожидания из ответа провайдера: заголовок retry-after (секунды) или
+ * текст вида «Please try again in 18.705s», которым Groq сообщает остаток минутного
+ * лимита. 0 — срока нет, ждать нечего.
+ */
+function parseRetryAfterMs(payload: any, headers?: Headers | null): number {
+  const header = typeof headers?.get === "function" ? headers.get("retry-after") : null;
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.round(seconds * 1000);
+  }
+  const text = String(payload?.error?.message || payload?.error || "");
+  const match = text.match(/try again in\s+([\d.]+)\s*(ms|s|m)?/i);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const unit = (match[2] || "s").toLowerCase();
+  if (unit === "ms") return Math.round(value);
+  if (unit === "m") return Math.round(value * 60_000);
+  return Math.round(value * 1000);
+}
 /**
  * Дневная квота ключа (RPD) исчерпана — это не минутный лимит: ключ не оживёт
  * через три минуты, а на каждом запросе сжигает всю цепочку из пяти моделей
@@ -201,19 +245,73 @@ function timeLabel(timestamp: number): string {
 }
 
 /**
- * HTTP 429 у Gemini бывает двух разных природ: минутный лимит запросов (ключ оживёт
- * сам) и исчерпанная дневная квота проекта. Различаем по тексту: во втором случае
- * Google отвечает «You exceeded your current quota … check your plan and billing
- * details» и «Quota exceeded for metric».
+ * HTTP 429 у Gemini бывает двух разных природ: минутный лимит запросов (модель
+ * оживёт сама, ключ рабочий) и исчерпанная дневная квота проекта. Различать их по
+ * одному тексту НЕЛЬЗЯ: «You exceeded your current quota … check your plan and
+ * billing details» Google отдаёт и на минутный лимит — в живом журнале APK
+ * 18.09.2026 ключ, отвечавший 200 секундами раньше, был по этой фразе припаркован
+ * как «дневная квота» на часы. Надёжный признак — измерение квоты в details:
+ * …PerDay… против …PerMinute…
  */
-function isDailyQuotaMessage(message: unknown): boolean {
-  const text = String(message || "").toLowerCase();
-  return /exceeded your current quota|quota exceeded|check your plan and billing|billing details|resource_exhausted/.test(text);
+type GeminiQuotaKind = "daily" | "minute";
+
+function geminiQuotaKind(payload: any): GeminiQuotaKind {
+  const error = payload?.error ?? payload ?? {};
+  const details = Array.isArray(error?.details) ? error.details : [];
+  const violations = details.flatMap((detail: any) => (Array.isArray(detail?.violations) ? detail.violations : []));
+  const metrics = violations
+    .map((violation: any) => `${violation?.quotaMetric ?? ""} ${violation?.quotaId ?? ""}`)
+    .join(" ");
+  const code = String(error?.status ?? error?.code ?? "").toLowerCase();
+  const text = `${code} ${metrics} ${String(error?.message ?? "")}`.toLowerCase();
+  if (/perday|per_day|per\s*day|daily|requests_per_day/.test(text)) return "daily";
+  // Без явного дневного измерения 429 считаем минутным: ключ не паркуем,
+  // остывает только модель (короткая пауза в recordGeminiOutcome).
+  return "minute";
 }
 
-function nextUtcMidnight(now: number): number {
-  const date = new Date(now);
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1, 0, 5, 0);
+function pacificParts(ms: number): { year: number; month: number; day: number; hour: number; minute: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(new Date(ms));
+  const read = (type: string) => Number(parts.find((part) => part.type === type)?.value || 0);
+  return { year: read("year"), month: read("month"), day: read("day"), hour: read("hour") % 24, minute: read("minute") };
+}
+
+/** Смещение America/Los_Angeles относительно UTC в этот момент (учитывает летнее/зимнее время). */
+function pacificOffsetMs(ms: number): number {
+  const parts = pacificParts(ms);
+  const minute = ms - (ms % 60_000);
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute) - minute;
+}
+
+/**
+ * Ближайшая полночь America/Los_Angeles: квоты Google сбрасываются по тихоокеанскому
+ * времени, а не по UTC. Раньше пауза считалась до полуночи UTC — в живом журнале APK
+ * это давало «ключ в паузе до 03:05» по Киеву, то есть за семь часов до настоящего
+ * сброса, и ключ простаивал весь следующий день автора.
+ */
+function nextPacificMidnight(now: number): number {
+  try {
+    const parts = pacificParts(now);
+    const targetWall = Date.UTC(parts.year, parts.month - 1, parts.day + 1, 0, 0);
+    // Смещение ищем по фактическому моменту, а не по «сегодняшнему»: в дни перехода
+    // на летнее/зимнее время оно меняется, и одной подстановки мало.
+    let guess = targetWall - pacificOffsetMs(now);
+    guess = targetWall - pacificOffsetMs(guess);
+    guess = targetWall - pacificOffsetMs(guess);
+    return guess + 5 * 60 * 1000;
+  } catch {
+    // Экзотическая среда без Intl: падаем на прежнее поведение (полночь UTC).
+    const date = new Date(now);
+    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1, 0, 5, 0);
+  }
 }
 
 /** 0 — ключ рабочий; иначе время, до которого он снят с использования. */
@@ -269,7 +367,7 @@ function releaseGeminiKey(key: string): void {
  * паркуют ключ надолго. Минутный 429 здесь не паркуется — его разбирает память
  * моделей (recordGeminiOutcome), потому что такая ошибка привязана к модели.
  */
-function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText: boolean, providerMessage?: unknown): void {
+function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText: boolean, failurePayload?: unknown): void {
   if (ok && hasText) {
     releaseGeminiKey(key);
     return;
@@ -279,12 +377,16 @@ function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText:
     parkGeminiKey(key, now + GEMINI_KEY_AUTH_COOLDOWN_MS, `ключ отклонён (${status})`);
     return;
   }
-  if (status === 429 && isDailyQuotaMessage(providerMessage)) {
+  // Ключ паркуем ТОЛЬКО при исчерпанной дневной квоте (RPD). Минутный 429 — это
+  // лимит модели, ключ здесь ни при чём: в живом журнале APK он парковался на часы,
+  // хотя секундами раньше отвечал 200. Измерение квоты берём из details ошибки,
+  // а не из текста («check your plan and billing details» приходит и на минутный лимит).
+  if (status === 429 && geminiQuotaKind(failurePayload) === "daily") {
     const memory = geminiMemoryFor(key);
     const hits = (memory.quotaKeyHits ?? 0) + 1;
     memory.quotaKeyHits = hits;
     const pauseUntil = hits > 1
-      ? Math.max(nextUtcMidnight(now), now + GEMINI_KEY_QUOTA_COOLDOWN_MS)
+      ? Math.max(nextPacificMidnight(now), now + GEMINI_KEY_QUOTA_COOLDOWN_MS)
       : now + GEMINI_KEY_QUOTA_COOLDOWN_MS;
     parkGeminiKey(key, pauseUntil, "исчерпана дневная квота");
   }
@@ -522,18 +624,13 @@ function shouldRotateKey(status: number): boolean {
   return status === 402 || status === 429;
 }
 
-// У Gemini перегрузка модели (503) и недоступность шлюза (504) раньше не ротировали
-// ключи — крутили только модели внутри одного ключа. Но перегрузка бывает привязана
-// к проекту ключа, а у автора их несколько: когда вся цепочка моделей легла на одном
-// ключе, честнее перебрать следующие ключи Gemini, прежде чем уходить к Groq.
-// 404/410 у Gemini тоже ротируют ключ. Недоступность модели бывает привязана к
-// проекту ключа (404 «no longer available to new users»): снятая с провода модель
-// отдаёт 404 на одном ключе, но остаётся рабочей на другом. Раньше после исчерпания
-// цепочки моделей 404 закрывал всю Gemini-руку, и второй/третий ключ автора не
-// опробовался ни разу.
+// Ключ меняем только там, где смена ключа действительно помогает: исчерпанная квота
+// проекта (429) и отклонённый ключ (401/403). 404/410 — свойство МОДЕЛИ для этого
+// проекта (её разбирает память моделей, см. recordGeminiOutcome), а 503/504 — вообще
+// перегрузка сервера Google: раньше на них уходил весь пул ключей, и транзиентный сбой
+// выжигал три ключа подряд (в живом журнале — «ротация ключей» без единого 429).
 function shouldRotateProviderKey(provider: DirectProvider, status: number): boolean {
-  return shouldRotateKey(status)
-    || (provider === "gemini" && (status === 404 || status === 410 || status === 503 || status === 504));
+  return shouldRotateKey(status) || (provider === "gemini" && (status === 401 || status === 403));
 }
 
 // Детекторы ловят в первую очередь «пальцы» конкретной модели: переписывать сегмент
@@ -855,12 +952,37 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     // (сюда попадает и gemini-2.5-flash с её отдельной дневной квотой), а каждый
     // исход запоминается — следующий запрос не повторит ту же ошибку.
     if (provider === "gemini") {
-      recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload), payload?.error?.message || payload?.error);
-      const candidates = geminiOrder.slice(1);
+      recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload), payload);
+      if (response.status === 429) {
+        // В журнал выводим ИЗМЕРЕНИЕ квоты: иначе автор не понимает, почему один
+        // 429 снимает ключ с использования на часы, а второй — только модель.
+        const quotaKind = geminiQuotaKind(payload);
+        emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, quotaKind === "daily"
+          ? "429: исчерпана дневная квота проекта — ключ снят с использования."
+          : "429: исчерпан минутный лимит модели — ключ рабочий, остывает только модель.", { chars: 0 }));
+      }
+      // Транзиентные 5xx у Google — перегрузка сервера, а не свойство модели или
+      // проекта ключа. Сначала короткий backoff и повтор ТОЙ ЖЕ модели, и только
+      // потом ротация: иначе один 503 выглядит циклом по всем моделям ключа.
+      let overloadRetries = 0;
+      while (!response.ok && isTransientGeminiStatus(response.status) && overloadRetries < GEMINI_SERVER_RETRY_DELAYS_MS.length) {
+        const delay = GEMINI_SERVER_RETRY_DELAYS_MS[overloadRetries];
+        overloadRetries += 1;
+        emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `Перегрузка Gemini (HTTP ${response.status}): повтор модели «${effectiveModel}» через ${(delay / 1000).toFixed(1)} с.`, { chars: 0 }));
+        await sleep(delay + Math.floor(Math.random() * 500));
+        response = await callGemini(effectiveModel);
+        payload = await response.json().catch(() => ({}));
+        recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload), payload);
+      }
+      // Модель, уже опробованную в ЭТОМ запросе, второй раз не пробуем: возврат к
+      // ней и давал в журнале видимый цикл 3.8 → 3.6 → flash-latest → 3.8.
+      const triedModels = new Set<string>([effectiveModel]);
+      const candidates = geminiOrder.slice(1).filter((id) => !triedModels.has(id));
       for (const nextModel of candidates) {
         const needsRotation = (response.ok && !hasVisibleResponseText(payload))
           || (!response.ok && shouldRotateGeminiModel(response.status));
         if (!needsRotation) break;
+        triedModels.add(nextModel);
         emitApiTrace(traceFor(
           provider,
           effectiveModel,
@@ -874,7 +996,22 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         effectiveModel = nextModel;
         response = await callGemini(effectiveModel);
         payload = await response.json().catch(() => ({}));
-        recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload), payload?.error?.message || payload?.error);
+        recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload), payload);
+      }
+    }
+
+    // Groq сообщает точный срок ожидания минутного лимита («Please try again in
+    // 18.705s») в тексте ошибки и заголовком retry-after. Раньше APK этот срок не
+    // читал и уходил на NVIDIA — быстрый провайдер терялся на весь запрос, хотя
+    // переждать нужно было меньше двадцати секунд. Ждём только когда ключ один:
+    // при нескольких ключах дешевле сразу перейти к следующему.
+    if (provider !== "gemini" && response.status === 429 && index + 1 >= keyPool.length) {
+      const retryAfterMs = parseRetryAfterMs(payload, response.headers);
+      if (retryAfterMs > 0 && retryAfterMs <= RETRY_AFTER_MAX_WAIT_MS) {
+        emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `Лимит ${providerLabel(provider)}: ожидание ${(retryAfterMs / 1000).toFixed(1)} с и повтор той же модели.`, { chars: 0 }));
+        await sleep(retryAfterMs + 250);
+        response = await callOpenAiCompat(maxTokens, reasoningDisableFields(provider, effectiveModel));
+        payload = await response.json().catch(() => ({}));
       }
     }
 
@@ -1035,7 +1172,16 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     // Сообщение журнала обязано совпадать с действием: раньше на 503 в много-
     // ключевой конфигурации APK писал «переход к Groq», а сам переходил к
     // следующему ключу Gemini — журнал выглядел зацикленным на Gemini.
-    const rotateKey = index + 1 < keyPool.length && shouldRotateProviderKey(provider, response.status);
+    // Смена ключа: квота и отклонённый ключ — сразу (shouldRotateProviderKey).
+    // 404/410 и транзиентные 5xx — только как ПОСЛЕДНЯЯ ступень: после повторов с
+    // backoff и всей цепочки моделей этого ключа. Так временный 503 больше не
+    // выжигает пул ключей (раньше он расходовал их сразу, и один транзиентный сбой
+    // съедал три ключа), но и не отнимает у автора рабочий второй ключ, когда
+    // первый стабильно перегружен или не видит модель по всем профилям.
+    const rotateKey = index + 1 < keyPool.length
+      && (shouldRotateProviderKey(provider, response.status)
+        || (provider === "gemini"
+          && (isTransientGeminiStatus(response.status) || response.status === 404 || response.status === 410)));
     const exhaustedNote = provider === "nvidia" || provider === "gemini" ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
     const messageWithFallback = rotateKey || !nextProvider
       ? providerMessage

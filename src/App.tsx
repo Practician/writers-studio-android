@@ -2442,6 +2442,11 @@ export default function App() {
                         )}
                       </div>
                     </div>
+                    {row.key === "gemini" && (
+                      <p className="text-[10px] leading-snug text-amber-300/80">
+                        Ключи ротируются автоматически, но лимиты Google считаются на ПРОЕКТ, а не на ключ: несколько ключей одного проекта делят одну квоту, и ротация не добавит запросов. Чтобы запас был настоящим, добавляйте ключи из разных проектов AI Studio.
+                      </p>
+                    )}
                     <div className="space-y-1.5">
                       {splitProviderKeys(llmKeysDraft[row.key] || "").map((keyValue, keyIndex) => (
                         <div key={`${row.key}-${keyIndex}`} className="flex gap-1.5 items-center">

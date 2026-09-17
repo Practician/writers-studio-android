@@ -19,11 +19,28 @@ const KEY1 = "AIzaJournalKey0001";
 const KEY2 = "AIzaJournalKey0002";
 const KEY3 = "AIzaJournalKey0003";
 
+// Тело 429 из журнала автора — нарочно оставлено ДОСЛОВНО тем самым текстом,
+// который раньше принимался за дневную квоту («You exceeded your current quota …
+// check your plan and billing details»). Признаком дневной квоты теперь служит
+// измерение в details (…PerDay…), а не фраза: так минутный лимит больше не
+// паркует здоровый ключ на часы.
 const QUOTA_BODY = {
   error: {
     code: 429,
     status: "RESOURCE_EXHAUSTED",
     message: "You exceeded your current quota, please check your plan and billing details. Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, quota_value: 1000",
+    details: [
+      {
+        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+        violations: [
+          {
+            quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+            quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+            quotaValue: "1000",
+          },
+        ],
+      },
+    ],
   },
 };
 const HIGH_DEMAND_BODY = {
@@ -101,20 +118,23 @@ test("живой прогон журнала: мёртвый по дневной
     // 2. Мёртвый ключ опробован ровно один раз — по одной попытке на каждую модель
     //    цепочки, и больше к нему не возвращаются (раньше он перепробовался на каждом
     //    запросе: именно это выглядело как «зацикливание на Gemini»).
-    assert.equal(gateway.hits.filter((hit) => hit.key === KEY1).length, 5, "ключ с дневной квотой должен быть опробован один раз за всю сессию");
+    assert.equal(gateway.hits.filter((hit) => hit.key === KEY1).length, 8, "ключ с дневной квотой должен быть опробован один раз за всю сессию — по одной попытке на каждую из 8 моделей цепочки");
     const secondCallHits = gateway.hits.slice(afterFirst);
     assert.equal(secondCallHits.filter((hit) => hit.key === KEY1).length, 0, "второй запрос не должен трогать припаркованный ключ");
     // 3. Журнал объясняет пропуск и называет причину.
     assert.match(firstJournal + journal(0), /Ключ в паузе до \d{2}:\d{2} \(исчерпана дневная квота\): пропуск\./);
-    // 4. Размышления выключены — бюджет вывода целиком уходит в текст.
+    // 4. Размышления выключены — бюджет вывода целиком уходит в текст. У gemini-2.0-flash
+    // поля нет вовсе (она его не понимает), поэтому правило — «ноль или отсутствие».
     for (const hit of gateway.hits) {
-      assert.equal(hit.body?.generationConfig?.thinkingConfig?.thinkingBudget, 0, `${hit.model}: thinkingConfig должен быть отключён`);
+      const budget = hit.body?.generationConfig?.thinkingConfig?.thinkingBudget;
+      assert.ok(budget === 0 || budget === undefined, `${hit.model}: thinkingConfig должен быть отключён (0) или отсутствовать`);
     }
+    assert.ok(gateway.hits.some((hit) => hit.body?.generationConfig?.thinkingConfig?.thinkingBudget === 0), "хотя бы у одной модели размышления должны быть явно отключены");
     // 5. Обрезка по лимиту вывода видна автору отдельной строкой.
     assert.match(journal(0), /Ответ обрезан по лимиту вывода \(MAX_TOKENS\)/);
     // 6. Второй запрос доходит до рабочего ключа и получает полноценный текст.
     assert.ok(second.includes("Полноценный текст главы"), "второй запрос должен получить полноценный текст");
-    assert.ok(secondCallHits.filter((hit) => hit.key === KEY2).length <= 5, "перегруженный ключ пробуется только внутри своего запроса");
+    assert.ok(secondCallHits.filter((hit) => hit.key === KEY2).length <= 12, "перегруженный ключ пробуется только внутри своего запроса: 8 моделей цепочки + повторы перегрузки");
   } finally {
     __setGeminiBaseUrlForTests(null);
     await gateway.close();
