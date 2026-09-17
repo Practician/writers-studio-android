@@ -397,14 +397,14 @@ test("Gemini HTTP 503 (high demand) rotates its own models before falling back t
     maxTokens: 2_048,
   }));
   assert.equal(text, "Ответ Groq после перегрузки Gemini.");
-  // Все 4 литературных профиля Gemini перегружены (503), затем переход к Groq.
-  assert.equal(calls.length, 5);
-  assert.equal(calls.slice(0, 4).every((call) => call.url.includes("generativelanguage.googleapis.com")), true);
+  // Все 5 литературных профилей Gemini перегружены (503), затем переход к Groq.
+  assert.equal(calls.length, 6);
+  assert.equal(calls.slice(0, 5).every((call) => call.url.includes("generativelanguage.googleapis.com")), true);
   assert.equal(calls[0].url.includes("models/gemini-3.7-flash:generateContent"), true);
   assert.equal(calls[1].url.includes("models/gemini-3.8-flash:generateContent"), true);
   assert.equal(calls[2].url.includes("models/gemini-3.6-flash:generateContent"), true);
   assert.equal(calls[3].url.includes("models/gemini-flash-latest:generateContent"), true);
-  assert.equal(calls[4].url, "https://api.groq.com/openai/v1/chat/completions");
+  assert.equal(calls[5].url, "https://api.groq.com/openai/v1/chat/completions");
 });
 
 test("Gemini recovers on its second literary model after the first returns HTTP 503", async () => {
@@ -935,10 +935,10 @@ test("Gemini: при квоте на первых двух ключах пере
     });
     console.log("KEYS_USED=" + JSON.stringify(keysUsed));
     assert.equal(text, "Ответ третьим ключом Gemini.");
-    // На каждом ключе сначала перебирается вся цепочка моделей 3.8→3.7→3.6→2.5,
+    // На каждом ключе сначала перебирается вся цепочка моделей 3.8→3.7→3.6→flash-latest→2.5,
     // затем идёт переход к следующему ключу.
-    assert.equal(keysUsed.filter((k) => k === "AIza-key1").length, 4);
-    assert.equal(keysUsed.filter((k) => k === "AIza-key2").length, 4);
+    assert.equal(keysUsed.filter((k) => k === "AIza-key1").length, 5);
+    assert.equal(keysUsed.filter((k) => k === "AIza-key2").length, 5);
     assert.equal(keysUsed.filter((k) => k === "AIza-key3").length, 1);
     assert.deepEqual([...new Set(keysUsed)], ["AIza-key1", "AIza-key2", "AIza-key3"]);
   } finally {
