@@ -1010,3 +1010,70 @@ test("Gemini: 404 запоминается по ключу — модель бо
   // во втором запросе она уже не вызывается, попытка экономится.
   assert.deepEqual(models, ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.7-flash"]);
 });
+
+test("Gemini: исчерпанная дневная квота паркует ключ — следующий запрос идёт сразу на рабочий", async () => {
+  const keysUsed: string[] = [];
+  const result = await withMockFetch(async (url) => {
+    const key = String(url).match(/[?&]key=([^&]+)/)?.[1] || "";
+    keysUsed.push(key);
+    if (key === "AIza-quota") {
+      return new Response(JSON.stringify({ error: { message: "You exceeded your current quota, please check your plan and billing details. Quota exceeded for metric: generativelanguage.googleapis.com" } }), { status: 429 });
+    }
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Ответ рабочего ключа." }] } }] }), { status: 200 });
+  }, async () => {
+    const first = await directGenerate({ provider: "gemini", model: "gemini-3.8-flash", apiKeys: { gemini: "AIza-quota\nAIza-alive" }, prompt: "Первый запрос автора." });
+    const firstRound = keysUsed.length;
+    const second = await directGenerate({ provider: "gemini", model: "gemini-3.8-flash", apiKeys: { gemini: "AIza-quota\nAIza-alive" }, prompt: "Второй запрос автора." });
+    return { first, second, secondRound: keysUsed.slice(firstRound) } as const;
+  });
+  assert.deepEqual([result.first, result.second], ["Ответ рабочего ключа.", "Ответ рабочего ключа."]);
+  // Первый запрос: вся цепочка моделей на ключе с квотой (5 вызовов) и рабочий ключ.
+  assert.equal(result.secondRound.length, 1);
+  assert.deepEqual([...new Set(result.secondRound)], ["AIza-alive"]);
+});
+
+test("Gemini: когда все ключи на паузе, каскад сразу уходит к Groq, а не крутит ключи", async () => {
+  const hits: string[] = [];
+  const result = await withMockFetch(async (url) => {
+    const target = String(url);
+    hits.push(target.includes("generativelanguage") ? "gemini" : "groq");
+    if (target.includes("generativelanguage")) {
+      return new Response(JSON.stringify({ error: { message: "Quota exceeded for metric: generativelanguage.googleapis.com" } }), { status: 429 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Ответ Groq." } }] }), { status: 200 });
+  }, async () => {
+    const first = await directGenerate({ provider: "gemini", model: "gemini-3.8-flash", apiKeys: { gemini: "AIza-q1", groq: "gsk-test" }, prompt: "Первый запрос автора." });
+    const firstRound = hits.length;
+    const second = await directGenerate({ provider: "gemini", model: "gemini-3.8-flash", apiKeys: { gemini: "AIza-q1", groq: "gsk-test" }, prompt: "Второй запрос автора." });
+    return { first, second, secondRound: hits.slice(firstRound) } as const;
+  });
+  assert.deepEqual([result.first, result.second], ["Ответ Groq.", "Ответ Groq."]);
+  // Второй запрос не делает ни одного вызова Gemini: ключ на паузе по дневной квоте.
+  assert.deepEqual(result.secondRound, ["groq"]);
+});
+
+test("Gemini: 503 в многоключевой конфигурации честно меняет ключ, а не обещает Groq", async () => {
+  const globals = globalThis as any;
+  const savedWindow = globals.window;
+  const savedCustomEvent = globals.CustomEvent;
+  const events: any[] = [];
+  globals.CustomEvent = class { detail: any; constructor(public type: string, public init: any) { this.detail = init?.detail; } };
+  globals.window = { dispatchEvent: (event: any) => { events.push(event.detail); return true; }, addEventListener() {}, removeEventListener() {} };
+  try {
+    const text = await withMockFetch(async (url) => {
+      const key = String(url).match(/[?&]key=([^&]+)/)?.[1] || "";
+      if (key === "AIza-busy") {
+        return new Response(JSON.stringify({ error: { message: "This model is currently experiencing high demand." } }), { status: 503 });
+      }
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Ответ второго ключа." }] } }] }), { status: 200 });
+    }, () => directGenerate({ provider: "gemini", model: "gemini-3.8-flash", apiKeys: { gemini: "AIza-busy\nAIza-free" }, prompt: "Тест журнала." }));
+    assert.equal(text, "Ответ второго ключа.");
+  } finally {
+    if (savedWindow === undefined) delete globals.window; else globals.window = savedWindow;
+    if (savedCustomEvent === undefined) delete globals.CustomEvent; else globals.CustomEvent = savedCustomEvent;
+  }
+  const messages = events.map((event) => String(event.message || ""));
+  // Второй ключ ещё не пробован — журнал не должен обещать уход к Groq.
+  assert.equal(messages.some((message) => message.includes("переход к Groq")), false);
+  assert.equal(events.some((event) => event.status === 503), true);
+});

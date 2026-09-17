@@ -112,11 +112,25 @@ const GEMINI_QUOTA_COOLDOWN_MS = 3 * 60 * 1000;
 const GEMINI_QUOTA_COOLDOWN_HARD_MS = 30 * 60 * 1000;
 /** 500/502/503/504 и пустой ответ — перегрузка: пауза на минуту. */
 const GEMINI_OVERLOAD_COOLDOWN_MS = 60 * 1000;
+/**
+ * Дневная квота ключа (RPD) исчерпана — это не минутный лимит: ключ не оживёт
+ * через три минуты, а на каждом запросе сжигает всю цепочку из пяти моделей
+ * впустую (в живом журнале APK это выглядело как «зацикливание на Gemini»).
+ * Первый отказ — час паузы, повторный — до ближайшей полуночи UTC.
+ */
+const GEMINI_KEY_QUOTA_COOLDOWN_MS = 60 * 60 * 1000;
+/** 401/403 — ключ отклонён: перепроверять его раньше суток бессмысленно. */
+const GEMINI_KEY_AUTH_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 type GeminiModelMemory = {
   dead: Record<string, number>;
   cooling: Record<string, number>;
   quotaHits: Record<string, number>;
+  /** Пауза всего ключа (дневная квота/отказ) — не путать с остыванием модели. */
+  keyPauseUntil?: number;
+  /** Сколько раз ключ попадался на дневной квоте: решает короткую паузу или длинную. */
+  quotaKeyHits?: number;
+  pauseReason?: string;
 };
 type GeminiKeyMemory = Record<string, GeminiModelMemory>;
 
@@ -167,6 +181,77 @@ function geminiMemoryFor(key: string): GeminiModelMemory {
   return entry;
 }
 
+function timeLabel(timestamp: number): string {
+  try {
+    return new Date(timestamp).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return new Date(timestamp).toISOString().slice(11, 16);
+  }
+}
+
+/**
+ * HTTP 429 у Gemini бывает двух разных природ: минутный лимит запросов (ключ оживёт
+ * сам) и исчерпанная дневная квота проекта. Различаем по тексту: во втором случае
+ * Google отвечает «You exceeded your current quota … check your plan and billing
+ * details» и «Quota exceeded for metric».
+ */
+function isDailyQuotaMessage(message: unknown): boolean {
+  const text = String(message || "").toLowerCase();
+  return /exceeded your current quota|quota exceeded|check your plan and billing|billing details|resource_exhausted/.test(text);
+}
+
+function nextUtcMidnight(now: number): number {
+  const date = new Date(now);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1, 0, 5, 0);
+}
+
+/** 0 — ключ рабочий; иначе время, до которого он снят с использования. */
+export function geminiKeyPauseUntil(key: string): number {
+  return geminiMemoryFor(key).keyPauseUntil ?? 0;
+}
+
+function parkGeminiKey(key: string, pauseUntil: number, reason: string): void {
+  const memory = geminiMemoryFor(key);
+  memory.keyPauseUntil = Math.max(memory.keyPauseUntil ?? 0, pauseUntil);
+  memory.pauseReason = reason;
+  saveGeminiMemory();
+}
+
+function releaseGeminiKey(key: string): void {
+  const memory = geminiMemoryFor(key);
+  if (!memory.keyPauseUntil && !memory.pauseReason && !memory.quotaKeyHits) return;
+  memory.keyPauseUntil = 0;
+  delete memory.pauseReason;
+  memory.quotaKeyHits = 0;
+  saveGeminiMemory();
+}
+
+/**
+ * Состояние ключа целиком: успех снимает паузу, дневная квота и отказ авторизации
+ * паркуют ключ надолго. Минутный 429 здесь не паркуется — его разбирает память
+ * моделей (recordGeminiOutcome), потому что такая ошибка привязана к модели.
+ */
+function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText: boolean, providerMessage?: unknown): void {
+  if (ok && hasText) {
+    releaseGeminiKey(key);
+    return;
+  }
+  const now = Date.now();
+  if (status === 401 || status === 403) {
+    parkGeminiKey(key, now + GEMINI_KEY_AUTH_COOLDOWN_MS, `ключ отклонён (${status})`);
+    return;
+  }
+  if (status === 429 && isDailyQuotaMessage(providerMessage)) {
+    const memory = geminiMemoryFor(key);
+    const hits = (memory.quotaKeyHits ?? 0) + 1;
+    memory.quotaKeyHits = hits;
+    const pauseUntil = hits > 1
+      ? Math.max(nextUtcMidnight(now), now + GEMINI_KEY_QUOTA_COOLDOWN_MS)
+      : now + GEMINI_KEY_QUOTA_COOLDOWN_MS;
+    parkGeminiKey(key, pauseUntil, "исчерпана дневная квота");
+  }
+}
+
 /**
  * Цепочка моделей Gemini с учётом выученного состояния ключа: рабочие модели — в
  * настроенном порядке, «остывающие» (429/503) — в хвост, недоступные ключу (404) —
@@ -183,7 +268,8 @@ function geminiModelChain(primary: string, key: string): string[] {
 }
 
 /** Запоминает исход вызова, чтобы следующий запрос не тратил попытку на ту же ошибку. */
-function recordGeminiOutcome(key: string, model: string, status: number, ok: boolean, hasText: boolean): void {
+function recordGeminiOutcome(key: string, model: string, status: number, ok: boolean, hasText: boolean, providerMessage?: unknown): void {
+  noteGeminiKeyOutcome(key, status, ok, hasText, providerMessage);
   const memory = geminiMemoryFor(key);
   const now = Date.now();
   if (status === 404 || status === 410) {
@@ -493,6 +579,24 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   // одного фрагмента) кириллицей нуждается в заметно большем бюджете вывода.
   const maxTokens = Math.max(128, Math.min(request.maxTokens ?? 2_048, 16_000));
   const keyPool = splitApiKeyPool(request.apiKeys?.[provider]);
+  // Ключи, про которые уже известно, что они на паузе (дневная квота/отказ), не
+  // пробуем заново. Снимок делается один раз до цикла: внутри одного запроса
+  // порядок ключей не меняется, а следующий запрос начнёт с рабочих ключей.
+  const pausedKeys = new Set(provider === "gemini" ? keyPool.filter((key) => geminiKeyPauseUntil(key) > Date.now()) : []);
+  if (provider === "gemini" && keyPool.length > 0 && pausedKeys.size === keyPool.length) {
+    // Все ключи Gemini сняты по квоте: минутный перебор моделей ничего не даст,
+    // поэтому честно уходим к следующему провайдеру вместо «зацикливания».
+    const resumeAt = Math.min(...keyPool.map((key) => geminiKeyPauseUntil(key)));
+    const nextProvider = nextFallbackProvider(triedSoFar, request.apiKeys || {});
+    const pauseNote = `Все ключи Gemini на паузе до ${timeLabel(resumeAt)} (исчерпана дневная квота или ключ отклонён).`;
+    const message = nextProvider
+      ? `${pauseNote} переход к ${providerLabel(nextProvider)}.`
+      : `${pauseNote} Добавьте рабочий ключ Gemini или ключ другого провайдера.`;
+    const trace = traceFor(provider, model, keyPool[0], 1, keyPool.length, 429, message, { chars: 0 });
+    emitApiTrace(trace);
+    if (nextProvider) return directGenerate({ ...request, provider: nextProvider, model: undefined, triedProviders: triedSoFar });
+    throw new DirectProviderError(message, 429, trace);
+  }
   // Шлюз NVIDIA при перегрузке может держать соединение открытым по 4-5 минут,
   // прежде чем сам вернёт 504 — это удваивает простой при повторе на том же ключе.
   // Обрываем раньше и обрабатываем как штатный таймаут шлюза (тот же код 504),
@@ -547,6 +651,12 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
 
   for (let index = 0; index < keyPool.length; index += 1) {
     const key = keyPool[index];
+    if (pausedKeys.has(key)) {
+      // Ключ с исчерпанной дневной квотой: запрос к нему сожжёт всю цепочку
+      // моделей и вернёт тот же 429 — пропускаем, объяснив это в журнале.
+      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, 429, `Ключ в паузе до ${timeLabel(geminiKeyPauseUntil(key))} (${geminiMemoryFor(key).pauseReason || "квота"}): пропуск.`, { chars: 0 }));
+      continue;
+    }
     let effectiveModel = model;
     let response: Response;
     let payload: any;
@@ -607,7 +717,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     // (сюда попадает и gemini-2.5-flash с её отдельной дневной квотой), а каждый
     // исход запоминается — следующий запрос не повторит ту же ошибку.
     if (provider === "gemini") {
-      recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload));
+      recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload), payload?.error?.message || payload?.error);
       const candidates = geminiOrder.slice(1);
       for (const nextModel of candidates) {
         const needsRotation = (response.ok && !hasVisibleResponseText(payload))
@@ -626,7 +736,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         effectiveModel = nextModel;
         response = await callGemini(effectiveModel);
         payload = await response.json().catch(() => ({}));
-        recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload));
+        recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload), payload?.error?.message || payload?.error);
       }
     }
 
@@ -774,14 +884,19 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       }
     }
     const nextProvider = nextFallbackProvider(triedSoFar, request.apiKeys || {});
+    // Ключ меняем только если он действительно есть и статус того требует.
+    // Сообщение журнала обязано совпадать с действием: раньше на 503 в много-
+    // ключевой конфигурации APK писал «переход к Groq», а сам переходил к
+    // следующему ключу Gemini — журнал выглядел зацикленным на Gemini.
+    const rotateKey = index + 1 < keyPool.length && shouldRotateProviderKey(provider, response.status);
     const exhaustedNote = provider === "nvidia" || provider === "gemini" ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
-    const messageWithFallback = nextProvider
-      ? `${providerMessage}.${exhaustedNote} переход к ${providerLabel(nextProvider)}.`
-      : providerMessage;
+    const messageWithFallback = rotateKey || !nextProvider
+      ? providerMessage
+      : `${providerMessage}.${exhaustedNote} переход к ${providerLabel(nextProvider)}.`;
     const trace = traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, messageWithFallback, { chars: 0, finishReason: finishReasonFor(payload) });
     emitApiTrace(trace);
 
-    if (index + 1 < keyPool.length && shouldRotateProviderKey(provider, response.status)) {
+    if (rotateKey) {
       notifyApiKeyRotation(provider, index + 1, index + 2, keyPool.length, response.status);
       continue;
     }
@@ -789,6 +904,13 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     throw new DirectProviderError(String(messageWithFallback), response.status, trace);
   }
 
+  // Цикл мог закончиться на пропущенных припаркованных ключах — тогда честнее
+  // отдать запрос следующему провайдеру, чем показать автору ошибку настройки.
+  const finalFallback = nextFallbackProvider(triedSoFar, request.apiKeys || {});
+  if (finalFallback) {
+    emitApiTrace(traceFor(provider, model, keyPool[0] || "", 1, keyPool.length, 429, `Ключи ${providerLabel(provider)} недоступны (пауза/квота); переход к ${providerLabel(finalFallback)}.`, { chars: 0 }));
+    return directGenerate({ ...request, provider: finalFallback, model: undefined, triedProviders: triedSoFar });
+  }
   throw new Error(`Добавьте ключ ${providerLabel(provider)} в настройках ИИ.`);
 }
 
