@@ -93,7 +93,9 @@ function isJsonKeywordError(payload: any): boolean {
 // При перегрузке/недоступности основной модели пробуем следующую, прежде чем
 // уходить к другому провайдеру — так временный HTTP 503 не выглядит зависанием.
 const GEMINI_FALLBACK_MODELS = GEMINI_LITERARY_MODELS.map((profile) => profile.id);
-const GEMINI_MAX_MODEL_ATTEMPTS = 4;
+// 5 слотов = четыре живых профиля плюс gemini-2.5-flash в хвосте: она недоступна
+// ключам новых проектов (404), но на ключах старых проектов даёт запасную квоту.
+const GEMINI_MAX_MODEL_ATTEMPTS = 5;
 
 type ApiTrace = {
   provider: Exclude<DirectProvider, "auto">;

@@ -448,11 +448,12 @@ test("Gemini 404 по всей цепочке моделей переводит 
     maxTokens: 2_048,
   }));
   assert.equal(text, "Ответ второго ключа Gemini.");
-  // 4 модели цепочки на первом ключе (все 404) + успешный вызов второго ключа.
-  assert.equal(calls.length, 5);
-  assert.equal(calls.slice(0, 4).every((call) => call.includes("key=AIza-one")), true);
-  assert.equal(calls[4].includes("key=AIza-two"), true);
-  assert.equal(calls[4].includes("models/gemini-3.7-flash:generateContent"), true);
+  // 5 моделей цепочки на первом ключе (все 404, включая gemini-2.5-flash в хвосте)
+  // + успешный вызов второго ключа.
+  assert.equal(calls.length, 6);
+  assert.equal(calls.slice(0, 5).every((call) => call.includes("key=AIza-one")), true);
+  assert.equal(calls[5].includes("key=AIza-two"), true);
+  assert.equal(calls[5].includes("models/gemini-3.7-flash:generateContent"), true);
 });
 
 test("all NVIDIA 504 diagnostics show model rotations and the Groq handoff", async () => {
