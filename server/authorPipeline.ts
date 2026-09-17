@@ -3,7 +3,7 @@ import type { AuthorVoiceSheet } from "../src/types";
 import { AI_TELL_CATALOG, quantitativeVoiceBlock } from "./humanStyle";
 
 export const DEFAULT_AUTHOR_MODEL = "gemini-3.5-flash";
-export const FALLBACK_AUTHOR_MODEL = "gemini-2.5-flash";
+export const FALLBACK_AUTHOR_MODEL = "gemini-3.6-flash";
 
 export interface AuthorProfileRequest {
   action: "profile";

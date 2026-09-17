@@ -354,9 +354,9 @@ export interface HumanizerPhaseConfig {
 }
 
 export const DEFAULT_HUMANIZER_CONFIG: HumanizerPhaseConfig = {
-  phase1Model:          "gemini-2.5-flash",
+  phase1Model:          "gemini-3.6-flash",
   phase2Model:          "deepseek/deepseek-v3.2",   // из OpenRouter research
-  phase3Model:          "gemini-2.5-flash",
+  phase3Model:          "gemini-3.6-flash",
   maxGateIterations:    3,
   gateScoreThreshold:   15,
   genre:                "general",
