@@ -198,9 +198,9 @@ export default function App() {
             nvidiaConfigured: Boolean(data.nvidiaConfigured),
             groqConfigured: Boolean(data.groqConfigured),
             openrouterConfigured: Boolean(data.openrouterConfigured),
-            nvidiaDefaultModel: data.nvidiaDefaultModel || "deepseek-ai/deepseek-v4-flash",
-            groqDefaultModel: data.groqDefaultModel || "llama-3.3-70b-versatile",
-            openrouterDefaultModel: data.openrouterDefaultModel || "openrouter/auto",
+            nvidiaDefaultModel: data.nvidiaDefaultModel || "deepseek-ai/deepseek-v4-flash-0731",
+            groqDefaultModel: data.groqDefaultModel || "openai/gpt-oss-120b",
+            openrouterDefaultModel: data.openrouterDefaultModel || "deepseek/deepseek-v3.2",
             keysFromEnv: data.keysFromEnv || { gemini: false, nvidia: false, groq: false, openrouter: false },
           });
         }

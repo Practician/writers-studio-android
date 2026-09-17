@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { directApi, directGenerate } from "../src/lib/directLlmClient";
-import { splitApiKeyPool } from "../src/lib/directLlmClient";
+import { resetGeminiModelMemory, splitApiKeyPool } from "../src/lib/directLlmClient";
 import { HUMANIZE_DEPTHS } from "../server/humanStyle";
 
 async function withMockFetch<T>(handler: (url: string, init?: RequestInit) => Promise<Response>, run: () => Promise<T>): Promise<T> {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => handler(String(url), init)) as typeof fetch;
   try {
+    // Адаптивная память моделей Gemini живёт в модуле между вызовами (так же, как в
+    // APK между запросами автора), поэтому каждый тест стартует с чистого состояния.
+    resetGeminiModelMemory();
     return await run();
   } finally {
     globalThis.fetch = originalFetch;
@@ -946,3 +949,64 @@ test("Gemini: при квоте на первых двух ключах пере
   }
 });
 
+
+test("Gemini: автовыбор сам переходит на 2.5 Flash после лимита и не перебирает цепочку заново", async () => {
+  const models: string[] = [];
+  const text = await withMockFetch(async (url) => {
+    const model = url.match(/models\/([^:]+):generateContent/)?.[1] || "";
+    models.push(model);
+    if (model === "gemini-2.5-flash") {
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Ответ Gemini 2.5 Flash." }] } }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: { message: "Quota exceeded for metric" } }), { status: 429 });
+  }, async () => {
+    const first = await directGenerate({
+      provider: "gemini",
+      model: "gemini-3.7-flash",
+      apiKeys: { gemini: "AIza-auto1" },
+      prompt: "Первый запрос автора.",
+    });
+    const second = await directGenerate({
+      provider: "gemini",
+      model: "gemini-3.7-flash",
+      apiKeys: { gemini: "AIza-auto1" },
+      prompt: "Второй запрос автора.",
+    });
+    return [first, second] as const;
+  });
+  assert.deepEqual([...text], ["Ответ Gemini 2.5 Flash.", "Ответ Gemini 2.5 Flash."]);
+  // Первый запрос перебирает цепочку до 2.5 Flash, второй идёт прямо на неё:
+  // остывающие после 429 модели уходят в хвост без ручного выбора профиля.
+  assert.deepEqual(models.slice(0, 5), ["gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-flash-latest", "gemini-2.5-flash"]);
+  assert.deepEqual(models.slice(5), ["gemini-2.5-flash"]);
+});
+
+test("Gemini: 404 запоминается по ключу — модель больше не тратит попытку в следующем запросе", async () => {
+  const models: string[] = [];
+  const text = await withMockFetch(async (url) => {
+    const model = url.match(/models\/([^:]+):generateContent/)?.[1] || "";
+    models.push(model);
+    if (model === "gemini-3.8-flash") {
+      return new Response(JSON.stringify({ error: { message: "This model is no longer available to new users." } }), { status: 404 });
+    }
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Ответ резервной модели." }] } }] }), { status: 200 });
+  }, async () => {
+    const first = await directGenerate({
+      provider: "gemini",
+      model: "gemini-3.8-flash",
+      apiKeys: { gemini: "AIza-auto2" },
+      prompt: "Первый запрос автора.",
+    });
+    const second = await directGenerate({
+      provider: "gemini",
+      model: "gemini-3.8-flash",
+      apiKeys: { gemini: "AIza-auto2" },
+      prompt: "Второй запрос автора.",
+    });
+    return [first, second] as const;
+  });
+  assert.deepEqual([...text], ["Ответ резервной модели.", "Ответ резервной модели."]);
+  // 3.8 Flash отдала 404 один раз и запомнена недоступной для этого ключа:
+  // во втором запросе она уже не вызывается, попытка экономится.
+  assert.deepEqual(models, ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.7-flash"]);
+});

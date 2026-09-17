@@ -97,6 +97,125 @@ const GEMINI_FALLBACK_MODELS = GEMINI_LITERARY_MODELS.map((profile) => profile.i
 // ключам новых проектов (404), но на ключах старых проектов даёт запасную квоту.
 const GEMINI_MAX_MODEL_ATTEMPTS = 5;
 
+// --- Адаптивная память моделей Gemini по ключу ---------------------------------
+// Переключение моделей полностью автоматическое: приложение само уходит на резервную
+// модель, когда основная упирается в лимит или недоступна, и само возвращается на неё,
+// когда пауза истекла. Вручную выбирать профиль в настройках не нужно.
+// Память ведётся отдельно для каждого ключа (по последним 4 знакам), потому что
+// доступность модели у Google привязана к проекту ключа: ключам новых проектов
+// gemini-2.5-flash отвечает 404, ключам старых — работает. Сам ключ не хранится.
+const GEMINI_HEALTH_LS = "writers_studio_gemini_health_v1";
+/** 404/410 — модель недоступна этому ключу: не тратим на неё попытку, но перепроверим через неделю. */
+const GEMINI_DEAD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** 429 — сначала короткая пауза (минутный лимит), при повторе — длинная (дневная квота). */
+const GEMINI_QUOTA_COOLDOWN_MS = 3 * 60 * 1000;
+const GEMINI_QUOTA_COOLDOWN_HARD_MS = 30 * 60 * 1000;
+/** 500/502/503/504 и пустой ответ — перегрузка: пауза на минуту. */
+const GEMINI_OVERLOAD_COOLDOWN_MS = 60 * 1000;
+
+type GeminiModelMemory = {
+  dead: Record<string, number>;
+  cooling: Record<string, number>;
+  quotaHits: Record<string, number>;
+};
+type GeminiKeyMemory = Record<string, GeminiModelMemory>;
+
+let geminiMemoryCache: GeminiKeyMemory | null = null;
+
+function storageOrNull(): Storage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function loadGeminiMemory(): GeminiKeyMemory {
+  if (geminiMemoryCache) return geminiMemoryCache;
+  const storage = storageOrNull();
+  try {
+    const parsed = JSON.parse(storage?.getItem(GEMINI_HEALTH_LS) || "{}");
+    geminiMemoryCache = parsed && typeof parsed === "object" ? parsed as GeminiKeyMemory : {};
+  } catch {
+    geminiMemoryCache = {};
+  }
+  return geminiMemoryCache;
+}
+
+function saveGeminiMemory(): void {
+  const storage = storageOrNull();
+  if (!storage || !geminiMemoryCache) return;
+  try {
+    storage.setItem(GEMINI_HEALTH_LS, JSON.stringify(geminiMemoryCache));
+  } catch {
+    // Переполнение хранилища не должно ломать генерацию: память остаётся в модуле.
+  }
+}
+
+/** Сброс выученного состояния моделей (смена ключа, тесты). */
+export function resetGeminiModelMemory(): void {
+  geminiMemoryCache = {};
+  saveGeminiMemory();
+}
+
+function geminiMemoryFor(key: string): GeminiModelMemory {
+  const memory = loadGeminiMemory();
+  const entry = memory[key.slice(-4)] || (memory[key.slice(-4)] = { dead: {}, cooling: {}, quotaHits: {} });
+  entry.dead ||= {};
+  entry.cooling ||= {};
+  entry.quotaHits ||= {};
+  return entry;
+}
+
+/**
+ * Цепочка моделей Gemini с учётом выученного состояния ключа: рабочие модели — в
+ * настроенном порядке, «остывающие» (429/503) — в хвост, недоступные ключу (404) —
+ * пропускаются. Если рабочего не осталось, порядок остаётся штатным: пробуем снова,
+ * и уже каскад провайдеров решает, что делать.
+ */
+function geminiModelChain(primary: string, key: string): string[] {
+  const canonical = [...new Set([primary, ...GEMINI_FALLBACK_MODELS])].slice(0, GEMINI_MAX_MODEL_ATTEMPTS);
+  const memory = geminiMemoryFor(key);
+  const now = Date.now();
+  const available = canonical.filter((id) => (memory.dead[id] ?? 0) <= now && (memory.cooling[id] ?? 0) <= now);
+  const paused = canonical.filter((id) => (memory.dead[id] ?? 0) <= now && (memory.cooling[id] ?? 0) > now);
+  return available.length ? [...available, ...paused] : canonical;
+}
+
+/** Запоминает исход вызова, чтобы следующий запрос не тратил попытку на ту же ошибку. */
+function recordGeminiOutcome(key: string, model: string, status: number, ok: boolean, hasText: boolean): void {
+  const memory = geminiMemoryFor(key);
+  const now = Date.now();
+  if (status === 404 || status === 410) {
+    memory.dead[model] = now + GEMINI_DEAD_TTL_MS;
+    delete memory.cooling[model];
+    delete memory.quotaHits[model];
+    saveGeminiMemory();
+    return;
+  }
+  if (status === 429) {
+    const hits = (memory.quotaHits[model] ?? 0) + 1;
+    memory.quotaHits[model] = hits;
+    memory.cooling[model] = now + (hits > 1 ? GEMINI_QUOTA_COOLDOWN_HARD_MS : GEMINI_QUOTA_COOLDOWN_MS);
+    delete memory.dead[model];
+    saveGeminiMemory();
+    return;
+  }
+  if (status === 500 || status === 502 || status === 503 || status === 504 || (ok && !hasText)) {
+    memory.cooling[model] = now + GEMINI_OVERLOAD_COOLDOWN_MS;
+    delete memory.dead[model];
+    saveGeminiMemory();
+    return;
+  }
+  if (ok && hasText) {
+    const changed = model in memory.dead || model in memory.cooling || model in memory.quotaHits;
+    delete memory.dead[model];
+    delete memory.cooling[model];
+    delete memory.quotaHits[model];
+    if (changed) saveGeminiMemory();
+  }
+}
+
 type ApiTrace = {
   provider: Exclude<DirectProvider, "auto">;
   model: string;
@@ -253,9 +372,8 @@ function shouldRotateNvidiaModel(status: number): boolean {
   return status === 404 || status === 410 || status === 502 || status === 503 || status === 504;
 }
 
-function geminiModelChain(primary: string): string[] {
-  return [...new Set([primary, ...GEMINI_FALLBACK_MODELS])].slice(0, GEMINI_MAX_MODEL_ATTEMPTS);
-}
+// Порядок цепочки Gemini считается по каждому ключу — см. geminiModelChain() рядом
+// с адаптивной памятью моделей в начале файла.
 
 function shouldRotateGeminiModel(status: number): boolean {
   // В отличие от NVIDIA, у Gemini квоты раздельные по каждой модели (у flash и
@@ -435,21 +553,33 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     // Для JSON-режима гарантируем слово «json» в messages (требование Groq),
     // не переписывая исходный промпт пайплайна.
     const systemForCall = request.json ? ensureJsonKeyword(system, request.prompt) : system;
+    // Модели Gemini вызываются одинаково и на первом шаге, и при ротации,
+    // поэтому запрос вынесен в одну функцию.
+    const callGemini = (targetModel: string) => fetchWithTimeout(`${GEMINI_URL}/${encodeURIComponent(targetModel)}:generateContent?key=${encodeURIComponent(key)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: "user", parts: [{ text: request.prompt }] }],
+        generationConfig: {
+          temperature: request.temperature ?? 0.75,
+          maxOutputTokens: maxTokens,
+          responseMimeType: request.json ? "application/json" : "text/plain",
+        },
+      }),
+    });
+    // Автовыбор без участия автора: порядок цепочки для этого ключа учитывает
+    // прошлые 404/429/503, поэтому выбранный в настройках профиль задаёт лишь
+    // приоритет, а не жёсткую привязку.
+    const geminiOrder = provider === "gemini" ? geminiModelChain(model, key) : [];
+    const learnedModel = geminiOrder[0] ?? model;
+    effectiveModel = learnedModel;
+    if (provider === "gemini" && learnedModel !== model) {
+      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, undefined, `Автовыбор модели Gemini по памяти ключа: ${model} → ${learnedModel}.`, { chars: 0 }));
+    }
 
     if (provider === "gemini") {
-      response = await fetchWithTimeout(`${GEMINI_URL}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: system }] },
-          contents: [{ role: "user", parts: [{ text: request.prompt }] }],
-          generationConfig: {
-            temperature: request.temperature ?? 0.75,
-            maxOutputTokens: maxTokens,
-            responseMimeType: request.json ? "application/json" : "text/plain",
-          },
-        }),
-      });
+      response = await callGemini(effectiveModel);
     } else {
       response = await fetchWithTimeout(endpointFor(provider, model, key), {
         method: "POST",
@@ -470,12 +600,15 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
 
     payload = await response.json().catch(() => ({}));
 
-    // После неудачи основной модели пробуем до трёх резервных литературных
-    // профилей Gemini на том же ключе (включая gemini-2.5-flash — старая модель
-    // с заметно большей дневной квотой) — управляемая деградация вместо зависания
-    // на временной перегрузке (HTTP 503) или снятой с провода модели (404).
+    // Вся цепочка литературных профилей Gemini на том же ключе — управляемая
+    // деградация вместо зависания на временной перегрузке (HTTP 503), лимите (429)
+    // или модели, недоступной ключу (404). Состав и порядок цепочки учитывают
+    // выученное состояние ключа: недоступные пропускаются, остывающие уходят в хвост
+    // (сюда попадает и gemini-2.5-flash с её отдельной дневной квотой), а каждый
+    // исход запоминается — следующий запрос не повторит ту же ошибку.
     if (provider === "gemini") {
-      const candidates = geminiModelChain(model).slice(1);
+      recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload));
+      const candidates = geminiOrder.slice(1);
       for (const nextModel of candidates) {
         const needsRotation = (response.ok && !hasVisibleResponseText(payload))
           || (!response.ok && shouldRotateGeminiModel(response.status));
@@ -491,20 +624,9 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
           { chars: 0, finishReason: finishReasonFor(payload) },
         ));
         effectiveModel = nextModel;
-        response = await fetchWithTimeout(`${GEMINI_URL}/${encodeURIComponent(effectiveModel)}:generateContent?key=${encodeURIComponent(key)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: system }] },
-            contents: [{ role: "user", parts: [{ text: request.prompt }] }],
-            generationConfig: {
-              temperature: request.temperature ?? 0.75,
-              maxOutputTokens: maxTokens,
-              responseMimeType: request.json ? "application/json" : "text/plain",
-            },
-          }),
-        });
+        response = await callGemini(effectiveModel);
         payload = await response.json().catch(() => ({}));
+        recordGeminiOutcome(key, effectiveModel, response.status, response.ok, response.ok && hasVisibleResponseText(payload));
       }
     }
 

@@ -28,11 +28,11 @@ export const DEFAULT_NVIDIA_MODEL = "deepseek-ai/deepseek-v4-flash-0731";
 export type LiteraryModelProfile = { id: string; label: string; description: string };
 
 export const GEMINI_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
-  { id: DEFAULT_GEMINI_MODEL, label: "Литературный авто — Gemini 3.8 Flash", description: "Новейшая Flash-модель (релиз 2 сентября 2026), бесплатный тариф ключа AI Studio; первая в цепочке ротации Gemini." },
+  { id: DEFAULT_GEMINI_MODEL, label: "Литературный авто — Gemini 3.8 Flash", description: "Новейшая Flash-модель (релиз 2 сентября 2026), бесплатный тариф ключа AI Studio; первая в цепочке ротации Gemini. Переключение между профилями идёт автоматически по каждому ключу — выбирать вручную ничего не нужно." },
   { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash — основной профиль", description: "Проверенный быстрый профиль для русской прозы и продолжения сцен; второй в цепочке ротации." },
   { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash — баланс", description: "Стабильный баланс между темпом, связностью и стоимостью." },
   { id: "gemini-flash-latest", label: "Gemini Flash Latest — авто-резерв", description: "Скользящий псевдоним Google на самую свежую Flash-модель: не снимается с прода, поэтому страхует цепочку ротации." },
-  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — запасная квота", description: "Не снята с прода: дата отключения Google не объявлена, у модели отдельная дневная квота бесплатного тарифа. Ключам новых проектов Google отвечает на неё HTTP 404 «no longer available to new users», поэтому профиль стоит последним в цепочке: работает — используется, не работает — пропускается за одну попытку." },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — запасная квота (авто)", description: "Не снята с прода: дата отключения Google не объявлена, у модели отдельная дневная квота бесплатного тарифа. Приложение само переключается на неё, когда свежие модели упираются в лимит или недоступны, и само возвращается обратно, когда лимит отпускает; вручную выбирать профиль не нужно. Ключам новых проектов Google отвечает HTTP 404, тогда модель запоминается как недоступная для этого ключа и больше не тратит попытку." },
 ];
 
 export const GROQ_LITERARY_MODELS: readonly LiteraryModelProfile[] = [
