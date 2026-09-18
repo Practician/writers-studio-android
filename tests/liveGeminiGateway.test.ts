@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
-import { __setGeminiBaseUrlForTests, directGenerate, resetGeminiModelMemory } from "../src/lib/directLlmClient";
+import { __setGeminiBaseUrlForTests, directGenerate, geminiHealthSummary, resetGeminiModelMemory } from "../src/lib/directLlmClient";
 
 // ЖИВОЙ СТЕНД. Настоящий HTTP-сервер на 127.0.0.1 повторяет ту самую
 // последовательность ответов Google, что легла в журнал автора 17.09.2026
@@ -121,8 +121,15 @@ test("живой прогон журнала: мёртвый по дневной
     assert.equal(gateway.hits.filter((hit) => hit.key === KEY1).length, 8, "ключ с дневной квотой должен быть опробован один раз за всю сессию — по одной попытке на каждую из 8 моделей цепочки");
     const secondCallHits = gateway.hits.slice(afterFirst);
     assert.equal(secondCallHits.filter((hit) => hit.key === KEY1).length, 0, "второй запрос не должен трогать припаркованный ключ");
-    // 3. Журнал объясняет пропуск и называет причину.
-    assert.match(firstJournal + journal(0), /Ключ в паузе до \d{2}:\d{2} \(исчерпана дневная квота\): пропуск\./);
+    // 3. Журнал объясняет и сам отказ, и пропуск ключа, называя причину и срок.
+    assert.match(journal(0), /429: исчерпана дневная квота модели «gemini-3\.8-flash» на этом ключе — модель снята до полуночи Pacific \(\d{2}:\d{2}\), ключ рабочий\./);
+    assert.match(journal(0), /Все модели Gemini сняты для этого ключа: gemini-3\.8-flash — исчерпана дневная квота модели до \d{2}:\d{2}\. Ключ пропущен\./);
+    // 3a. Ключ при этом НЕ припаркован: дневная квота снимает модели, а не ключ целиком.
+    const health = geminiHealthSummary();
+    assert.equal(health.paused.length, 0, "дневная квота не должна парковать ключ");
+    assert.ok(health.dead.length > 0, "снятые модели должны быть видны в памяти ключа");
+    assert.equal(health.dead.every((item) => item.reason.includes("дневная квота")), true, "память должна называть причину снятия");
+    assert.equal(health.dead.every((item) => item.until > Date.now()), true, "срок снятия должен быть в будущем");
     // 4. Размышления выключены — бюджет вывода целиком уходит в текст. У gemini-2.0-flash
     // поля нет вовсе (она его не понимает), поэтому правило — «ноль или отсутствие».
     for (const hit of gateway.hits) {

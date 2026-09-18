@@ -119,8 +119,13 @@ const GEMINI_MAX_MODEL_ATTEMPTS = 8;
 // доступность модели у Google привязана к проекту ключа: ключам новых проектов
 // gemini-2.5-flash отвечает 404, ключам старых — работает. Сам ключ не хранится.
 const GEMINI_HEALTH_LS = "writers_studio_gemini_health_v1";
-/** 404/410 — модель недоступна этому ключу: не тратим на неё попытку, но перепроверим через неделю. */
-const GEMINI_DEAD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * 404/410 — модель недоступна этому ключу: не тратим на неё попытку, но перепроверим.
+ * Неделя оказалась слишком долгим сроком: в живом журнале автора (18.09.2026)
+ * gemini-3.8-flash, GA с 2 сентября 2026, висела помеченной «недоступна» и автор
+ * молча писал лайт-моделями, не видя ни причины, ни срока пометки. Держим шесть часов.
+ */
+const GEMINI_DEAD_TTL_MS = 6 * 60 * 60 * 1000;
 /** 429 — сначала короткая пауза (минутный лимит), при повторе — длинная (дневная квота). */
 const GEMINI_QUOTA_COOLDOWN_MS = 3 * 60 * 1000;
 const GEMINI_QUOTA_COOLDOWN_HARD_MS = 30 * 60 * 1000;
@@ -179,6 +184,8 @@ const GEMINI_KEY_AUTH_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 type GeminiModelMemory = {
   dead: Record<string, number>;
+  /** Почему модель снята и насколько: «недоступна этому ключу (HTTP 404)», «исчерпана дневная квота модели». */
+  deadReason?: Record<string, string>;
   cooling: Record<string, number>;
   quotaHits: Record<string, number>;
   /** Пауза всего ключа (дневная квота/отказ) — не путать с остыванием модели. */
@@ -231,6 +238,7 @@ function geminiMemoryFor(key: string): GeminiModelMemory {
   const memory = loadGeminiMemory();
   const entry = memory[key.slice(-4)] || (memory[key.slice(-4)] = { dead: {}, cooling: {}, quotaHits: {} });
   entry.dead ||= {};
+  entry.deadReason ||= {};
   entry.cooling ||= {};
   entry.quotaHits ||= {};
   return entry;
@@ -326,7 +334,8 @@ export function geminiKeyPauseUntil(key: string): number {
  */
 export type GeminiHealthSummary = {
   paused: Array<{ suffix: string; until: number; reason: string }>;
-  dead: string[];
+  /** Снятые модели с причиной и сроком — автор видит, почему флагман не в работе. */
+  dead: Array<{ model: string; reason: string; until: number }>;
   cooling: string[];
 };
 
@@ -334,16 +343,21 @@ export function geminiHealthSummary(): GeminiHealthSummary {
   const now = Date.now();
   const memory = loadGeminiMemory();
   const paused: Array<{ suffix: string; until: number; reason: string }> = [];
-  const dead = new Set<string>();
+  const dead = new Map<string, { model: string; reason: string; until: number }>();
   const cooling = new Set<string>();
   for (const [suffix, entry] of Object.entries(memory || {})) {
     if (!entry) continue;
-    if ((entry.keyPauseUntil ?? 0) > now) paused.push({ suffix, until: entry.keyPauseUntil as number, reason: entry.pauseReason || "квота" });
-    for (const [model, until] of Object.entries(entry.dead || {})) if (until > now) dead.add(model);
+    if ((entry.keyPauseUntil ?? 0) > now) paused.push({ suffix, until: entry.keyPauseUntil as number, reason: entry.pauseReason || "ключ отклонён" });
+    for (const [model, until] of Object.entries(entry.dead || {})) {
+      if (until <= now) continue;
+      const previous = dead.get(model);
+      // Показываем ближайший срок: пометки живут по ключам отдельно.
+      if (!previous || until < previous.until) dead.set(model, { model, reason: entry.deadReason?.[model] || "недоступна этому ключу", until });
+    }
     for (const [model, until] of Object.entries(entry.cooling || {})) if (until > now) cooling.add(model);
   }
   paused.sort((a, b) => a.until - b.until);
-  return { paused, dead: [...dead], cooling: [...cooling] };
+  return { paused, dead: [...dead.values()].sort((a, b) => a.until - b.until), cooling: [...cooling] };
 }
 
 function parkGeminiKey(key: string, pauseUntil: number, reason: string): void {
@@ -363,11 +377,17 @@ function releaseGeminiKey(key: string): void {
 }
 
 /**
- * Состояние ключа целиком: успех снимает паузу, дневная квота и отказ авторизации
- * паркуют ключ надолго. Минутный 429 здесь не паркуется — его разбирает память
- * моделей (recordGeminiOutcome), потому что такая ошибка привязана к модели.
+ * Состояние КЛЮЧА целиком: пауза ставится только за отказ авторизации (401/403),
+ * её снимает первый же успешный ответ. Дневная квота ключ больше не паркует: у Google
+ * RPD считается на модель в проекте, поэтому такой отказ снимает модель
+ * (recordGeminiOutcome), а ключ остаётся рабочим для остальных моделей.
+ *
+ * Живой журнал автора 18.09.2026 показал, почему прежняя логика не работала: запрос
+ * с 429 PerDay парковал ключ до полуночи, но следующий же успешный HTTP 200 соседней
+ * модели в том же запросе вызывал releaseGeminiKey и снимал паузу — в журнале это
+ * выглядело сплошными «ключ 1/3» без единой строки о пропуске.
  */
-function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText: boolean, failurePayload?: unknown): void {
+function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText: boolean): void {
   if (ok && hasText) {
     releaseGeminiKey(key);
     return;
@@ -375,20 +395,6 @@ function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText:
   const now = Date.now();
   if (status === 401 || status === 403) {
     parkGeminiKey(key, now + GEMINI_KEY_AUTH_COOLDOWN_MS, `ключ отклонён (${status})`);
-    return;
-  }
-  // Ключ паркуем ТОЛЬКО при исчерпанной дневной квоте (RPD). Минутный 429 — это
-  // лимит модели, ключ здесь ни при чём: в живом журнале APK он парковался на часы,
-  // хотя секундами раньше отвечал 200. Измерение квоты берём из details ошибки,
-  // а не из текста («check your plan and billing details» приходит и на минутный лимит).
-  if (status === 429 && geminiQuotaKind(failurePayload) === "daily") {
-    const memory = geminiMemoryFor(key);
-    const hits = (memory.quotaKeyHits ?? 0) + 1;
-    memory.quotaKeyHits = hits;
-    const pauseUntil = hits > 1
-      ? Math.max(nextPacificMidnight(now), now + GEMINI_KEY_QUOTA_COOLDOWN_MS)
-      : now + GEMINI_KEY_QUOTA_COOLDOWN_MS;
-    parkGeminiKey(key, pauseUntil, "исчерпана дневная квота");
   }
 }
 
@@ -398,22 +404,54 @@ function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText:
  * пропускаются. Если рабочего не осталось, порядок остаётся штатным: пробуем снова,
  * и уже каскад провайдеров решает, что делать.
  */
-function geminiModelChain(primary: string, key: string): string[] {
+type GeminiChainPlan = {
+  /** Порядок моделей для этого ключа (пусто — ключ пропускается целиком). */
+  order: string[];
+  /** Снятые модели с причиной и сроком: журнал обязан объяснять автовыбор. */
+  skipped: Array<{ model: string; reason: string; until: number }>;
+  /** Остывающие после лимита модели — с готовым сроком для журнала. */
+  cooling: Array<{ model: string; until: number }>;
+  /** Все модели цепочки сняты: к ключу в этом запросе не ходим вовсе. */
+  exhausted: boolean;
+};
+
+function geminiModelChain(primary: string, key: string): GeminiChainPlan {
   const canonical = [...new Set([primary, ...GEMINI_FALLBACK_MODELS])].slice(0, GEMINI_MAX_MODEL_ATTEMPTS);
   const memory = geminiMemoryFor(key);
   const now = Date.now();
-  const available = canonical.filter((id) => (memory.dead[id] ?? 0) <= now && (memory.cooling[id] ?? 0) <= now);
-  const paused = canonical.filter((id) => (memory.dead[id] ?? 0) <= now && (memory.cooling[id] ?? 0) > now);
-  return available.length ? [...available, ...paused] : canonical;
+  const available: string[] = [];
+  const cooling: Array<{ model: string; until: number }> = [];
+  const skipped: Array<{ model: string; reason: string; until: number }> = [];
+  for (const id of canonical) {
+    const deadUntil = memory.dead[id] ?? 0;
+    if (deadUntil > now) {
+      skipped.push({ model: id, reason: memory.deadReason[id] || "недоступна этому ключу", until: deadUntil });
+      continue;
+    }
+    const coolingUntil = memory.cooling[id] ?? 0;
+    if (coolingUntil > now) cooling.push({ model: id, until: coolingUntil });
+    else available.push(id);
+  }
+  // Если сняты ВСЕ модели цепочки, ключ пропускается целиком: иначе каждый запрос
+  // снова сжигал бы восемь вызовов впустую — именно это выглядело «зацикливанием».
+  // Остывающие модели не повод пропускать ключ: их пауза короткая, и повтор нужен.
+  const exhausted = available.length === 0 && cooling.length === 0 && skipped.length > 0;
+  return {
+    order: exhausted ? [] : [...available, ...cooling.map((entry) => entry.model)],
+    skipped,
+    cooling,
+    exhausted,
+  };
 }
 
 /** Запоминает исход вызова, чтобы следующий запрос не тратил попытку на ту же ошибку. */
 function recordGeminiOutcome(key: string, model: string, status: number, ok: boolean, hasText: boolean, providerMessage?: unknown): void {
-  noteGeminiKeyOutcome(key, status, ok, hasText, providerMessage);
+  noteGeminiKeyOutcome(key, status, ok, hasText);
   const memory = geminiMemoryFor(key);
   const now = Date.now();
   if (status === 404 || status === 410) {
     memory.dead[model] = now + GEMINI_DEAD_TTL_MS;
+    memory.deadReason[model] = `недоступна этому ключу (HTTP ${status})`;
     delete memory.cooling[model];
     delete memory.quotaHits[model];
     saveGeminiMemory();
@@ -422,20 +460,32 @@ function recordGeminiOutcome(key: string, model: string, status: number, ok: boo
   if (status === 429) {
     const hits = (memory.quotaHits[model] ?? 0) + 1;
     memory.quotaHits[model] = hits;
-    memory.cooling[model] = now + (hits > 1 ? GEMINI_QUOTA_COOLDOWN_HARD_MS : GEMINI_QUOTA_COOLDOWN_MS);
-    delete memory.dead[model];
+    if (geminiQuotaKind(providerMessage) === "daily") {
+      // Дневная квота привязана к модели в проекте ключа: снимаем МОДЕЛЬ до сброса
+      // квот Google (полночь America/Los_Angeles), ключ целиком не паркуем —
+      // остальные модели того же ключа продолжают работать.
+      memory.dead[model] = Math.max(nextPacificMidnight(now), now + GEMINI_QUOTA_COOLDOWN_MS);
+      memory.deadReason[model] = "исчерпана дневная квота модели";
+      delete memory.cooling[model];
+    } else {
+      memory.cooling[model] = now + (hits > 1 ? GEMINI_QUOTA_COOLDOWN_HARD_MS : GEMINI_QUOTA_COOLDOWN_MS);
+      delete memory.dead[model];
+      delete memory.deadReason[model];
+    }
     saveGeminiMemory();
     return;
   }
   if (status === 500 || status === 502 || status === 503 || status === 504 || (ok && !hasText)) {
     memory.cooling[model] = now + GEMINI_OVERLOAD_COOLDOWN_MS;
     delete memory.dead[model];
+    delete memory.deadReason[model];
     saveGeminiMemory();
     return;
   }
   if (ok && hasText) {
     const changed = model in memory.dead || model in memory.cooling || model in memory.quotaHits;
     delete memory.dead[model];
+    delete memory.deadReason[model];
     delete memory.cooling[model];
     delete memory.quotaHits[model];
     if (changed) saveGeminiMemory();
@@ -573,7 +623,21 @@ function notifyApiKeyRotation(provider: Exclude<DirectProvider, "auto">, from: n
   window.dispatchEvent(new CustomEvent("writers-studio-api-key-rotation", { detail: { provider, from, to, total, status } }));
 }
 
-function notifyHumanizePass(depth: string, beforeChars: number, afterChars: number, audit?: { scoreBefore: number; scoreAfter: number; gatePassed: boolean; passesRun: number }): void {
+function notifyHumanizePass(
+  depth: string,
+  beforeChars: number,
+  afterChars: number,
+  audit?: {
+    scoreBefore: number;
+    scoreAfter: number;
+    gatePassed: boolean;
+    passesRun: number;
+    /** Взят ли вариант прохода; false + growthNote — текст остался черновиком. */
+    variantTaken?: boolean;
+    /** Честное объяснение, почему вариант не взят. */
+    growthNote?: string;
+  },
+): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent("writers-studio-humanize-pass", { detail: { depth, beforeChars, afterChars, ...audit } }));
 }
@@ -780,12 +844,22 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   // пробуем заново. Снимок делается один раз до цикла: внутри одного запроса
   // порядок ключей не меняется, а следующий запрос начнёт с рабочих ключей.
   const pausedKeys = new Set(provider === "gemini" ? keyPool.filter((key) => geminiKeyPauseUntil(key) > Date.now()) : []);
-  if (provider === "gemini" && keyPool.length > 0 && pausedKeys.size === keyPool.length) {
-    // Все ключи Gemini сняты по квоте: минутный перебор моделей ничего не даст,
+  // Ключ может быть снят не целиком, а по памяти моделей: дневная квота Google
+  // считается на модель в проекте ключа, и когда сняты все модели цепочки, запрос
+  // к такому ключу сожжёт попытки впустую. Пропускаем его как припаркованный.
+  const modelExhaustedKeys = new Set(provider === "gemini"
+    ? keyPool.filter((key) => geminiModelChain(model, key).exhausted)
+    : []);
+  const blockedKeys = new Set([...pausedKeys, ...modelExhaustedKeys]);
+  if (provider === "gemini" && keyPool.length > 0 && blockedKeys.size === keyPool.length) {
+    // Все ключи Gemini сняты: минутный перебор моделей ничего не даст,
     // поэтому честно уходим к следующему провайдеру вместо «зацикливания».
-    const resumeAt = Math.min(...keyPool.map((key) => geminiKeyPauseUntil(key)));
+    const resumeAt = Math.min(...[...blockedKeys].map((key) => Math.max(
+      geminiKeyPauseUntil(key),
+      geminiModelChain(model, key).skipped.reduce((min, item) => Math.min(min, item.until), Number.POSITIVE_INFINITY),
+    )));
     const nextProvider = nextFallbackProvider(triedSoFar, request.apiKeys || {});
-    const pauseNote = `Все ключи Gemini на паузе до ${timeLabel(resumeAt)} (исчерпана дневная квота или ключ отклонён).`;
+    const pauseNote = `Все ключи Gemini сняты до ${timeLabel(resumeAt)} (исчерпана дневная квота моделей или ключ отклонён).`;
     const message = nextProvider
       ? `${pauseNote} переход к ${providerLabel(nextProvider)}.`
       : `${pauseNote} Добавьте рабочий ключ Gemini или ключ другого провайдера.`;
@@ -849,9 +923,18 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   for (let index = 0; index < keyPool.length; index += 1) {
     const key = keyPool[index];
     if (pausedKeys.has(key)) {
-      // Ключ с исчерпанной дневной квотой: запрос к нему сожжёт всю цепочку
-      // моделей и вернёт тот же 429 — пропускаем, объяснив это в журнале.
-      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, 429, `Ключ в паузе до ${timeLabel(geminiKeyPauseUntil(key))} (${geminiMemoryFor(key).pauseReason || "квота"}): пропуск.`, { chars: 0 }));
+      // Ключ отклонён по авторизации: запрос к нему вернёт тот же 401 — пропускаем,
+      // объяснив это в журнале.
+      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, 429, `Ключ в паузе до ${timeLabel(geminiKeyPauseUntil(key))} (${geminiMemoryFor(key).pauseReason || "ключ отклонён"}): пропуск.`, { chars: 0 }));
+      continue;
+    }
+    if (modelExhaustedKeys.has(key)) {
+      // Дневная квота сняла все модели этого ключа: восемь вызовов впустую не нужны,
+      // а автор должен видеть причину и срок, а не молчаливый пропуск.
+      const plan = geminiModelChain(model, key);
+      const example = plan.skipped[0];
+      const resumeAt = plan.skipped.reduce((min, item) => Math.min(min, item.until), Number.POSITIVE_INFINITY);
+      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, 429, `Все модели Gemini сняты для этого ключа: ${example.model} — ${example.reason} до ${timeLabel(resumeAt)}. Ключ пропущен.`, { chars: 0 }));
       continue;
     }
     let effectiveModel = model;
@@ -898,11 +981,22 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     // Автовыбор без участия автора: порядок цепочки для этого ключа учитывает
     // прошлые 404/429/503, поэтому выбранный в настройках профиль задаёт лишь
     // приоритет, а не жёсткую привязку.
-    const geminiOrder = provider === "gemini" ? geminiModelChain(model, key) : [];
+    const geminiChain = provider === "gemini" ? geminiModelChain(model, key) : null;
+    const geminiOrder = geminiChain?.order ?? [];
     const learnedModel = geminiOrder[0] ?? model;
     effectiveModel = learnedModel;
     if (provider === "gemini" && learnedModel !== model) {
-      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, undefined, `Автовыбор модели Gemini по памяти ключа: ${model} → ${learnedModel}.`, { chars: 0 }));
+      // Причина и срок автовыбора выводятся в журнал: раньше строка «Автовыбор модели»
+      // не объясняла, почему выбранная автором модель пропущена, и флагман мог неделю
+      // не появляться в работе без единого слова (живой журнал 18.09.2026).
+      const skippedSelf = geminiChain?.skipped.find((item) => item.model === model);
+      const coolingSelf = geminiChain?.cooling.find((item) => item.model === model);
+      const why = skippedSelf
+        ? `${skippedSelf.reason} до ${timeLabel(skippedSelf.until)}`
+        : coolingSelf
+          ? `остывает после лимита до ${timeLabel(coolingSelf.until)}`
+          : "по памяти ключа";
+      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, undefined, `Автовыбор модели Gemini по памяти ключа: ${model} → ${learnedModel} (${why}).`, { chars: 0 }));
     }
 
     if (provider === "gemini") {
@@ -958,7 +1052,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         // 429 снимает ключ с использования на часы, а второй — только модель.
         const quotaKind = geminiQuotaKind(payload);
         emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, quotaKind === "daily"
-          ? "429: исчерпана дневная квота проекта — ключ снят с использования."
+          ? `429: исчерпана дневная квота модели «${effectiveModel}» на этом ключе — модель снята до полуночи Pacific (${timeLabel(nextPacificMidnight(Date.now()))}), ключ рабочий.`
           : "429: исчерпан минутный лимит модели — ключ рабочий, остывает только модель.", { chars: 0 }));
       }
       // Транзиентные 5xx у Google — перегрузка сервера, а не свойство модели или
@@ -1269,9 +1363,9 @@ function maxAllowedGrowth(baseWords: number, ratio: number, wordBuffer = 80): nu
   return Math.max(Math.ceil(baseWords * ratio), baseWords + wordBuffer);
 }
 
-function notifyChapterVolume(words: number, segments: number, target: number, complete: boolean): void {
+function notifyChapterVolume(words: number, segments: number, target: number, complete: boolean, stopReason?: string): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent("writers-studio-chapter-volume", { detail: { words, segments, target, complete } }));
+  window.dispatchEvent(new CustomEvent("writers-studio-chapter-volume", { detail: { words, segments, target, complete, ...(stopReason ? { stopReason } : {}) } }));
 }
 
 export function promptForAction(action: string, body: any): { system: string; prompt: string; json?: boolean } {
@@ -1536,8 +1630,12 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
       // указанный объём. Для полной главы измеряем фактические слова и дописываем сцены.
       let chapterSegments = 1;
       if (action === "generate_full_chapter") {
-        let stalls = 0;
-        for (let continuation = 0; continuation < MAX_CHAPTER_CONTINUATIONS && countGeneratedWords(text) < CHAPTER_TARGET_WORDS; continuation += 1) {
+      let stalls = 0;
+      // Почему цикл встал — в журнал: раньше автор видел только «Глава короче цели»
+      // и не мог понять, упёрлось ли дело в провайдера, правило застоя или лимит
+      // фрагментов (живой журнал 18.09.2026: остановка на 6/10 при 2482/3300 словах).
+      let stopReason = "";
+      for (let continuation = 0; continuation < MAX_CHAPTER_CONTINUATIONS && countGeneratedWords(text) < CHAPTER_TARGET_WORDS; continuation += 1) {
           const currentWords = countGeneratedWords(text);
           const remaining = Math.max(1, CHAPTER_TARGET_WORDS - currentWords);
           const askWords = Math.min(900, remaining);
@@ -1560,13 +1658,25 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
               gained = countGeneratedWords(next);
             }
           }
-          if (gained <= 0) break;
+          if (gained <= 0) {
+            stopReason = `модель вернула пустой фрагмент (провайдер ответил, но текста нет) — фрагментов получено: ${chapterSegments}`;
+            break;
+          }
           text = `${text.trim()}\n\n${next.trim()}`;
           chapterSegments += 1;
           stalls = gained < MIN_CONTINUATION_WORDS ? stalls + 1 : 0;
-          if (stalls >= 2) break;
+          if (stalls >= 2) {
+            stopReason = `два фрагмента подряд короче ${MIN_CONTINUATION_WORDS} слов — модель отвечает, но сцену не разворачивает`;
+            break;
+          }
         }
-        notifyChapterVolume(countGeneratedWords(text), chapterSegments, CHAPTER_TARGET_WORDS, countGeneratedWords(text) >= CHAPTER_TARGET_WORDS);
+        {
+          const finalWords = countGeneratedWords(text);
+          if (finalWords < CHAPTER_TARGET_WORDS && !stopReason) {
+            stopReason = `исчерпан лимит дописывания (${MAX_CHAPTER_CONTINUATIONS} фрагментов)`;
+          }
+          notifyChapterVolume(finalWords, chapterSegments, CHAPTER_TARGET_WORDS, finalWords >= CHAPTER_TARGET_WORDS, stopReason || undefined);
+        }
       }
 
       const humanizeApplied = needsHumanizePass(action, body);
@@ -1580,6 +1690,19 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         const depthConfig = resolveHumanizeDepth(depth);
         const beforeChars = text.length;
         const beforeWords = countGeneratedWords(text);
+        // На максимальной глубине принимаем прошедший гейт вариант при росте до 35 %:
+        // этот проход добавляет сцены и ритм, и потолок 25 % отбрасывал готовую работу
+        // (живой журнал 18.09.2026: «16442 → 16442 символов», проходов 2, gate не пройден).
+        // На остальных глубинах потолок прежний — там рост это обвес, а не правка.
+        const growthCap = depthConfig.id === "maximum" ? 1.35 : 1.25;
+        // Честный отчёт: раньше журнал писал «проход выполнен» и тогда, когда вариант
+        // отбрасывался и текст оставался черновиком. Теперь эти случаи различаются.
+        let variantTaken = false;
+        let growthNote = "";
+        // Черновик до прохода: если после всех шагов текст не изменился, журнал должен
+        // сказать об этом прямо, а не рапортовать «проход выполнен» (в живом журнале
+        // автора 18.09.2026 строка «16442 → 16442 символов» стояла рядом с «gate не пройден»).
+        const draftText = text;
         try {
           const polished = await humanizeProseDraft(text, pipelineGenerate, {
             model: credentials.model || "",
@@ -1589,12 +1712,17 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           const polishedWords = countGeneratedWords(polished.text);
           // Постпроход иногда разгоняет текст (лишние сравнения/описания — обвес,
           // коррелирующий с ухудшением у внешних детекторов): такой вариант не берём.
-          if (polished.text.trim() && polishedWords <= maxAllowedGrowth(beforeWords, 1.25)) {
+          if (polished.text.trim() && polishedWords <= maxAllowedGrowth(beforeWords, growthCap)) {
             text = polished.text;
+            variantTaken = true;
+          } else if (polished.text.trim()) {
+            const percent = Math.round(((polishedWords - beforeWords) / Math.max(1, beforeWords)) * 100);
+            growthNote = `вариант на +${percent} % длиннее черновика (${polishedWords} против ${beforeWords} слов при потолке +${Math.round((growthCap - 1) * 100)} %) — не взят, текст остался черновиком`;
           }
           humanizeReport = polished.humanizeReport;
         } catch (touchupError) {
           console.warn("Авто-доводка continue не удалась:", touchupError);
+          growthNote = "литературный проход не удался — текст остался черновиком";
           const score = aiTellScore(text);
           const hygiene = sanitizeGeneratedText(text);
           text = hygiene.text;
@@ -1615,11 +1743,18 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             textHygiene: hygiene.report,
           };
         }
+        if (!growthNote && text === draftText) {
+          growthNote = humanizeReport?.gatePassed
+            ? "проход вернул текст без изменений — правок не потребовалось"
+            : "вариант прохода не принят — текст остался черновиком";
+        }
         notifyHumanizePass(depth, beforeChars, text.length, {
           scoreBefore: humanizeReport?.scoreBefore ?? 0,
           scoreAfter: humanizeReport?.scoreAfter ?? 0,
           gatePassed: humanizeReport?.gatePassed ?? false,
           passesRun: humanizeReport?.passesRun ?? 0,
+          variantTaken,
+          growthNote: growthNote || undefined,
         });
       }
 

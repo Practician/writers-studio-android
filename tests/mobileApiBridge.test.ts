@@ -927,6 +927,40 @@ test("humanize pass rejects a result inflated ~40% beyond the draft (padding, no
   assert.equal(payload.result, originalDraft);
 });
 
+test("humanize-журнал не рапортует «проход выполнен», когда текст остался нетронутым", async () => {
+  const globals = globalThis as any;
+  const savedWindow = globals.window;
+  const savedCustomEvent = globals.CustomEvent;
+  const events: any[] = [];
+  globals.CustomEvent = class { detail: any; constructor(public type: string, public init: any) { this.detail = init?.detail; } };
+  globals.window = { dispatchEvent: (event: any) => { events.push(event.detail); return true; }, addEventListener() {}, removeEventListener() {} };
+  try {
+    const originalDraft = "Слово ".repeat(1_000).trim();
+    const inflatedResult = "Обзор ".repeat(1_400).trim();
+    let calls = 0;
+    await withMockFetch(async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: calls === 1 ? originalDraft : inflatedResult } }] }), { status: 200 });
+    }, () => directApi("/api/writer/ai", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "improve",
+        text: originalDraft,
+        humanize: true,
+        humanizeDepth: "fast",
+        llmApiFields: { llmProvider: "nvidia", apiKeys: { nvidia: "nvapi-test" } },
+      }),
+    }));
+  } finally {
+    if (savedWindow === undefined) delete globals.window; else globals.window = savedWindow;
+    if (savedCustomEvent === undefined) delete globals.CustomEvent; else globals.CustomEvent = savedCustomEvent;
+  }
+  const humanizeEvent = events.find((event) => event?.depth && typeof event?.growthNote === "string" && event.growthNote);
+  assert.ok(humanizeEvent, "журнал должен сообщать, что вариант прохода не взят");
+  assert.match(String(humanizeEvent.growthNote), /текст остался черновиком|без изменений/);
+  assert.equal(humanizeEvent.beforeChars, humanizeEvent.afterChars, "черновик должен остаться нетронутым");
+});
+
 test("splitApiKeyPool: пусто/один/N ключей, дедупликация и обрезка пробелов", () => {
   assert.deepEqual(splitApiKeyPool(""), []);
   assert.deepEqual(splitApiKeyPool("   "), []);
@@ -1030,7 +1064,7 @@ test("Gemini: 404 запоминается по ключу — модель бо
   assert.deepEqual(models, ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.7-flash"]);
 });
 
-test("Gemini: исчерпанная дневная квота паркует ключ — следующий запрос идёт сразу на рабочий", async () => {
+test("Gemini: исчерпанная дневная квота снимает модели ключа — следующий запрос идёт сразу на рабочий", async () => {
   const keysUsed: string[] = [];
   const result = await withMockFetch(async (url) => {
     const key = String(url).match(/[?&]key=([^&]+)/)?.[1] || "";
@@ -1046,7 +1080,8 @@ test("Gemini: исчерпанная дневная квота паркует к
     return { first, second, secondRound: keysUsed.slice(firstRound) } as const;
   });
   assert.deepEqual([result.first, result.second], ["Ответ рабочего ключа.", "Ответ рабочего ключа."]);
-  // Первый запрос: вся цепочка моделей на ключе с квотой (5 вызовов) и рабочий ключ.
+  // Первый запрос: вся цепочка моделей ключа с квотой (8 моделей, каждая снята
+  // до полуночи Pacific) и рабочий ключ. Второй запрос к снятому ключу не ходит.
   assert.equal(result.secondRound.length, 1);
   assert.deepEqual([...new Set(result.secondRound)], ["AIza-alive"]);
 });

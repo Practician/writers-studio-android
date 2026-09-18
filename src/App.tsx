@@ -263,16 +263,21 @@ export default function App() {
   useEffect(() => {
     if (!isAutonomousApk()) return;
     const handleHumanizePass = (event: Event) => {
-      const detail = (event as CustomEvent<{ depth?: string; beforeChars?: number; afterChars?: number; scoreBefore?: number; scoreAfter?: number; gatePassed?: boolean; passesRun?: number }>).detail;
+      const detail = (event as CustomEvent<{ depth?: string; beforeChars?: number; afterChars?: number; scoreBefore?: number; scoreAfter?: number; gatePassed?: boolean; passesRun?: number; variantTaken?: boolean; growthNote?: string }>).detail;
       if (!detail?.depth || typeof detail.beforeChars !== "number" || typeof detail.afterChars !== "number") return;
       const hasAudit = typeof detail.scoreBefore === "number" && typeof detail.scoreAfter === "number";
       const auditPart = hasAudit
         ? ` · локальный аудит: ${detail.scoreBefore} → ${detail.scoreAfter} (${detail.gatePassed ? "gate пройден" : "gate не пройден"}${detail.passesRun && detail.passesRun > 1 ? `, проходов: ${detail.passesRun}` : ""})`
         : "";
+      // Вариант прохода мог быть отброшен (раздутие сверх потолка или сбой прохода) —
+      // тогда журнал говорит об этом прямо, а не рапортует «проход выполнен».
+      const message = detail.growthNote
+        ? `Очеловечивание ${detail.depth}: ${detail.growthNote}${auditPart}.`
+        : `Очеловечивание ${detail.depth}: отдельный литературный проход выполнен (${detail.beforeChars} → ${detail.afterChars} символов)${auditPart}.`;
       setLlmLogs((prev) => [...prev, {
-        level: hasAudit && !detail.gatePassed ? "warn" : "success",
+        level: detail.growthNote || (hasAudit && !detail.gatePassed) ? "warn" : "success",
         provider: llmProvider === "auto" ? undefined : llmProvider,
-        message: `Очеловечивание ${detail.depth}: отдельный литературный проход выполнен (${detail.beforeChars} → ${detail.afterChars} символов)${auditPart}.`,
+        message,
         ts: Date.now(),
       }].slice(-40));
       setShowLlmLog(true);
@@ -284,13 +289,13 @@ export default function App() {
   useEffect(() => {
     if (!isAutonomousApk()) return;
     const handleChapterVolume = (event: Event) => {
-      const detail = (event as CustomEvent<{ words?: number; segments?: number; target?: number; complete?: boolean }>).detail;
+      const detail = (event as CustomEvent<{ words?: number; segments?: number; target?: number; complete?: boolean; stopReason?: string }>).detail;
       if (typeof detail?.words !== "number" || typeof detail?.segments !== "number" || typeof detail?.target !== "number") return;
       setLlmLogs((prev) => [...prev, {
         level: detail.complete ? "success" : "warn",
         message: detail.complete
           ? `Глава собрана: ${detail.words}/${detail.target} слов, фрагментов: ${detail.segments}.`
-          : `Глава короче цели: ${detail.words}/${detail.target} слов после ${detail.segments} фрагментов.`,
+          : `Глава короче цели: ${detail.words}/${detail.target} слов после ${detail.segments} фрагментов${detail.stopReason ? ` — дописывание остановлено: ${detail.stopReason}` : ""}.`,
         ts: Date.now(),
       }].slice(-40));
       setShowLlmLog(true);
@@ -2388,6 +2393,32 @@ export default function App() {
               </button>
             </div>
 
+              <div className="rounded-xl border border-slate-600/40 bg-slate-950/40 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="font-semibold text-slate-100 text-[12px]">Память ключей и моделей Gemini</label>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-md border border-slate-700 bg-slate-900/60 text-slate-300">ведётся сама</span>
+                </div>
+                <p className="text-[10px] leading-relaxed text-slate-400">
+                  Карточка стоит первой намеренно: ручной сброс для работы не нужен. Приложение помнит, какая модель недоступна конкретному ключу и у какой исчерпана дневная квота — такая модель снимается до сброса квот Google (полночь по Тихоокеанскому времени), а остальные модели того же ключа продолжают работать. Пометки живут шесть часов и снимаются сами.
+                </p>
+                <div className="space-y-1 text-[10px]">
+                  {geminiHealth && geminiHealth.paused.length > 0 ? geminiHealth.paused.map((item) => (
+                    <p key={item.suffix} className="text-amber-200">Ключ ··{item.suffix} на паузе до {new Date(item.until).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })} — {item.reason}.</p>
+                  )) : (
+                    <p className="text-emerald-300">Ключи Gemini на паузе не числятся.</p>
+                  )}
+                  {geminiHealth && geminiHealth.dead.length > 0 && <p className="text-slate-400">Сняты по памяти ключа: {geminiHealth.dead.map((item) => `${item.model} — ${item.reason} до ${new Date(item.until).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}`).join("; ")}.</p>}
+                  {geminiHealth && geminiHealth.cooling.length > 0 && <p className="text-slate-400">Остывают: {geminiHealth.cooling.join(", ")}.</p>}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { resetGeminiModelMemory(); setGeminiHealth(geminiHealthSummary()); }}
+                  className="text-[10px] px-2.5 py-1.5 rounded-lg border border-slate-600/60 text-slate-200 hover:border-amber-500/60 hover:text-amber-200 cursor-pointer"
+                >
+                  Сбросить память и перепробовать все ключи заново
+                </button>
+              </div>
+
             <div className="p-5 space-y-3 text-xs overflow-y-auto flex-1">
               {(
                 [
@@ -2491,32 +2522,6 @@ export default function App() {
                   {GEMINI_LITERARY_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
                 </select>
                 <p className="text-[10px] leading-relaxed text-slate-400">{GEMINI_LITERARY_MODELS.find((model) => model.id === geminiModelDraft)?.description}</p>
-              </div>
-
-              <div className="rounded-xl border border-slate-600/40 bg-slate-950/40 p-3.5 space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <label className="font-semibold text-slate-100 text-[12px]">Память ключей и моделей Gemini</label>
-                  <span className="text-[9px] px-1.5 py-0.5 rounded-md border border-slate-700 bg-slate-900/60 text-slate-300">ведётся сама</span>
-                </div>
-                <p className="text-[10px] leading-relaxed text-slate-400">
-                  Приложение запоминает, какие модели недоступны конкретному ключу и какой ключ упёрся в дневную квоту: такой ключ снимается с работы, а не перепробуется на каждом запросе. Если ключ уже ожил (например, квота обновилась) — сбросьте память.
-                </p>
-                <div className="space-y-1 text-[10px]">
-                  {geminiHealth && geminiHealth.paused.length > 0 ? geminiHealth.paused.map((item) => (
-                    <p key={item.suffix} className="text-amber-200">Ключ ··{item.suffix} на паузе до {new Date(item.until).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })} — {item.reason}.</p>
-                  )) : (
-                    <p className="text-emerald-300">Ключи Gemini на паузе не числятся.</p>
-                  )}
-                  {geminiHealth && geminiHealth.dead.length > 0 && <p className="text-slate-400">Недоступны этому ключу: {geminiHealth.dead.join(", ")}.</p>}
-                  {geminiHealth && geminiHealth.cooling.length > 0 && <p className="text-slate-400">Остывают: {geminiHealth.cooling.join(", ")}.</p>}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => { resetGeminiModelMemory(); setGeminiHealth(geminiHealthSummary()); }}
-                  className="text-[10px] px-2.5 py-1.5 rounded-lg border border-slate-600/60 text-slate-200 hover:border-amber-500/60 hover:text-amber-200 cursor-pointer"
-                >
-                  Сбросить память и перепробовать все ключи заново
-                </button>
               </div>
 
               <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/20 p-3.5 space-y-2.5">
