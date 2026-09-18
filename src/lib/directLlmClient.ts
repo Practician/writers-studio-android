@@ -130,7 +130,14 @@ const GEMINI_DEAD_TTL_MS = 6 * 60 * 60 * 1000;
 const GEMINI_QUOTA_COOLDOWN_MS = 3 * 60 * 1000;
 const GEMINI_QUOTA_COOLDOWN_HARD_MS = 30 * 60 * 1000;
 /** 500/502/503/504 и пустой ответ — перегрузка: пауза на минуту. */
+// Перегрузка Google держится минутами. Прежние 60 с отката возвращали сломанную
+// модель в работу внутри той же главы: в живом журнале 18.09.2026 gemini-3.7-flash
+// отдавала 503 трижды (13:08, 13:10 и 13:12), и каждая дописка главы теряла на ней
+// до 50 секунд, пока рабочая модель ждала очереди. Теперь откат растёт с числом
+// перегрузок подряд: 1 минута → 5 минут → 15 минут.
 const GEMINI_OVERLOAD_COOLDOWN_MS = 60 * 1000;
+const GEMINI_OVERLOAD_COOLDOWN_MEDIUM_MS = 5 * 60 * 1000;
+const GEMINI_OVERLOAD_COOLDOWN_HARD_MS = 15 * 60 * 1000;
 /**
  * Паузы перед повтором ТОЙ ЖЕ модели при транзиентных 5xx. Раньше APK на 503/504
  * сразу менял модель, и в живом журнале это выглядело циклом 3.8 → 3.6 →
@@ -188,6 +195,10 @@ type GeminiModelMemory = {
   deadReason?: Record<string, string>;
   cooling: Record<string, number>;
   quotaHits: Record<string, number>;
+  /** Сколько раз подряд модель попадала на 5xx: откат растёт (1 мин → 5 → 15). */
+  overloadHits: Record<string, number>;
+  /** Модель, последней отдавшая текст: с неё начинается следующая дописка главы. */
+  lastGood?: string;
   /** Пауза всего ключа (дневная квота/отказ) — не путать с остыванием модели. */
   keyPauseUntil?: number;
   /** Сколько раз ключ попадался на дневной квоте: решает короткую паузу или длинную. */
@@ -236,11 +247,12 @@ export function resetGeminiModelMemory(): void {
 
 function geminiMemoryFor(key: string): GeminiModelMemory {
   const memory = loadGeminiMemory();
-  const entry = memory[key.slice(-4)] || (memory[key.slice(-4)] = { dead: {}, cooling: {}, quotaHits: {} });
+  const entry = memory[key.slice(-4)] || (memory[key.slice(-4)] = { dead: {}, cooling: {}, quotaHits: {}, overloadHits: {} });
   entry.dead ||= {};
   entry.deadReason ||= {};
   entry.cooling ||= {};
   entry.quotaHits ||= {};
+  entry.overloadHits ||= {};
   return entry;
 }
 
@@ -436,8 +448,15 @@ function geminiModelChain(primary: string, key: string): GeminiChainPlan {
   // снова сжигал бы восемь вызовов впустую — именно это выглядело «зацикливанием».
   // Остывающие модели не повод пропускать ключ: их пауза короткая, и повтор нужен.
   const exhausted = available.length === 0 && cooling.length === 0 && skipped.length > 0;
+  // Липкость к последней успешной модели: она встаёт в голову цепочки. Иначе после
+  // каждой дописки главы выбор возвращался к первому профилю списка, и перегруженная
+  // модель опробовалась заново каждую минуту, хотя рабочая была проверена секунду назад
+  // (живой журнал 18.09.2026: 2.5-flash отдала 3841 символ, а следующая дописка снова
+  // ушла на 3.7-flash и сожгла на её 503 почти минуту).
+  const preferred = memory.lastGood && available.includes(memory.lastGood) ? memory.lastGood : null;
+  const availableOrder = preferred ? [preferred, ...available.filter((id) => id !== preferred)] : available;
   return {
-    order: exhausted ? [] : [...available, ...cooling.map((entry) => entry.model)],
+    order: exhausted ? [] : [...availableOrder, ...cooling.map((entry) => entry.model)],
     skipped,
     cooling,
     exhausted,
@@ -476,18 +495,30 @@ function recordGeminiOutcome(key: string, model: string, status: number, ok: boo
     return;
   }
   if (status === 500 || status === 502 || status === 503 || status === 504 || (ok && !hasText)) {
-    memory.cooling[model] = now + GEMINI_OVERLOAD_COOLDOWN_MS;
+    const hits = (memory.overloadHits[model] ?? 0) + 1;
+    memory.overloadHits[model] = hits;
+    memory.cooling[model] = now + (hits >= 3
+      ? GEMINI_OVERLOAD_COOLDOWN_HARD_MS
+      : hits === 2
+        ? GEMINI_OVERLOAD_COOLDOWN_MEDIUM_MS
+        : GEMINI_OVERLOAD_COOLDOWN_MS);
     delete memory.dead[model];
     delete memory.deadReason[model];
     saveGeminiMemory();
     return;
   }
   if (ok && hasText) {
-    const changed = model in memory.dead || model in memory.cooling || model in memory.quotaHits;
+    const changed = model in memory.dead || model in memory.cooling || model in memory.quotaHits
+      || model in memory.overloadHits || memory.lastGood !== model;
     delete memory.dead[model];
     delete memory.deadReason[model];
     delete memory.cooling[model];
     delete memory.quotaHits[model];
+    delete memory.overloadHits[model];
+    // Запоминаем модель, которая реально отдала текст: следующая дописка главы идёт
+    // прямо на неё, а не на модель, чей минутный откат только что истёк. Без этого
+    // каждая дописка начиналась с перегруженной модели и теряла на 503 до минуты.
+    memory.lastGood = model;
     if (changed) saveGeminiMemory();
   }
 }
@@ -636,6 +667,8 @@ function notifyHumanizePass(
     variantTaken?: boolean;
     /** Честное объяснение, почему вариант не взят. */
     growthNote?: string;
+    /** Готовая строка итога прохода — вместо тавтологического «N → N символов». */
+    summary?: string;
   },
 ): void {
   if (typeof window === "undefined") return;
@@ -1059,7 +1092,10 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       // проекта ключа. Сначала короткий backoff и повтор ТОЙ ЖЕ модели, и только
       // потом ротация: иначе один 503 выглядит циклом по всем моделям ключа.
       let overloadRetries = 0;
-      while (!response.ok && isTransientGeminiStatus(response.status) && overloadRetries < GEMINI_SERVER_RETRY_DELAYS_MS.length) {
+      // Повторы 5xx стоят до трёх round-trip'ов, поэтому модель, уже дважды
+      // перегруженная на этом ключе, не повторяется — сразу ротация.
+      const overloadHistory = geminiMemoryFor(key).overloadHits?.[effectiveModel] ?? 0;
+      while (!response.ok && isTransientGeminiStatus(response.status) && overloadHistory < 2 && overloadRetries < GEMINI_SERVER_RETRY_DELAYS_MS.length) {
         const delay = GEMINI_SERVER_RETRY_DELAYS_MS[overloadRetries];
         overloadRetries += 1;
         emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `Перегрузка Gemini (HTTP ${response.status}): повтор модели «${effectiveModel}» через ${(delay / 1000).toFixed(1)} с.`, { chars: 0 }));
@@ -1604,12 +1640,28 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         };
         const generated = await generateHumanizedChapter(input, pipelineGenerate);
         const words = countGeneratedWords(generated.text);
-        notifyChapterVolume(words, generated.humanizeReport.scenesGenerated || 1, CHAPTER_TARGET_WORDS, words >= CHAPTER_TARGET_WORDS);
+        const humanizedSegments = generated.humanizeReport.scenesGenerated || 1;
+        // Почему глава короче цели — в журнал: этот путь вообще не называл причину,
+        // и автор видел только «2693/3300 слов после 6 фрагментов» (живой журнал 18.09.2026).
+        notifyChapterVolume(
+          words,
+          humanizedSegments,
+          CHAPTER_TARGET_WORDS,
+          words >= CHAPTER_TARGET_WORDS,
+          words >= CHAPTER_TARGET_WORDS
+            ? undefined
+            : `литературный проход собрал ${humanizedSegments} сцен и остановился — до цели главы не хватило ${CHAPTER_TARGET_WORDS - words} слов`,
+        );
         notifyHumanizePass(generated.humanizeReport.depth, generated.text.length, generated.text.length, {
           scoreBefore: generated.humanizeReport.scoreBefore,
           scoreAfter: generated.humanizeReport.scoreAfter,
           gatePassed: generated.humanizeReport.gatePassed,
           passesRun: generated.humanizeReport.passesRun,
+          variantTaken: generated.humanizeReport.gatePassed,
+          // Раньше сюда дважды передавалась одна и та же длина, и журнал писал
+          // «17924 → 17924 символов» — тавтологию, по которой нельзя понять результат
+          // прохода (живой журнал 18.09.2026). Теперь итог честный.
+          summary: `литературный проход завершён: текст ${generated.text.length} символов, сцен: ${humanizedSegments}`,
         });
         return json({
           result: generated.text,

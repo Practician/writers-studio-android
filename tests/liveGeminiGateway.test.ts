@@ -175,3 +175,43 @@ test("ключ, не понимающий thinkingConfig, повторяется
     await gateway.close();
   }
 });
+
+/**
+ * Живой журнал 18.09.2026 показал два дефекта выбора модели: после успешной
+ * дописки (2.5-flash отдала 3841 символ) следующая начиналась заново с первого
+ * профиля списка, попадала на 503 и теряла до минуты. Здесь проверяется, что
+ * выбор липнет к последней рабочей модели, а дважды перегруженная уходит в откат.
+ */
+test("повторная дописка главы идёт на модель, которая уже отдала текст, а не на перегруженную", async () => {
+  resetGeminiModelMemory();
+  const gateway = await startGateway((_key, model) => (
+    model === "gemini-2.5-flash"
+      ? { status: 200, payload: ok("Фрагмент главы.", "STOP") }
+      : { status: 503, payload: { error: { code: 503, message: "The model is overloaded. Please try again later.", status: "UNAVAILABLE" } } }
+  ));
+  traces.length = 0;
+  __setGeminiBaseUrlForTests(gateway.url);
+  const request = {
+    provider: "gemini" as const,
+    model: "gemini-3.8-flash",
+    apiKeys: { gemini: "live-key-stickiness-0001" },
+    prompt: "Продолжи главу.",
+    maxTokens: 6_144,
+  };
+  try {
+    const first = await directGenerate(request);
+    assert.ok(first.includes("Фрагмент главы"), "первый запрос должен дойти до рабочей модели");
+    const overloadedHits = gateway.hits.filter((hit) => hit.model === "gemini-3.8-flash").length;
+    assert.ok(overloadedHits >= 1, "перегруженная модель должна быть опробована в первом запросе");
+
+    const afterFirst = gateway.hits.length;
+    const second = await directGenerate(request);
+    assert.ok(second.includes("Фрагмент главы"), "вторая дописка должна получить текст");
+    const secondCall = gateway.hits.slice(afterFirst);
+    assert.equal(secondCall[0]?.model, "gemini-2.5-flash", "вторая дописка начинается с модели, которая уже отдала текст");
+    assert.equal(secondCall.filter((hit) => hit.model === "gemini-3.8-flash").length, 0, "перегруженная модель не пробуется в следующих дописках");
+  } finally {
+    __setGeminiBaseUrlForTests(null);
+    await gateway.close();
+  }
+});

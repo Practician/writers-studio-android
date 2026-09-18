@@ -263,7 +263,7 @@ export default function App() {
   useEffect(() => {
     if (!isAutonomousApk()) return;
     const handleHumanizePass = (event: Event) => {
-      const detail = (event as CustomEvent<{ depth?: string; beforeChars?: number; afterChars?: number; scoreBefore?: number; scoreAfter?: number; gatePassed?: boolean; passesRun?: number; variantTaken?: boolean; growthNote?: string }>).detail;
+      const detail = (event as CustomEvent<{ depth?: string; beforeChars?: number; afterChars?: number; scoreBefore?: number; scoreAfter?: number; gatePassed?: boolean; passesRun?: number; variantTaken?: boolean; growthNote?: string; summary?: string }>).detail;
       if (!detail?.depth || typeof detail.beforeChars !== "number" || typeof detail.afterChars !== "number") return;
       const hasAudit = typeof detail.scoreBefore === "number" && typeof detail.scoreAfter === "number";
       const auditPart = hasAudit
@@ -271,9 +271,13 @@ export default function App() {
         : "";
       // Вариант прохода мог быть отброшен (раздутие сверх потолка или сбой прохода) —
       // тогда журнал говорит об этом прямо, а не рапортует «проход выполнен».
+      // Три состояния: отброшенный вариант (growthNote), готовый итог прохода (summary)
+      // и прежний формат «до → после» для путей, где обе длины считаются честно.
       const message = detail.growthNote
         ? `Очеловечивание ${detail.depth}: ${detail.growthNote}${auditPart}.`
-        : `Очеловечивание ${detail.depth}: отдельный литературный проход выполнен (${detail.beforeChars} → ${detail.afterChars} символов)${auditPart}.`;
+        : detail.summary
+          ? `Очеловечивание ${detail.depth}: ${detail.summary}${auditPart}.`
+          : `Очеловечивание ${detail.depth}: отдельный литературный проход выполнен (${detail.beforeChars} → ${detail.afterChars} символов)${auditPart}.`;
       setLlmLogs((prev) => [...prev, {
         level: detail.growthNote || (hasAudit && !detail.gatePassed) ? "warn" : "success",
         provider: llmProvider === "auto" ? undefined : llmProvider,
