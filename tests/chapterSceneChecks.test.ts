@@ -109,6 +109,25 @@ test("молчание и «замер» упираются в потолок г
   assert.match(buildReactionNotes(2, 3), /реакция на новое событие/);
 });
 
+test("потолок главы выбран — требование сужается до выполнимого нуля", () => {
+  // Живой прогон 20.09.2026, 23:43: при трёх молчаниях и четырёх «замер» в главе каждая
+  // следующая сцена отвергалась с одним и тем же замечанием («при 3 уже в главе, потолок 2»),
+  // невыполнимым ни при каком тексте, и сгорала во всех трёх попытках (сцены 6, 9, 10).
+  assert.notEqual(silenceIssue("Он не ответил.", MAX_SILENT_REACTIONS + 1), "");
+  assert.equal(silenceIssue("Он подошёл к щитку и поднял фонарь.", MAX_SILENT_REACTIONS + 1), "");
+  assert.notEqual(freezeIssue("Илья замер.", MAX_FREEZE_REACTIONS + 1), "");
+  assert.equal(freezeIssue("Илья шагнул к ящику и поднял крышку.", MAX_FREEZE_REACTIONS + 1), "");
+  assert.match(silenceIssue("Он не ответил.", MAX_SILENT_REACTIONS + 1), /уже выбран/);
+});
+
+test("в одной сцене — одна реакция каждого рода", () => {
+  assert.equal(silenceIssue("Он не ответил.", 0), "");
+  assert.notEqual(silenceIssue("Он не ответил. Она промолчала.", 0), "");
+  assert.match(silenceIssue("Он не ответил. Она промолчала.", 0), /допускается одно/);
+  assert.equal(freezeIssue("Илья замер.", 0), "");
+  assert.notEqual(freezeIssue("Илья замер. Васька застыл.", 0), "");
+});
+
 test("служебные функции не портят счёт слов", () => {
   assert.equal(closingSentences("Первое. Второе. Третье."), "Третье.");
   assert.equal(countWordsRu("Он не ответил."), 3);

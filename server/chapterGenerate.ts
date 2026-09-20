@@ -610,6 +610,7 @@ ${characterNotes ? `\n${characterNotes}\n` : ""}
 - Фокус этого куска: ${focus}
 
 Объём: ${scenePlan.minWords}–${scenePlan.maxWords} слов (полноценный кусок главы, не набросок). Раскрой действие и восприятие. Не добивай объём пустыми повторами и не пересказывай уже написанное.
+Ритм фраз: длину предложений чередуй, но без рубцов. Хотя бы одно длинное предложение на 25+ слов в сцене, а совсем коротких (до пяти слов) — не больше двух пятых от всех. Сплошной обмен короткими репликами на всю сцену — подпись модели, а не темп.
 
 ${previousTail ? `Продолжай сразу после этого хвоста (не повторяй его дословно и не пересказывай теми же фразами):\n"""\n${previousTail}\n"""\n` : "Это начало главы после предыдущих событий канона.\n"}
 ${scenePlan.seamNotes ? `${scenePlan.seamNotes}\n` : ""}
@@ -820,24 +821,45 @@ export function buildLedgerNotes(closedEvents: string[]): string {
 export function buildReactionNotes(silentUsed: number, freezeUsed: number): string {
   const lines: string[] = [];
   lines.push(silentUsed >= MAX_SILENT_REACTIONS
-    ? `- «Ничего не ответил / промолчал» уже ${silentUsed} раза — этот ход больше не повторяй: персонаж отвечает, переспрашивает, перебивает или делает что-то неожиданное.`
-    : "- Заканчивать реплики молчанием можно не больше двух раз за главу.");
+    ? `- «Ничего не ответил / промолчал» уже ${silentUsed} раза — этот ход больше не повторяй: потолок главы выбран, в этой сцене персонаж отвечает, переспрашивает, перебивает или делает что-то неожиданное.`
+    : `- Заканчивать реплики молчанием можно не больше двух раз за главу и один раз на сцену (в главе уже ${silentUsed}).`);
   if (freezeUsed >= MAX_FREEZE_REACTIONS) {
-    lines.push(`- «Замер / застыл» уже ${freezeUsed} раза — реакция на новое событие должна быть другой: ошибка, злость, насмешка, жадность, усталость.`);
+    lines.push(`- «Замер / застыл» уже ${freezeUsed} раза — потолок главы выбран: в этой сцене этого слова быть не должно, реакция на новое событие должна быть другой (ошибка, злость, насмешка, жадность, усталость).`);
+  } else {
+    lines.push(`- «Замер / застыл» — не больше одного раза на сцену и трёх на главу (в главе уже ${freezeUsed}).`);
   }
   return lines.join("\n");
 }
 
 export function silenceIssue(text: string, used: number): string {
   const found = countPhrase(text, SILENT_SRC);
-  if (!found || used + found <= MAX_SILENT_REACTIONS) return "";
-  return `в сцене ${found} «не ответил/промолчал» при ${used} уже в главе (потолок ${MAX_SILENT_REACTIONS})`;
+  if (!found) return "";
+  if (found > 1) {
+    return `в сцене ${found} места «не ответил/промолчал» — на одну сцену допускается одно`;
+  }
+  // Потолок уже выбран прошлыми сценами. Требовать «меньше» бессмысленно: условие
+  // «в главе не больше двух» при трёх уже написанных невыполнимо при любом тексте,
+  // и сцена сгорает во всех трёх попытках (живой прогон 20.09.2026, 23:43 — сцены
+  // 6, 9, 10: три перезапроса подряд с одним и тем же замечанием, затем приёмка
+  // «с замечаниями»). За выбранным потолком требование сужается до выполнимого нуля.
+  if (used >= MAX_SILENT_REACTIONS) {
+    return `в сцене ${found} «не ответил/промолчал», а потолок ${MAX_SILENT_REACTIONS} на главу уже выбран — в этой сцене молчания быть не должно`;
+  }
+  if (used + found <= MAX_SILENT_REACTIONS) return "";
+  return `в сцене ${found} «не ответил/промолчал», в главе уже ${used} (потолок ${MAX_SILENT_REACTIONS}) — оставь не больше ${MAX_SILENT_REACTIONS - used}`;
 }
 
 export function freezeIssue(text: string, used: number): string {
   const found = countPhrase(text, FREEZE_SRC);
-  if (!found || used + found <= MAX_FREEZE_REACTIONS) return "";
-  return `в сцене ${found} «замер/застыл» при ${used} уже в главе (потолок ${MAX_FREEZE_REACTIONS})`;
+  if (!found) return "";
+  if (found > 1) {
+    return `в сцене ${found} места «замер/застыл» — на одну сцену допускается одно`;
+  }
+  if (used >= MAX_FREEZE_REACTIONS) {
+    return `в сцене ${found} «замер/застыл», а потолок ${MAX_FREEZE_REACTIONS} на главу уже выбран — реакция на новое событие должна быть другой (ошибка, злость, насмешка, усталость)`;
+  }
+  if (used + found <= MAX_FREEZE_REACTIONS) return "";
+  return `в сцене ${found} «замер/застыл», в главе уже ${used} (потолок ${MAX_FREEZE_REACTIONS}) — оставь не больше ${MAX_FREEZE_REACTIONS - used}`;
 }
 
 export function buildSingleChapterPrompt(input: ChapterGenerateInput, styleExtras: string): string {
@@ -1351,8 +1373,9 @@ async function generateScenesDraft(
   sample: string,
   depth: HumanizeDepthConfig,
   candidateIndex: number,
+  candidatesN: number,
   noteStep?: (label: string) => void,
-): Promise<{ draft: string; scenesGenerated: number; topupScenes: number; narrationPerson: NarrationPerson }> {
+): Promise<{ draft: string; scenesGenerated: number; topupScenes: number; rejectedScenes: number; narrationPerson: NarrationPerson }> {
   const scenes: string[] = [];
   let tail = input.previousChapter ? input.previousChapter.slice(-PREVIOUS_TAIL_SCENE_CHARS) : "";
   // Лицо повествования фиксируется ДО первой сцены — по исходнику (предыдущая глава,
@@ -1418,7 +1441,13 @@ async function generateScenesDraft(
         + (candidateIndex > 0 ? `\n- Альтернативный черновик #${candidateIndex + 1}: другие формулировки, тот же сюжет.` : "")
         + (attempt > 0 ? `\n- СТРОГО по-русски, без латиницы. Не меньше ${band[0]} слов.` : "")
         + retryNotes;
-      noteStep?.(`сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}, попытка ${attempt + 1}`);
+      // Номер варианта обязателен в метке: при трёх черновиках каждый шаг повторяется
+      // трижды, и без него журнал выглядит как «сцена 6, попытка 1 ×3» — три запроса
+      // на один шаг (живой прогон 20.09.2026, 23:44: 68 запросов на 12 сцен).
+      noteStep?.(
+        `сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}, попытка ${attempt + 1}`
+        + (candidatesN > 1 ? ` · вариант ${candidateIndex + 1}/${candidatesN}` : ""),
+      );
       const sceneText = await generate({
         model: input.model,
         systemInstruction,
@@ -1515,7 +1544,7 @@ async function generateScenesDraft(
     tail = cleaned.slice(-PREVIOUS_TAIL_SCENE_CHARS);
     const sceneWords = countWordsRu(cleaned);
     emitChapterStep(
-      `Сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}: ${cleaned.length} знаков, ${sceneWords} слов, сравнений ${countSimiles(cleaned)}, молчаний ${silentInScene}`
+      `Сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}${candidatesN > 1 ? ` · вариант ${candidateIndex + 1}/${candidatesN}` : ""}: ${cleaned.length} знаков, ${sceneWords} слов, сравнений ${countSimiles(cleaned)}, молчаний ${silentInScene}`
       + (softNotes.length ? `; принята с замечаниями: ${softNotes.join("; ")}.` : "."),
       softNotes.length ? "warn" : "info",
     );
@@ -1523,7 +1552,7 @@ async function generateScenesDraft(
   if (rejectedScenes) {
     console.warn(`Отброшено бракованных битов: ${rejectedScenes} — в главу они не вошли.`);
   }
-  return { draft: scenes.join("\n\n"), scenesGenerated: scenes.length, topupScenes, narrationPerson };
+  return { draft: scenes.join("\n\n"), scenesGenerated: scenes.length, topupScenes, rejectedScenes, narrationPerson };
 }
 
 export async function generateHumanizedChapter(
@@ -1564,15 +1593,20 @@ export async function generateHumanizedChapter(
   let mode: "single" | "scenes" = "single";
   let scenesGenerated = 0;
   const rawCandidates: Array<{ text: string; score: AiTellScore; index: number }> = [];
-  const candidateMeta: Array<{ scenesGenerated: number; topupScenes: number; narrationPerson: NarrationPerson }> = [];
+  const candidateMeta: Array<{ scenesGenerated: number; topupScenes: number; rejectedScenes: number; narrationPerson: NarrationPerson }> = [];
 
   if (depth.sceneGeneration) {
     const beats = await planBeats(input, countedGenerate, noteStep);
     plannedBeats = beats.length;
     if (beats.length >= 3) {
       mode = "scenes";
+      if (candidatesN > 1) {
+        emitChapterStep(
+          `Черновиков главы: ${candidatesN} — каждый вариант пишет все сцены заново, в дело идёт лучший по локальному аудиту (это ${candidatesN}× запросов к модели).`,
+        );
+      }
       for (let cand = 0; cand < candidatesN; cand += 1) {
-        const { draft, scenesGenerated: sg, topupScenes, narrationPerson } = await generateScenesDraft(
+        const { draft, scenesGenerated: sg, topupScenes, rejectedScenes, narrationPerson } = await generateScenesDraft(
           input,
           countedGenerate,
           beats,
@@ -1582,10 +1616,11 @@ export async function generateHumanizedChapter(
           sample,
           depth,
           cand,
+          candidatesN,
           noteStep,
         );
         scenesGenerated = sg;
-        candidateMeta[cand] = { scenesGenerated: sg, topupScenes, narrationPerson };
+        candidateMeta[cand] = { scenesGenerated: sg, topupScenes, rejectedScenes, narrationPerson };
         rawCandidates.push({ text: draft, score: aiTellScore(draft), index: cand });
         console.warn(
           `Chapter candidate ${cand + 1}/${candidatesN}: AI-tell=${rawCandidates[cand].score.score} burst=${rawCandidates[cand].score.burstiness.toFixed(2)}`,
@@ -1622,7 +1657,7 @@ export async function generateHumanizedChapter(
   const chosen = pickBestChapterCandidate(rawCandidates, depth.scoreGate, depth.minBurstiness);
   console.warn(`Chose chapter candidate #${chosen.index + 1} (score=${chosen.score.score})`);
   const chosenMeta = candidateMeta[chosen.index]
-    || { scenesGenerated, topupScenes: 0, narrationPerson: "unknown" as NarrationPerson };
+    || { scenesGenerated, topupScenes: 0, rejectedScenes: 0, narrationPerson: "unknown" as NarrationPerson };
 
   const before = chosen.score;
   noteStep("литературный проход (доводка аудита)");
@@ -1641,7 +1676,7 @@ export async function generateHumanizedChapter(
   const stepsSummary = [...stepCounts.entries()].map(([label, count]) => `${label} ×${count}`).join("; ");
   emitChapterStep(`Итог конвейера: запросов к модели ${requestNo} — ${stepsSummary}.`);
   emitChapterStep(
-    `Сцен в главе: ${chosenMeta.scenesGenerated} (план ${plannedBeats} битов${chosenMeta.topupScenes ? `, добор ${chosenMeta.topupScenes}` : ""}), слов ${countWordsRu(finalHygiene.text)}, режим ${mode === "scenes" ? "сцены" : "цельный проход"}.`,
+    `Сцен в главе: ${chosenMeta.scenesGenerated} (план ${plannedBeats} битов${chosenMeta.topupScenes ? `, добор ${chosenMeta.topupScenes}` : ""}${chosenMeta.rejectedScenes ? `, отброшено бракованных битов ${chosenMeta.rejectedScenes}` : ""}), слов ${countWordsRu(finalHygiene.text)}, режим ${mode === "scenes" ? "сцены" : "цельный проход"}, в дело пошёл вариант ${chosen.index + 1}/${candidatesN}.`,
   );
 
   return {
