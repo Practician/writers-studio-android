@@ -30,6 +30,10 @@ import {
   voicePersonaBlock,
   voicePresetById,
   MIN_BURSTINESS_WORDS,
+  DISCOURSE_FLOW_CHECKLIST,
+  HUMAN_POSITIVE_MARKERS_CHECKLIST,
+  NARRATIVE_ARCHITECTURE_CHECKLIST,
+  modelFingerprintGuidance,
 } from "./humanStyle";
 import { sanitizeGeneratedText, type TextHygieneReport } from "./textHygiene";
 
@@ -451,6 +455,52 @@ export function topupBeatFor(beats: ChapterBeat[], index: number, wordsSoFar: nu
  *  обнаружение падает лишь с 95,5% до 93,9%. Поэтому приёмы уходят в промпт СЦЕНЫ,
  *  где текст рождается, а не только в аудит после него.
  *  Берётся 3–5 приёмов, а не весь список: полный набор правил сам становится шаблоном. */
+/** Архитектурные приёмы главы. Полный чек-лист sepia (server/humanStyleEnhanced.ts,
+ *  NARRATIVE_ARCHITECTURE_CHECKLIST и DISCURSE/HUMAN-маркеры рядом с ним) до этой правки
+ *  в живой конвейер не доходил вовсе: он был ре-экспортирован в server/humanStyle.ts и
+ *  импортирован в src/lib/directLlmClient.ts, но там не использовался ни разу. Здесь
+ *  оставлены пункты, которых нет в SCENE_SEPIA_MOVES, и подаются по три за сцену со
+ *  сдвигом на бит: полный набор сразу сам становится новым шаблоном. */
+export const CHAPTER_ARCHITECTURE_MOVES = [
+  "Тема: не проговаривай мораль — ни рассказчиком, ни финальным диалогом-рассуждением.",
+  "Не давай всем нитям сойтись: одну деталь оставь без разрешения, одно следствие — незакрытым.",
+  "Не веди абзацы одной цепочкой «что случилось → почему → что вышло»: одно место сцепи сравнением (тот же эпизод или человек в другой раз) либо возражением — кто-то не согласен с предыдущим абзацем.",
+  "Меняй текстуру соседних сцен: плотная сцена — потом короткая и быстрая; насыщенный диалог — потом сжатое изложение. Одну интонацию на всю главу не держи.",
+  "Упомяни что-то по-настоящему конкретное и существующее: книгу, песню, марку, место, бытовую мелочь этого мира.",
+  "Нового важного человека вводи репликой или поступком, а не описанием внешности.",
+  "Не своди развязку к «герой сам выбрал → принял случившееся → вырос»: часть решений отдай случаю, другим людям или обстоятельствам.",
+  "Не выноси герою однозначного вердикта — ни хвалы, ни осуждения: амбивалентность ближе к человеческому письму.",
+  "Между знакомыми не всё в порядке: сеть отношений не должна быть плотной и равномерно тёплой — кто-то не знаком, кто-то в ссоре.",
+];
+
+/** Те же три чек-листа целиком — один раз на главу, в промпт плана: ×36 вызовов сцен
+ *  такой объём удорожает, а архитектура решается именно на плане. */
+export const CHAPTER_ARCHITECTURE_FULL = [
+  NARRATIVE_ARCHITECTURE_CHECKLIST,
+  DISCOURSE_FLOW_CHECKLIST,
+  HUMAN_POSITIVE_MARKERS_CHECKLIST,
+].join("\n\n");
+
+/** Три пункта архитектуры на этот бит, со сдвигом: соседние сцены получают разные
+ *  тройки, и требование не превращается в один и тот же список для всей главы. */
+export function architectureNotes(beatIndex: number): string {
+  const total = CHAPTER_ARCHITECTURE_MOVES.length;
+  const picks = [0, 1, 2].map((step) => CHAPTER_ARCHITECTURE_MOVES[(((beatIndex + step) % total) + total) % total]);
+  return `АРХИТЕКТУРА ГЛАВЫ (в этом куске — только эти три пункта, остальные не тяни):
+${picks.map((line) => `- ${line}`).join("\n")}`;
+}
+
+/** Провайдер пишущей модели — только чтобы включить гайд по тикам именно этой модели
+ *  (server/humanStyleEnhanced.ts, modelFingerprintGuidance). Для DeepSeek гайд привязан
+ *  к модели, а не к хосту, поэтому включается и при маршрутизации через другого провайдера:
+ *  гайд чужой модели портит текст. */
+export function providerOfModel(model: string): string {
+  const m = String(model || "").toLowerCase();
+  if (m.includes("deepseek")) return "nvidia";
+  if (m.includes("gemini")) return "gemini";
+  return "";
+}
+
 export const SCENE_SEPIA_MOVES = `АРХИТЕКТУРА СЦЕНЫ (выбери 3–5 приёмов, не все сразу — их полный набор сам по себе читается как шаблон):
 - Не объясняй смысл сцены: ни от рассказчика, ни в финальной фразе. Смысл собирается из поступков.
 - Не выстраивай цепочку «причина → следствие → вывод» без зазоров. Одну деталь оставь необъяснённой, одно следствие — незакрытым.
@@ -611,6 +661,8 @@ ${characterNotes ? `\n${characterNotes}\n` : ""}
 
 Объём: ${scenePlan.minWords}–${scenePlan.maxWords} слов (полноценный кусок главы, не набросок). Раскрой действие и восприятие. Не добивай объём пустыми повторами и не пересказывай уже написанное.
 Ритм фраз: длину предложений чередуй, но без рубцов. Хотя бы одно длинное предложение на 25+ слов в сцене, а совсем коротких (до пяти слов) — не больше двух пятых от всех. Сплошной обмен короткими репликами на всю сцену — подпись модели, а не темп.
+
+${architectureNotes(beatIndex)}${modelFingerprintGuidance(providerOfModel(input.model), input.model)}
 
 ${previousTail ? `Продолжай сразу после этого хвоста (не повторяй его дословно и не пересказывай теми же фразами):\n"""\n${previousTail}\n"""\n` : "Это начало главы после предыдущих событий канона.\n"}
 ${scenePlan.seamNotes ? `${scenePlan.seamNotes}\n` : ""}
@@ -1329,7 +1381,7 @@ async function planBeats(
     const planRaw = await generate({
       model: input.model,
       systemInstruction: "Ты сценарист-структуралист. Составляешь только биты сцены, без художественной прозы. Все формулировки строго на русском, без английских слов. Верни только JSON.",
-      contents: buildBeatPlanPrompt(input),
+      contents: `${buildBeatPlanPrompt(input)}\n\n${CHAPTER_ARCHITECTURE_FULL}`,
       temperature: 0.35,
       responseMimeType: "application/json",
       responseSchema: beatPlanSchema,
