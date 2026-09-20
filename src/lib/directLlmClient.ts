@@ -18,6 +18,7 @@ import {
 import type { GenreContext } from "../../server/humanStyleEnhanced";
 import { sanitizeGeneratedText } from "../../server/textHygiene";
 import {
+  countWordsRu,
   generateHumanizedChapter,
   humanizeProseDraft,
   rewriteDetectorAiSegments,
@@ -1032,7 +1033,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         : coolingSelf
           ? `остывает после лимита до ${timeLabel(coolingSelf.until)}`
           : "по памяти ключа";
-      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, undefined, `Автовыбор модели Gemini по памяти ключа: ${model} → ${learnedModel} (${why}).`, { chars: 0 }));
+      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, undefined, `Автовыбор модели Gemini по памяти ключа: ${model} → ${learnedModel} (${why}). Запрос не отправлялся — это заметка о порядке цепочки, а не отказ.`));
     }
 
     if (provider === "gemini") {
@@ -1391,8 +1392,11 @@ const CHAPTER_TARGET_WORDS = 3_300;
 const MAX_CHAPTER_CONTINUATIONS = 10;
 const MIN_CONTINUATION_WORDS = 120;
 
+// Единственный счётчик слов конвейера — общий с литературным проходом
+// (server/chapterGenerate.ts). Свой собственный счётчик расходился с циклом добора,
+// и глава считалась добранной в цикле и недобранной в отчёте автору.
 function countGeneratedWords(text: string): number {
-  return (text.match(/[A-Za-zА-Яа-яЁё0-9]+(?:[-'][A-Za-zА-Яа-яЁё0-9]+)*/gu) || []).length;
+  return countWordsRu(text);
 }
 
 // Процентный потолок роста ненадёжен на коротких текстах (единицы слов дают

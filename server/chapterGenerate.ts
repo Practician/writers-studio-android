@@ -296,8 +296,13 @@ export function russianLanguageIssues(text: string): string[] {
   return issues;
 }
 
+/** Единственный счётчик слов конвейера: и цикл добора, и отчёт автору, и проверка
+ *  «фрагмент короче 250 слов» считают одним способом. Раньше цикл считал по пробелам
+ *  (тире тоже попадало в счёт), а отчёт — по словоподобным токенам: глава считалась
+ *  добранной по одному счётчику и недобранной по другому (живой прогон 20.09.2026 —
+ *  цикл встал на 8 сценах, отчёт показал 3152/3300 слов). */
 export function countWordsRu(text: string): number {
-  return text.split(/\s+/u).filter(Boolean).length;
+  return (text.match(/[A-Za-zА-Яа-яЁё0-9]+(?:[-'][A-Za-zА-Яа-яЁё0-9]+)*/gu) || []).length;
 }
 
 export const beatPlanSchema = {
@@ -361,7 +366,11 @@ export const PREVIOUS_TAIL_SCENE_CHARS = 900;
 export type NarrationPerson = "first" | "third" | "unknown";
 
 /** Лицо повествования по авторской речи: реплики в кавычках и после тире не считаются,
- *  иначе болтливый персонаж перевешивает рассказчика. */
+ *  иначе болтливый персонаж перевешивает рассказчика.
+ *  В третьем наборе только подлежащие («он», «она», «они»): объектные и притяжательные
+ *  формы («его», «ей», «её», «их») рассказчик от первого лица употребляет постоянно,
+ *  и в живом прогоне 20.09.2026 они дали 67 «третьеличных» попаданий против 98 «я» —
+ *  отношение 1,46 при пороге 1,5, то есть лицо текста осталось неопределённым. */
 export function detectNarrationPerson(text: string): NarrationPerson {
   const narration = String(text || "")
     .replace(/«[^»]*»/gu, " ")
@@ -370,10 +379,10 @@ export function detectNarrationPerson(text: string): NarrationPerson {
     .replace(/^[ \t]*[—–-][^\n]*$/gmu, " ")
     .replace(/\s+/gu, " ");
   const count = (pattern: RegExp) => (narration.match(pattern) || []).length;
-  const first = count(/(?:^|[^\p{L}])(?:я|меня|мне|мной|мною|мой|моя|моё|мое|мои|нас|нам|нами)(?![\p{L}])/giu);
-  const third = count(/(?:^|[^\p{L}])(?:он|она|оно|они|его|ему|ей|её|ее|их|им|ими|него|нему|неё|нее|них|ним)(?![\p{L}])/giu);
-  if (first >= 3 && first > third * 1.5) return "first";
-  if (third >= 3 && third > first * 1.5) return "third";
+  const first = count(/(?:^|[^\p{L}])(?:я|меня|мне|мной|мною|мой|моя|моё|мое|мои|наш|наша|наше|наши|нас|нам|нами)(?![\p{L}])/giu);
+  const third = count(/(?:^|[^\p{L}])(?:он|она|оно|они)(?![\p{L}])/giu);
+  if (first >= 3 && first > third * 1.2) return "first";
+  if (third >= 3 && third > first * 1.2) return "third";
   return "unknown";
 }
 
@@ -405,6 +414,64 @@ export function topupBeatFor(beats: ChapterBeat[], index: number, wordsSoFar: nu
     hook: "Конкретная деталь обстановки, предмет или действие, которых в главе ещё не было.",
     endsWith: "Новый поворот, после которого главу можно закончить.",
   };
+}
+
+/** Архитектурный слой правок sepia. Поверхностная правка стиля признаки ИИ почти
+ *  не снимает: в замере StoryScope классификатор по признакам структуры повествования
+ *  различает машинную прозу с macro-F1 93,2%, а после редакторской переписи стиля
+ *  обнаружение падает лишь с 95,5% до 93,9%. Поэтому приёмы уходят в промпт СЦЕНЫ,
+ *  где текст рождается, а не только в аудит после него.
+ *  Берётся 3–5 приёмов, а не весь список: полный набор правил сам становится шаблоном. */
+export const SCENE_SEPIA_MOVES = `АРХИТЕКТУРА СЦЕНЫ (выбери 3–5 приёмов, не все сразу — их полный набор сам по себе читается как шаблон):
+- Не объясняй смысл сцены: ни от рассказчика, ни в финальной фразе. Смысл собирается из поступков.
+- Не выстраивай цепочку «причина → следствие → вывод» без зазоров. Одну деталь оставь необъяснённой, одно следствие — незакрытым.
+- Часть сведений давай с опозданием: сначала предмет или жест, потом — что он значил. Не объявляй заранее, к чему идёт разговор.
+- Эмоцию показывай поступком, оговоркой, неверным словом. Телесная реакция (холодок, ком в горле, сердце пропустило) — не единственный способ и не чаще одного раза на сцену.
+- Называй конкретные вещи мира: марку, номер, место, цену, бытовую деталь. Абстракции («атмосфера», «энергия», «пространство») запрещены.
+- Новых людей и сущностей — не больше одного на сцену. Не заставляй переглядываться тех, кого в сцене нет.
+- Время линейно, но с пропусками: перескочи через рутину между двумя точками, а не перечисляй её.
+- Не заканчивай сцену разрешением и принятием. Закончи на действии, которое ставит следующий вопрос и оставляет героя в неудобном положении.`;
+
+/** Персонажи главы. Без явного списка модель подменяет адресата реплики: в живом
+ *  прогоне 20.09.2026 «прошептал он мне в спину» прозвучало при обращении к Илье,
+ *  а через абзац внезапно появилось «Мы с Васькой переглянулись». */
+export function buildCharacterNotes(input: ChapterGenerateInput): string {
+  const source = [input.previousChapter || "", input.canonDossier || ""].join("\n");
+  if (source.trim().length < 200) return "";
+  const counts = new Map<string, number>();
+  // Имя — слово с заглавной, стоящее НЕ в начале предложения: иначе в список попадут
+  // «Потом», «Утром» и прочие начала фраз.
+  const re = /[^\s.!?…;:—]\s+([А-ЯЁ][а-яё]{2,})(?![\p{L}])/gu;
+  for (const match of source.matchAll(re)) {
+    counts.set(match[1], (counts.get(match[1]) || 0) + 1);
+  }
+  const names = [...counts.entries()]
+    .filter(([, times]) => times >= 2)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 6)
+    .map(([name]) => name);
+  if (!names.length) return "";
+  return `ПЕРСОНАЖИ ГЛАВЫ (действуют и говорят только они): ${names.join(", ")}. Адресата реплики не подменять: если герой обращается к X, реагирует и отвечает X. Новых людей не вводить без нужды.`;
+}
+
+/** Добор плана до MIN_SCENE_BEATS структурными битами. План из 6 битов обрывает главу
+ *  на 3152 словах: приёмка «≥3 битов» такой план пропускала (живой прогон 20.09.2026). */
+export function padBeatsToMinimum(beats: ChapterBeat[], input: ChapterGenerateInput): ChapterBeat[] {
+  const padded = beats.slice(0, MAX_SCENE_BEATS);
+  while (padded.length < MIN_SCENE_BEATS) {
+    const last = padded[padded.length - 1];
+    const missing = Math.max(
+      SCENE_AVERAGE_WORDS,
+      SCENE_TARGET_WORDS - Math.round(padded.length * SCENE_AVERAGE_WORDS),
+    );
+    padded.push({
+      title: `Развитие ${padded.length + 1}: после «${last?.title || "предыдущего бита"}»`,
+      goal: `Следующее событие главы после «${last?.endsWith || "конца предыдущего бита"}»: новое препятствие, разговор или решение героя. Чтобы глава дотянула до цели, нужно ещё около ${missing} слов.`,
+      hook: "Конкретный предмет, число, место или действие, которых в главе ещё не было.",
+      endsWith: "Новое положение, из которого герой должен выбираться.",
+    });
+  }
+  return padded;
 }
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
@@ -493,6 +560,7 @@ export function buildScenePrompt(
   povDirective = "",
 ): string {
   const focus = SCENE_FOCUSES[beatIndex % SCENE_FOCUSES.length];
+  const characterNotes = buildCharacterNotes(input);
   return `Напиши фрагмент главы (бит ${beatIndex + 1} из ${beatCount}).
 
 ЯЗЫК (жёстко):
@@ -501,6 +569,7 @@ export function buildScenePrompt(
 - Цифры и «%» допустимы. Имена из канона — по-русски.
 - Не смешивай алфавиты в одном предложении.
 ${povDirective ? `\n${povDirective}\n` : ""}
+${characterNotes ? `\n${characterNotes}\n` : ""}
 Бит:
 - Название: ${beat.title}
 - Цель: ${beat.goal}
@@ -519,6 +588,8 @@ ${input.canonDossier ? `- Замок канона (фрагмент): ${input.ca
 ${input.worldBible ? `- Библия мира (фрагмент): ${input.worldBible.slice(0, 2000)}` : ""}
 
 ${styleExtras}
+
+${SCENE_SEPIA_MOVES}
 
 Требования:
 1. Только текст прозы на русском, без заголовка бита, без Markdown, без комментариев, без английского.
@@ -547,7 +618,43 @@ export function buildAntiRepeatNotes(previousScenes: string[]): string {
     if (tail) lines.push(`- Не пересказывай и не повторяй реплики из куска: «…${tail}»`);
   }
   lines.push("- Не начинай с тех же 4–6 слов, что предыдущий кусок.");
+  // Реплики предыдущих сцен — списком. Проверка по 5-граммам их не ловит:
+  // «— Ты чего застыл?» вернулась как «— Ты чего застыл, Илья?» (живой прогон 20.09.2026).
+  const dialogues = previousScenes
+    .slice(-SCENE_ANTI_REPEAT_SCENES)
+    .join("\n")
+    .split(/\n+/u)
+    .map((line) => line.trim())
+    .filter((line) => /^[—–«"-]/u.test(line) && line.split(/\s+/u).length >= 3)
+    .slice(-4);
+  for (const line of dialogues) {
+    lines.push(`- Реплика уже звучала — не повторяй её и не переигрывай тот же диалог: «${line}»`);
+  }
   return lines.join("\n");
+}
+
+/** Короткая реплика возвращается дословно и проверку по 5-граммам проходит: в живом
+ *  прогоне 20.09.2026 «— Ты чего застыл?» вернулась через шестьдесят с лишним абзацев
+ *  как «— Ты чего застыл, Илья?». Сравнение идёт по строкам от трёх значащих слов,
+ *  без регистра и пунктуации. */
+export function repeatedShortLine(previousScenes: string[], candidate: string): string {
+  const normalize = (value: string) => value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const haystack = normalize(candidate);
+  for (const rawLine of previousScenes.join("\n").split(/\n+/u)) {
+    const isDialogue = /^\s*[—–«"-]/u.test(rawLine);
+    const line = normalize(rawLine);
+    const words = line.split(" ").filter(Boolean);
+    // Реплика — от трёх значащих слов, повествовательная строка — от пяти:
+    // иначе короткие общие обороты дают ложные срабатывания.
+    if ((isDialogue ? words.length + 2 : words.length) < 5) continue;
+    if (line.length < 12) continue;
+    if (haystack.includes(line)) return line;
+  }
+  return "";
 }
 
 export function buildSingleChapterPrompt(input: ChapterGenerateInput, styleExtras: string): string {
@@ -1023,18 +1130,25 @@ async function planBeats(
     });
     const plan = parseJsonResponse<{ beats: ChapterBeat[] }>(planRaw, "План битов");
     if (Array.isArray(plan.beats) && plan.beats.length >= 3) {
-      return plan.beats.slice(0, MAX_SCENE_BEATS).map((beat) => ({
+      const kept = plan.beats.slice(0, MAX_SCENE_BEATS).map((beat) => ({
         title: String(beat.title || "Бит"),
         goal: String(beat.goal || ""),
         hook: String(beat.hook || ""),
         endsWith: String(beat.endsWith || ""),
       }));
+      // Контракт плана жёсткий: 6 битов при норме 8–12 — это оборванная глава.
+      // Прежняя приёмка «≥3 битов» такой план пропускала (живой прогон 20.09.2026).
+      if (kept.length >= MIN_SCENE_BEATS) return kept;
+      console.warn(
+        `План дал ${kept.length} битов вместо ${MIN_SCENE_BEATS}–${MAX_SCENE_BEATS} — добираю структурными битами.`,
+      );
+      return padBeatsToMinimum(kept, input);
     }
   } catch (error) {
     console.warn("Beat plan JSON failed — using structured fallback beats:", error);
   }
   // Не single-pass: сцены дают ≥1500 слов; single-pass на free NIM часто обрезается.
-  return fallbackBeatsFromSynopsis(input);
+  return padBeatsToMinimum(fallbackBeatsFromSynopsis(input), input);
 }
 
 async function generateScenesDraft(
@@ -1050,13 +1164,24 @@ async function generateScenesDraft(
 ): Promise<{ draft: string; scenesGenerated: number; topupScenes: number; narrationPerson: NarrationPerson }> {
   const scenes: string[] = [];
   let tail = input.previousChapter ? input.previousChapter.slice(-PREVIOUS_TAIL_SCENE_CHARS) : "";
-  // Лицо повествования фиксируется по первой принятой сцене: хвост предыдущей сцены
-  // (900 знаков) его не удерживает — в живом прогоне 20.09.2026 вторая половина главы
-  // съехала из третьего лица в «я».
-  let narrationPerson: NarrationPerson = "unknown";
+  // Лицо повествования фиксируется ДО первой сцены — по исходнику (предыдущая глава,
+  // затем образец автора). Решение по случайному броску одной сцены давало разные лица
+  // в соседних прогонах одной и той же главы: 20.09.2026 в 19:45 журнал сказал
+  // «третье», в 22:17 — «первое», на одном и том же исходнике. Первая принятая сцена
+  // остаётся запасным источником, если исходник короче окна детектора.
+  let narrationPerson: NarrationPerson = detectNarrationPerson(
+    String(input.previousChapter || "").slice(-12_000),
+  );
+  if (narrationPerson === "unknown" && sample.length >= 300) {
+    narrationPerson = detectNarrationPerson(sample);
+  }
+  if (narrationPerson !== "unknown") {
+    console.warn(`Лицо повествования взято из исходника: ${narrationPerson === "first" ? "первое" : "третье"}.`);
+  }
   const plannedBeats = beats.length;
   const maxScenes = Math.min(MAX_SCENE_BEATS, plannedBeats + MAX_TOPUP_SCENES);
   let topupScenes = 0;
+  let rejectedScenes = 0;
   for (let index = 0; index < maxScenes; index += 1) {
     const wordsSoFar = countWordsRu(scenes.join("\n\n"));
     const isTopup = index >= plannedBeats;
@@ -1072,6 +1197,7 @@ async function generateScenesDraft(
     const antiRepeat = buildAntiRepeatNotes(scenes);
     const povDirective = povDirectiveFor(narrationPerson);
     let cleaned = "";
+    let accepted = false;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const extra =
         (attempt > 0 ? "\n- Предыдущая попытка бракованная — перепиши целиком ИНАЧЕ." : "")
@@ -1117,15 +1243,32 @@ async function generateScenesDraft(
         console.warn(`Scene ${index + 1} cand ${candidateIndex + 1}: overlap, retry…`);
         continue;
       }
+      const repeatedLine = repeatedShortLine(scenes.slice(-SCENE_ANTI_REPEAT_SCENES), cleaned);
+      if (repeatedLine) {
+        console.warn(`Scene ${index + 1} cand ${candidateIndex + 1}: повтор реплики «${repeatedLine}», retry…`);
+        continue;
+      }
       if (narrationPersonMismatch(cleaned, narrationPerson)) {
         console.warn(`Scene ${index + 1} cand ${candidateIndex + 1}: narration person switched, retry…`);
         continue;
       }
+      accepted = true;
       break;
+    }
+    // Брак в главу не попадает. Раньше после трёх неудачных попыток фрагмент
+    // приклеивался безусловно — в живом прогоне 20.09.2026 так стали сценами ответы
+    // на 196 и 54 символа, а объём главы при этом считался взятым.
+    if (!accepted) {
+      console.warn(`Scene ${index + 1}: все 3 попытки бракованные — бит пропущен, текст главы не испорчен.`);
+      rejectedScenes += 1;
+      continue;
     }
     scenes.push(cleaned);
     if (narrationPerson === "unknown") narrationPerson = detectNarrationPerson(cleaned);
     tail = cleaned.slice(-PREVIOUS_TAIL_SCENE_CHARS);
+  }
+  if (rejectedScenes) {
+    console.warn(`Отброшено бракованных битов: ${rejectedScenes} — в главу они не вошли.`);
   }
   return { draft: scenes.join("\n\n"), scenesGenerated: scenes.length, topupScenes, narrationPerson };
 }
@@ -1177,6 +1320,14 @@ export async function generateHumanizedChapter(
         console.warn(
           `Chapter candidate ${cand + 1}/${candidatesN}: AI-tell=${rawCandidates[cand].score.score} burst=${rawCandidates[cand].score.burstiness.toFixed(2)}`,
         );
+      }
+      // Сценовый маршрут не дал ни одного пригодного фрагмента (все биты отброшены
+      // как брак) — уходим в цельный проход, а не отдаём автору пустую главу.
+      if (!rawCandidates.some((candidate) => candidate.text.trim().length >= 200)) {
+        console.warn("Все сцены отброшены как брак — переход к цельному проходу.");
+        rawCandidates.length = 0;
+        candidateMeta.length = 0;
+        mode = "single";
       }
     }
   }

@@ -190,10 +190,16 @@ const TEST_WORDS = ["коридор", "стена", "фонарь", "шаг", "�
 
 /** Ровный поток слов без латиницы: 5-граммы разных сцен не совпадают (шаг 3 и период 20 взаимно просты). */
 function mockSceneText(index: number, words = 350): string {
+  // Сцены обязаны быть различимыми: сходство по 5-граммам ≥0,18 — брак. Прежний
+  // генератор давал почти одинаковые строки, и тест «10 сцен» проходил только потому,
+  // что забракованный фрагмент всё равно приклеивался к главе.
+  const stride = 1 + index;
+  const offset = (index * 13) % TEST_WORDS.length;
   const parts: string[] = [];
   for (let i = 0; i < words; i += 1) {
-    if (i % 25 === 0) parts.push("Он");
-    parts.push(TEST_WORDS[(index * 7 + i * 3) % TEST_WORDS.length]);
+    if (i % 25 === 0) parts.push(index % 2 === 0 ? "Он" : "Илья");
+    if (i % 40 === 0) parts.push(`место${index}`);
+    parts.push(TEST_WORDS[(offset + i * stride) % TEST_WORDS.length]);
   }
   return parts.join(" ");
 }
@@ -289,13 +295,46 @@ test("scene generation tops the chapter up to the target and locks narration per
   );
   assert.equal(result.humanizeReport.mode, "scenes");
   assert.equal(result.humanizeReport.narrationPerson, "third");
-  assert.equal(result.humanizeReport.topupScenes, 4);
-  assert.equal(result.humanizeReport.scenesGenerated, 10);
-  assert.ok(countWordsRu(result.text) >= SCENE_TARGET_WORDS);
+  // План вернул 6 битов — он добит структурными до нормы 8–12, поэтому сцен не меньше 8.
+  assert.ok(result.humanizeReport.scenesGenerated >= 8, "план добит до нормы битов");
+  assert.ok(result.humanizeReport.scenesGenerated <= 12);
+  // Добор включился именно потому, что глава не доросла до цели по ОБЩЕМУ счётчику слов.
+  assert.ok(result.humanizeReport.topupScenes >= 1, "добор шёл до цели главы");
+  assert.ok(countWordsRu(result.text) >= SCENE_TARGET_WORDS, "глава дотянула до цели");
   const sceneCalls = calls.filter((call) => call.contents.includes("Бит:"));
   // Сценам выставлен короткий таймаут: зависший на 90 с шлюз не должен их держать.
   assert.equal(sceneCalls[0].timeoutMs, 45_000);
-  // Первая сцена идёт без замка, вторая — уже с замком третьего лица.
-  assert.ok(!sceneCalls[0].contents.includes("ЛИЦО ПОВЕСТВОВАНИЯ"));
+  // Лицо взято из ИСХОДНИКА, поэтому замок действует с первой же сцены, а не с той,
+  // которая случайно задала лицо (живой прогон 20.09.2026: в 19:45 «третье», в 22:17 «первое»).
+  assert.ok(sceneCalls[0].contents.includes("ЛИЦО ПОВЕСТВОВАНИЯ"));
+  assert.ok(sceneCalls[0].contents.includes("третье лицо"));
   assert.ok(sceneCalls[1].contents.includes("ЛИЦО ПОВЕСТВОВАНИЯ"));
+});
+
+test("забракованная сцена не попадает в главу", async () => {
+  const generate = async (params: any): Promise<string> => {
+    if (/сценарист-структуралист/i.test(params.systemInstruction)) {
+      return JSON.stringify({
+        beats: Array.from({ length: 8 }, (_, i) => ({ title: `Бит ${i + 1}`, goal: `Событие ${i + 1}`, hook: `Зацепка ${i + 1}`, endsWith: `Конец ${i + 1}` })),
+      });
+    }
+    if (params.responseMimeType === "application/json") return JSON.stringify({ blocks: [] });
+    // Сцена всегда брак: латиница и обрыв. Раньше такой ответ становился сценой главы.
+    if (params.contents.includes("Бит:")) return "back level phone wall corridor the and with that this chapter level";
+    return mockSceneText(2);
+  };
+  const result = await generateHumanizedChapter(
+    baseInput({
+      currentChapterTitle: "Глава 5. Проба",
+      currentChapterSummary: "Проба входа",
+      humanizeDepth: "maximum",
+      chapterCandidates: 1,
+      authorSample: Array.from({ length: 40 }, (_, i) => `Он шёл вдоль стены и считал шаги, номер ${i}. Пыль лежала на полу ровным слоем.`).join(" "),
+    }),
+    generate,
+  );
+  assert.equal(russianLanguageIssues(result.text).length, 0);
+  assert.ok(!result.text.includes("back"), "латиница в главу не попала");
+  assert.ok(result.text.trim().length >= 200, "глава не пустая: сценовый маршрут уступил цельному проходу");
+  assert.equal(result.humanizeReport.mode, "single");
 });

@@ -244,7 +244,9 @@ export default function App() {
       const key = detail.keyPresent
         ? `ключ ${detail.keyIndex || 1}/${detail.keyCount || 1} (…${detail.keySuffix || "????"})`
         : "ключ не передан";
-      const status = detail.status ? `HTTP ${detail.status}` : "без HTTP-статуса";
+      const status = detail.status
+        ? `HTTP ${detail.status}`
+        : (typeof detail.outputChars === "number" ? "без HTTP-статуса" : "заметка");
       const output = typeof detail.outputChars === "number" ? `ответ ${detail.outputChars} символов` : null;
       const finish = detail.finishReason ? `завершение ${detail.finishReason}` : null;
       const message = [detail.endpoint, `модель ${detail.model}`, key, status, output, finish, detail.message].filter(Boolean).join(" · ");
