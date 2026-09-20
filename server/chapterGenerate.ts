@@ -277,6 +277,35 @@ export const SCENE_REQUEST_TIMEOUT_MS = 45_000;
 /** По скольким последним сценам ищется повтор: дословная реплика вернулась через одну сцену. */
 export const SCENE_ANTI_REPEAT_SCENES = 3;
 
+/** Полосы длины сцены, чередуются. Живой прогон 20.09.2026: девять сцен по 2532–2942
+ *  знака (разлёт ±7 %) — ровный размер блока сам по себе читается как машинный. */
+export const SCENE_LENGTH_BANDS: Array<[number, number]> = [[260, 360], [380, 520]];
+
+/** Потолок сравнений на 400 слов. В живом прогоне 20.09.2026 глава несла 24 сравнения
+ *  на 3671 слово — почти каждый новый предмет получал нормализованное «словно». */
+export const SIMILES_PER_400_WORDS = 2;
+
+/** Ход «ничего не ответил / промолчал» больше двух раз на главу — уже манера модели. */
+export const MAX_SILENT_REACTIONS = 2;
+/** «Замер / застыл» — та же реакция на каждое событие (в живом прогоне 12 раз). */
+export const MAX_FREEZE_REACTIONS = 3;
+/** Сколько последних предложений предыдущей сцены уходит в промпт как шов. */
+export const SCENE_SEAM_SENTENCES = 3;
+
+/** Строка конвейера в журнал приложения. APK показывает не консоль, а события окна:
+ *  в живом прогоне 20.09.2026 журнал знал про 19 запросов к модели и 9 сцен, но не знал,
+ *  какой шаг конвейера сделал какой запрос и что вернул короткий ответ. Теперь каждый шаг
+ *  конвейера идёт отдельным событием. Вызов безопасен и на сервере (Node). */
+export function emitChapterStep(message: string, level: "info" | "warn" = "info"): void {
+  console.warn(`[глава] ${message}`);
+  const host = globalThis as unknown as {
+    dispatchEvent?: (event: unknown) => boolean;
+    CustomEvent?: new (type: string, init: { detail: unknown }) => unknown;
+  };
+  if (typeof host.dispatchEvent !== "function" || typeof host.CustomEvent !== "function") return;
+  host.dispatchEvent(new host.CustomEvent("writers-studio-chapter-step", { detail: { message, level } }));
+}
+
 /** Только русская проза: латиница (кроме редких исключений) — брак. */
 export function russianLanguageIssues(text: string): string[] {
   const issues: string[] = [];
@@ -451,7 +480,9 @@ export function buildCharacterNotes(input: ChapterGenerateInput): string {
     .slice(0, 6)
     .map(([name]) => name);
   if (!names.length) return "";
-  return `ПЕРСОНАЖИ ГЛАВЫ (действуют и говорят только они): ${names.join(", ")}. Адресата реплики не подменять: если герой обращается к X, реагирует и отвечает X. Новых людей не вводить без нужды.`;
+  return `ПЕРСОНАЖИ ГЛАВЫ (действуют и говорят только они): ${names.join(", ")}. Адресата реплики не подменять: если герой обращается к X, реагирует и отвечает X. Новых людей не вводить без нужды.
+РЕЧЬ КАЖДОГО — СВОЯ (в живом прогоне 20.09.2026 братья говорили в одном регистре): у одного короткие рубленые фразы и профессиональные слова, у другого переспросы, неоконченные фразы и бытовые оговорки. Реплики не делать взаимозаменяемыми: по одной фразе должно быть слышно, кто говорит.
+Молчание в ответ и «ничего не сказал» — не больше двух раз на главу.`;
 }
 
 /** Добор плана до MIN_SCENE_BEATS структурными битами. План из 6 битов обрывает главу
@@ -558,6 +589,7 @@ export function buildScenePrompt(
   styleExtras: string,
   antiRepeatNotes = "",
   povDirective = "",
+  scenePlan: ScenePlan = { minWords: 350, maxWords: 520 },
 ): string {
   const focus = SCENE_FOCUSES[beatIndex % SCENE_FOCUSES.length];
   const characterNotes = buildCharacterNotes(input);
@@ -577,9 +609,12 @@ ${characterNotes ? `\n${characterNotes}\n` : ""}
 - Завершение: ${beat.endsWith}
 - Фокус этого куска: ${focus}
 
-Объём: 350–520 слов (полноценный кусок главы, не набросок). Раскрой действие и восприятие. Не добивай объём пустыми повторами и не пересказывай уже написанное.
+Объём: ${scenePlan.minWords}–${scenePlan.maxWords} слов (полноценный кусок главы, не набросок). Раскрой действие и восприятие. Не добивай объём пустыми повторами и не пересказывай уже написанное.
 
 ${previousTail ? `Продолжай сразу после этого хвоста (не повторяй его дословно и не пересказывай теми же фразами):\n"""\n${previousTail}\n"""\n` : "Это начало главы после предыдущих событий канона.\n"}
+${scenePlan.seamNotes ? `${scenePlan.seamNotes}\n` : ""}
+${scenePlan.ledgerNotes ? `${scenePlan.ledgerNotes}\n` : ""}
+${scenePlan.reactionNotes ? `РЕАКЦИИ И МОЛЧАНИЕ:\n${scenePlan.reactionNotes}\n` : ""}
 ${antiRepeatNotes ? `ЗАПРЕТ ПОВТОРОВ (уже было в предыдущих кусках — не копируй смысл дословно):\n${antiRepeatNotes}\n` : ""}
 
 Канон и контекст:
@@ -595,10 +630,11 @@ ${SCENE_SEPIA_MOVES}
 1. Только текст прозы на русском, без заголовка бита, без Markdown, без комментариев, без английского.
 2. Сохрани POV и факты канона. Не вводи новые сущности. Не откатывай заряд/сытость/уровень из стыка.
 3. Не используй генеративные штампы и «голос ассистента».
-4. Закончи на действии/состоянии из endsWith, без морали и резюме.
+4. Закончи на действии/состоянии из endsWith, без морали и резюме: последняя фраза НЕ объясняет, что всё это значило, и не подводит итог.
 5. Продвинь сюжет: новое действие/поворот, а не повтор «шёл, считал, смотрел на заряд» и не переигровка колец гл.6.
-6. Чередуй длину фраз (очень короткие рядом с длинными) — избегай ровного «ИИ-ритма».
-7. Минимум 350 слов в этом фрагменте.`;
+6. Чередуй длину фраз: рядом с двадцатисловной ставь фразу короче шести слов. Ни одного предложения длиннее тридцати слов.
+7. Объём этого фрагмента: ${scenePlan.minWords}–${scenePlan.maxWords} слов — одна цельная сцена, оборванная там, где кончается её событие.
+8. Сравнений («словно», «будто», «как будто», «похоже на») — не больше двух на сцену.`;
 }
 
 /** Краткие заметки anti-repeat по уже написанным сценам. */
@@ -655,6 +691,153 @@ export function repeatedShortLine(previousScenes: string[], candidate: string): 
     if (haystack.includes(line)) return line;
   }
   return "";
+}
+
+/** Форма сцены: полоса длины, шов с предыдущей сценой, реестр закрытых событий
+ *  и счёт реакций. Все поля, кроме длины, необязательны — внешние вызовы промпта
+ *  сцены (агент, тесты) продолжают работать без них. */
+export interface ScenePlan {
+  minWords: number;
+  maxWords: number;
+  seamNotes?: string;
+  ledgerNotes?: string;
+  reactionNotes?: string;
+}
+
+const SIMILE_SRC = "(?:словно|будто|как\\s+будто|похоже\\s+на|напомина(?:л|ла|ло|ет|ют)|точно\\s+бы)";
+// Границы слов — через \p{L}, а не \b: в JS \b считается по ASCII-\w, и кириллица
+// («Ситуация») не даёт границы ни в начале, ни в конце слова.
+const SILENT_SRC = "(?<![\\p{L}])(?:не\\s+ответил\\p{L}*|промолчал\\p{L}*|не\\s+отозвал\\p{L}*|ничего\\s+не\\s+сказал\\p{L}*)(?![\\p{L}])";
+const FREEZE_SRC = "(?<![\\p{L}])(?:замер\\p{L}*|застыл\\p{L}*|остолбенел\\p{L}*)(?![\\p{L}])";
+
+/** Классы событий, которые модель склонна «закрыть» второй раз другими словами.
+ *  Лексическое сравнение этого не ловит: «Они остались взаперти» и через сцены
+ *  «Выход из пещеры оказался заблокирован герметичной плитой» не имеют общих слов,
+ *  а событие одно (живой прогон 20.09.2026). */
+const EVENT_CLASSES: Array<{ id: string; label: string; src: string }> = [
+  { id: "blocked", label: "выход перекрыт, герои заперты", src: "(?:заперт\\p{L}*|заблокирован\\p{L}*|замурован\\p{L}*|перекрыт\\p{L}*|завален\\p{L}*|не\\s+выйти)" },
+  { id: "darkness", label: "свет погас, темнота", src: "(?:погасл\\p{L}*|потух\\p{L}*|обесточ\\p{L}*|наступила\\s+темнот\\p{L}*)" },
+  { id: "device", label: "прибор отказал или сел", src: "(?:разрядил\\p{L}*|сломал\\p{L}*|отказал\\p{L}*|не\\s+включ\\p{L}*|замолчал\\s+насовсем)" },
+  { id: "wound", label: "травма, кровь", src: "(?:раскроил\\p{L}*|порез\\p{L}*|ожог\\p{L}*|ссадин\\p{L}*|хрустнул\\p{L}*)" },
+];
+
+export function countPhrase(text: string, src: string): number {
+  return (String(text).match(new RegExp(src, "giu")) || []).length;
+}
+
+export function countSimiles(text: string): number {
+  return countPhrase(text, SIMILE_SRC);
+}
+
+/** Последние предложения сцены: именно там модель ставит вывод. */
+export function closingSentences(text: string, count = 1): string {
+  const sentences = String(text).replace(/\s+/gu, " ").trim().split(/(?<=[.!?…])\s+/u).filter(Boolean);
+  return sentences.slice(-Math.max(1, count)).join(" ");
+}
+
+const EXPLANATION_MARKERS = /(?<![\p{L}])(?:ситуац\p{L}*|положени\p{L}*|всё\s+это|все\s+это|казал(?:ось|ась|ся)|наконец\s+(?:осозна\p{L}*|понял\p{L}*|догадал\p{L}*)|осознав\p{L}*|поняв\p{L}*|стало\s+(?:понятно|ясно|очевидно)|значил\p{L}*|означал\p{L}*|в\s+итоге|таким\s+образом|самозалечива\p{L}*|ловушк\p{L}*|пугало\s+больше|теперь\s+(?:они|он|она)\s+(?:знал\p{L}*|понял\p{L}*|понимал\p{L}*))/iu;
+const SUMMARY_ENDING = /(?:^|[.!?…]\s+)(?:всё|все|это|такое)\s+(?:было|стало|оказалось)(?![\p{L}])/iu;
+
+/** Финал сцены подводит смысл вместо действия — приём, который sepia запрещает первым
+ *  («Не объясняй смысл сцены»), а модель ставила в конец почти каждой сцены. */
+export function explanationTailIssue(text: string): string {
+  const closing = closingSentences(text, 1);
+  if (!closing) return "";
+  if (EXPLANATION_MARKERS.test(closing)) {
+    return `финал объясняет смысл сцены вместо действия: «${closing.slice(-90)}»`;
+  }
+  if (SUMMARY_ENDING.test(closing)) {
+    return `финал подводит итог: «${closing.slice(-90)}»`;
+  }
+  return "";
+}
+
+/** Сравнений больше бюджета — приём превращается в механическую привычку. */
+export function simileIssue(text: string): string {
+  const words = countWordsRu(text);
+  const budget = Math.max(2, Math.round((words / 400) * SIMILES_PER_400_WORDS));
+  const found = countSimiles(text);
+  if (found <= budget) return "";
+  return `сравнений ${found} на ${words} слов (потолок ${budget}) — убери лишние «словно/будто/похоже на»`;
+}
+
+export function sceneLengthBand(index: number): [number, number] {
+  return SCENE_LENGTH_BANDS[Math.abs(index) % SCENE_LENGTH_BANDS.length];
+}
+
+/** Шов сцен: предыдущая сцена закончилась на «Илья развернулся и выставил шест»,
+ *  следующая начиналась «Илья замер, вслушиваясь в рокот» — тот же момент заново. */
+export function buildSeamNotes(previousScenes: string[]): string {
+  if (!previousScenes.length) return "";
+  const previous = closingSentences(previousScenes[previousScenes.length - 1], SCENE_SEAM_SENTENCES);
+  if (!previous) return "";
+  return `ШОВ СЦЕН:\n- Предыдущая сцена закончилась так: «${previous}»\n- Начни с уже изменившегося положения: этот момент, движение или реплику не переигрывай и не пересказывай в первых фразах. Первое предложение — новое действие или его последствие, а не возврат на шаг назад.`;
+}
+
+/** Шов ловится механически: начало новой сцены повторяет 5-граммы конца предыдущей. */
+export function seamEchoIssue(previousScenes: string[], candidate: string): string {
+  if (!previousScenes.length) return "";
+  const previous = closingSentences(previousScenes[previousScenes.length - 1], SCENE_SEAM_SENTENCES);
+  const opening = String(candidate).replace(/\s+/gu, " ").trim().split(/(?<=[.!?…])\s+/u).slice(0, 2).join(" ");
+  if (!previous || !opening) return "";
+  const share = repeatedNgramShare(previous, opening, 5);
+  if (share < 0.15) return "";
+  return `начало сцены переигрывает концовку предыдущей (совпадение ${(share * 100).toFixed(0)} %): «${opening.slice(0, 90)}»`;
+}
+
+/** Классы событий, которые сцена закрывает. Считаем по её последним двум предложениям:
+ *  закрытие события модель ставит в финал. */
+export function eventClassesIn(text: string): string[] {
+  const target = closingSentences(text, 2);
+  const found: string[] = [];
+  for (const eventClass of EVENT_CLASSES) {
+    if (new RegExp(eventClass.src, "iu").test(target)) found.push(eventClass.id);
+  }
+  return found;
+}
+
+export function eventEchoIssue(closedEvents: string[], text: string): string {
+  if (!closedEvents.length) return "";
+  for (const id of eventClassesIn(text)) {
+    if (!closedEvents.includes(id)) continue;
+    const label = EVENT_CLASSES.find((eventClass) => eventClass.id === id)?.label || id;
+    return `сцена повторно закрывает событие «${label}» — оно в главе уже случилось`;
+  }
+  return "";
+}
+
+export function buildLedgerNotes(closedEvents: string[]): string {
+  if (!closedEvents.length) return "";
+  const labels = closedEvents
+    .map((id) => EVENT_CLASSES.find((eventClass) => eventClass.id === id)?.label)
+    .filter((label): label is string => Boolean(label));
+  if (!labels.length) return "";
+  return `УЖЕ СЛУЧИЛОСЬ В ГЛАВЕ (второй раз это событие не закрывать, другими словами тоже; нужен новый поворот): ${labels.join("; ")}.`;
+}
+
+/** Реакции и молчание: третье «ничего не ответил» и четвёртое «замер» — это манера модели,
+ *  а не жест персонажа (живой прогон 20.09.2026: 7 молчаний и 12 «застыл» на главу). */
+export function buildReactionNotes(silentUsed: number, freezeUsed: number): string {
+  const lines: string[] = [];
+  lines.push(silentUsed >= MAX_SILENT_REACTIONS
+    ? `- «Ничего не ответил / промолчал» уже ${silentUsed} раза — этот ход больше не повторяй: персонаж отвечает, переспрашивает, перебивает или делает что-то неожиданное.`
+    : "- Заканчивать реплики молчанием можно не больше двух раз за главу.");
+  if (freezeUsed >= MAX_FREEZE_REACTIONS) {
+    lines.push(`- «Замер / застыл» уже ${freezeUsed} раза — реакция на новое событие должна быть другой: ошибка, злость, насмешка, жадность, усталость.`);
+  }
+  return lines.join("\n");
+}
+
+export function silenceIssue(text: string, used: number): string {
+  const found = countPhrase(text, SILENT_SRC);
+  if (!found || used + found <= MAX_SILENT_REACTIONS) return "";
+  return `в сцене ${found} «не ответил/промолчал» при ${used} уже в главе (потолок ${MAX_SILENT_REACTIONS})`;
+}
+
+export function freezeIssue(text: string, used: number): string {
+  const found = countPhrase(text, FREEZE_SRC);
+  if (!found || used + found <= MAX_FREEZE_REACTIONS) return "";
+  return `в сцене ${found} «замер/застыл» при ${used} уже в главе (потолок ${MAX_FREEZE_REACTIONS})`;
 }
 
 export function buildSingleChapterPrompt(input: ChapterGenerateInput, styleExtras: string): string {
@@ -1117,7 +1300,9 @@ export function fallbackBeatsFromSynopsis(input: ChapterGenerateInput): ChapterB
 async function planBeats(
   input: ChapterGenerateInput,
   generate: GenerateFn,
+  noteStep?: (label: string) => void,
 ): Promise<ChapterBeat[]> {
+  noteStep?.("план битов");
   try {
     const planRaw = await generate({
       model: input.model,
@@ -1138,13 +1323,18 @@ async function planBeats(
       }));
       // Контракт плана жёсткий: 6 битов при норме 8–12 — это оборванная глава.
       // Прежняя приёмка «≥3 битов» такой план пропускала (живой прогон 20.09.2026).
-      if (kept.length >= MIN_SCENE_BEATS) return kept;
-      console.warn(
+      if (kept.length >= MIN_SCENE_BEATS) {
+        emitChapterStep(`План: ${kept.length} битов.`);
+        return kept;
+      }
+      emitChapterStep(
         `План дал ${kept.length} битов вместо ${MIN_SCENE_BEATS}–${MAX_SCENE_BEATS} — добираю структурными битами.`,
+        "warn",
       );
       return padBeatsToMinimum(kept, input);
     }
   } catch (error) {
+    emitChapterStep("План битов не распарсился — беру структурный запасной план.", "warn");
     console.warn("Beat plan JSON failed — using structured fallback beats:", error);
   }
   // Не single-pass: сцены дают ≥1500 слов; single-pass на free NIM часто обрезается.
@@ -1161,6 +1351,7 @@ async function generateScenesDraft(
   sample: string,
   depth: HumanizeDepthConfig,
   candidateIndex: number,
+  noteStep?: (label: string) => void,
 ): Promise<{ draft: string; scenesGenerated: number; topupScenes: number; narrationPerson: NarrationPerson }> {
   const scenes: string[] = [];
   let tail = input.previousChapter ? input.previousChapter.slice(-PREVIOUS_TAIL_SCENE_CHARS) : "";
@@ -1182,6 +1373,13 @@ async function generateScenesDraft(
   const maxScenes = Math.min(MAX_SCENE_BEATS, plannedBeats + MAX_TOPUP_SCENES);
   let topupScenes = 0;
   let rejectedScenes = 0;
+  // Реестр случившегося: модель закрывает одно событие второй раз другими словами
+  // («Они остались взаперти» → «Выход из пещеры оказался заблокирован герметичной
+  // плитой», живой прогон 20.09.2026) — по строкам и 5-граммам это не ловится,
+  // поэтому считаем классы событий и ходы реакции.
+  const closedEvents: string[] = [];
+  let silentUsed = 0;
+  let freezeUsed = 0;
   for (let index = 0; index < maxScenes; index += 1) {
     const wordsSoFar = countWordsRu(scenes.join("\n\n"));
     const isTopup = index >= plannedBeats;
@@ -1189,20 +1387,38 @@ async function generateScenesDraft(
       // Глава уже дотянула до цели — добор не нужен.
       if (wordsSoFar >= SCENE_TARGET_WORDS) break;
       topupScenes += 1;
+      emitChapterStep(`Добор: сцена ${index + 1} сверх плана из ${plannedBeats} битов (в главе ${wordsSoFar} слов).`);
     }
     const beat = isTopup ? topupBeatFor(beats, index, wordsSoFar) : beats[index];
+    // Полоса длины чередуется: ровный размер сцен — подпись модели, а не композиция.
+    const band = sceneLengthBand(index);
     const sceneStyle = sample.length >= 300
       ? [styleBlock, positiveVoiceFewShots(sample, 1 + ((index + candidateIndex) % 2))].filter(Boolean).join("\n\n")
       : styleExtras;
     const antiRepeat = buildAntiRepeatNotes(scenes);
     const povDirective = povDirectiveFor(narrationPerson);
+    const scenePlan: ScenePlan = {
+      minWords: band[0],
+      maxWords: band[1],
+      seamNotes: buildSeamNotes(scenes),
+      ledgerNotes: buildLedgerNotes(closedEvents),
+      reactionNotes: buildReactionNotes(silentUsed, freezeUsed),
+    };
     let cleaned = "";
     let accepted = false;
+    let softNotes: string[] = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      // Замечания предыдущей попытки уходят в промпт прямым указанием: «выбери 3–5
+      // приёмов» модель пропускает, а названное нарушение правит.
+      const retryNotes = softNotes.length
+        ? `\n- Предыдущая попытка нарушила требования — исправь именно это:\n${softNotes.map((note) => `  · ${note}`).join("\n")}`
+        : "";
       const extra =
         (attempt > 0 ? "\n- Предыдущая попытка бракованная — перепиши целиком ИНАЧЕ." : "")
         + (candidateIndex > 0 ? `\n- Альтернативный черновик #${candidateIndex + 1}: другие формулировки, тот же сюжет.` : "")
-        + (attempt > 0 ? "\n- СТРОГО по-русски, без латиницы. Не меньше 350 слов." : "");
+        + (attempt > 0 ? `\n- СТРОГО по-русски, без латиницы. Не меньше ${band[0]} слов.` : "")
+        + retryNotes;
+      noteStep?.(`сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}, попытка ${attempt + 1}`);
       const sceneText = await generate({
         model: input.model,
         systemInstruction,
@@ -1215,6 +1431,7 @@ async function generateScenesDraft(
           sceneStyle,
           antiRepeat + extra,
           povDirective,
+          scenePlan,
         ),
         temperature: modelTemperature(input.model, depth.sceneTemperature, candidateIndex) + attempt * 0.03,
         // free Groq TPM: max_tokens входит в лимит; сервер ещё урежет для groq
@@ -1252,6 +1469,28 @@ async function generateScenesDraft(
         console.warn(`Scene ${index + 1} cand ${candidateIndex + 1}: narration person switched, retry…`);
         continue;
       }
+      // Мягкие проверки. За них сцену не выбрасываем — глава оборвалась бы на полпути,
+      // но две первые попытки перезапрашиваем с названным нарушением: именно эти
+      // признаки (объясняющий финал, плотность сравнений, переигровка шва, дубль
+      // события, одинаковые реакции) держали главу 20.09.2026 в «AI 23 из 24».
+      const soft: string[] = [];
+      const explanation = explanationTailIssue(cleaned);
+      if (explanation) soft.push(explanation);
+      const similes = simileIssue(cleaned);
+      if (similes) soft.push(similes);
+      const seam = seamEchoIssue(scenes, cleaned);
+      if (seam) soft.push(seam);
+      const eventRepeat = eventEchoIssue(closedEvents, cleaned);
+      if (eventRepeat) soft.push(eventRepeat);
+      const silence = silenceIssue(cleaned, silentUsed);
+      if (silence) soft.push(silence);
+      const froze = freezeIssue(cleaned, freezeUsed);
+      if (froze) soft.push(froze);
+      softNotes = soft;
+      if (soft.length && attempt < 2) {
+        emitChapterStep(`Сцена ${index + 1}${isTopup ? " (добор)" : ""}, попытка ${attempt + 1}: перезапрос — ${soft.join("; ")}.`);
+        continue;
+      }
       accepted = true;
       break;
     }
@@ -1259,13 +1498,27 @@ async function generateScenesDraft(
     // приклеивался безусловно — в живом прогоне 20.09.2026 так стали сценами ответы
     // на 196 и 54 символа, а объём главы при этом считался взятым.
     if (!accepted) {
+      emitChapterStep(`Сцена ${index + 1}: все три попытки бракованные — бит пропущен, глава не испорчена.`, "warn");
       console.warn(`Scene ${index + 1}: все 3 попытки бракованные — бит пропущен, текст главы не испорчен.`);
       rejectedScenes += 1;
       continue;
     }
     scenes.push(cleaned);
+    const silentInScene = countPhrase(cleaned, SILENT_SRC);
+    const freezeInScene = countPhrase(cleaned, FREEZE_SRC);
+    silentUsed += silentInScene;
+    freezeUsed += freezeInScene;
+    for (const eventClass of eventClassesIn(cleaned)) {
+      if (!closedEvents.includes(eventClass)) closedEvents.push(eventClass);
+    }
     if (narrationPerson === "unknown") narrationPerson = detectNarrationPerson(cleaned);
     tail = cleaned.slice(-PREVIOUS_TAIL_SCENE_CHARS);
+    const sceneWords = countWordsRu(cleaned);
+    emitChapterStep(
+      `Сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}: ${cleaned.length} знаков, ${sceneWords} слов, сравнений ${countSimiles(cleaned)}, молчаний ${silentInScene}`
+      + (softNotes.length ? `; принята с замечаниями: ${softNotes.join("; ")}.` : "."),
+      softNotes.length ? "warn" : "info",
+    );
   }
   if (rejectedScenes) {
     console.warn(`Отброшено бракованных битов: ${rejectedScenes} — в главу они не вошли.`);
@@ -1293,19 +1546,35 @@ export async function generateHumanizedChapter(
     Math.min(5, Number(input.chapterCandidates) || depth.chapterCandidates || 1),
   );
 
+  // Карта запросов: журнал живого прогона 20.09.2026 показал 19 обращений к модели
+  // на 9 сцен, и по нему нельзя было понять, где кончился план и начались проходы
+  // аудита. Теперь каждый запрос идёт в журнал приложения со своим шагом.
+  let requestNo = 0;
+  let stepLabel = "подготовка";
+  const stepCounts = new Map<string, number>();
+  const countedGenerate: GenerateFn = async (params) => {
+    requestNo += 1;
+    stepCounts.set(stepLabel, (stepCounts.get(stepLabel) || 0) + 1);
+    emitChapterStep(`Запрос #${requestNo} · ${stepLabel}`);
+    return generate(params);
+  };
+  const noteStep = (label: string) => { stepLabel = label; };
+
+  let plannedBeats = 0;
   let mode: "single" | "scenes" = "single";
   let scenesGenerated = 0;
   const rawCandidates: Array<{ text: string; score: AiTellScore; index: number }> = [];
   const candidateMeta: Array<{ scenesGenerated: number; topupScenes: number; narrationPerson: NarrationPerson }> = [];
 
   if (depth.sceneGeneration) {
-    const beats = await planBeats(input, generate);
+    const beats = await planBeats(input, countedGenerate, noteStep);
+    plannedBeats = beats.length;
     if (beats.length >= 3) {
       mode = "scenes";
       for (let cand = 0; cand < candidatesN; cand += 1) {
         const { draft, scenesGenerated: sg, topupScenes, narrationPerson } = await generateScenesDraft(
           input,
-          generate,
+          countedGenerate,
           beats,
           systemInstruction,
           styleBlock,
@@ -1313,6 +1582,7 @@ export async function generateHumanizedChapter(
           sample,
           depth,
           cand,
+          noteStep,
         );
         scenesGenerated = sg;
         candidateMeta[cand] = { scenesGenerated: sg, topupScenes, narrationPerson };
@@ -1335,7 +1605,8 @@ export async function generateHumanizedChapter(
   if (!rawCandidates.length) {
     mode = "single";
     for (let cand = 0; cand < candidatesN; cand += 1) {
-      let draft = await generate({
+      noteStep(`цельная глава, вариант ${cand + 1}`);
+      let draft = await countedGenerate({
         model: input.model,
         systemInstruction,
         contents: buildSingleChapterPrompt(input, styleExtras)
@@ -1354,16 +1625,24 @@ export async function generateHumanizedChapter(
     || { scenesGenerated, topupScenes: 0, narrationPerson: "unknown" as NarrationPerson };
 
   const before = chosen.score;
-  const touchup = await runTouchupPipeline(chosen.text, generate, {
+  noteStep("литературный проход (доводка аудита)");
+  const touchup = await runTouchupPipeline(chosen.text, countedGenerate, {
     model: input.model,
     personaBlock,
     depth,
   });
   const hygiene = sanitizeGeneratedText(touchup.text);
   // Правки аудита возвращают латиницу — чиним точечно, не переписывая текст целиком.
-  const foreign = await repairForeignWords(hygiene.text, generate, { model: input.model });
+  noteStep("русские слова после аудита");
+  const foreign = await repairForeignWords(hygiene.text, countedGenerate, { model: input.model });
   const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
   const after = aiTellScore(finalHygiene.text);
+
+  const stepsSummary = [...stepCounts.entries()].map(([label, count]) => `${label} ×${count}`).join("; ");
+  emitChapterStep(`Итог конвейера: запросов к модели ${requestNo} — ${stepsSummary}.`);
+  emitChapterStep(
+    `Сцен в главе: ${chosenMeta.scenesGenerated} (план ${plannedBeats} битов${chosenMeta.topupScenes ? `, добор ${chosenMeta.topupScenes}` : ""}), слов ${countWordsRu(finalHygiene.text)}, режим ${mode === "scenes" ? "сцены" : "цельный проход"}.`,
+  );
 
   return {
     text: finalHygiene.text,

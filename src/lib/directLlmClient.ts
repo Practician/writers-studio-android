@@ -632,6 +632,11 @@ function emitApiTrace(trace: ApiTrace): void {
   window.dispatchEvent(new CustomEvent("writers-studio-api-trace", { detail: trace }));
 }
 
+/** Последняя показанная строка автовыбора на ключ: заметка повторялась на каждом запросе
+ *  (20 строк на 19 запросов в живом прогоне 20.09.2026) и закрывала собой полезные шаги
+ *  конвейера. Пишем только когда сдвинулась голова цепочки или причина. */
+const geminiAutoSelectNotes = new Map<string, string>();
+
 function traceFor(provider: Exclude<DirectProvider, "auto">, model: string, key: string, keyIndex: number, keyCount: number, status?: number, message?: string, output?: { chars: number; finishReason?: string }): ApiTrace {
   const url = new URL(endpointFor(provider, model, key));
   return {
@@ -1033,7 +1038,11 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         : coolingSelf
           ? `остывает после лимита до ${timeLabel(coolingSelf.until)}`
           : "по памяти ключа";
-      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, undefined, `Автовыбор модели Gemini по памяти ключа: ${model} → ${learnedModel} (${why}). Запрос не отправлялся — это заметка о порядке цепочки, а не отказ.`));
+      const autoSelectKey = `${model}→${learnedModel} (${why})`;
+      if (geminiAutoSelectNotes.get(key) !== autoSelectKey) {
+        geminiAutoSelectNotes.set(key, autoSelectKey);
+        emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, undefined, `Автовыбор модели Gemini по памяти ключа: ${model} → ${learnedModel} (${why}). Запрос не отправлялся — это заметка о порядке цепочки, а не отказ.`));
+      }
     }
 
     if (provider === "gemini") {

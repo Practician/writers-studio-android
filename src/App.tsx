@@ -310,6 +310,25 @@ export default function App() {
     return () => window.removeEventListener("writers-studio-chapter-volume", handleChapterVolume);
   }, []);
 
+  // Шаги конвейера главы: план, каждая сцена, добор, аудит, разбор запросов.
+  // В живом прогоне 20.09.2026 журнал знал про 19 запросов к модели на 9 сцен, но не знал,
+  // какой шаг сделал какой запрос, и что вернул ответ на 264 знака. Теперь видно построчно.
+  useEffect(() => {
+    if (!isAutonomousApk()) return;
+    const handleChapterStep = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string; level?: "info" | "warn" }>).detail;
+      if (!detail?.message) return;
+      setLlmLogs((prev) => [...prev, {
+        level: detail.level === "warn" ? "warn" : "success",
+        message: `Глава · ${detail.message}`,
+        ts: Date.now(),
+      }].slice(-40));
+      setShowLlmLog(true);
+    };
+    window.addEventListener("writers-studio-chapter-step", handleChapterStep);
+    return () => window.removeEventListener("writers-studio-chapter-step", handleChapterStep);
+  }, []);
+
   useEffect(() => {
     if (!isAutonomousApk()) return;
     const handleKeyRotation = (event: Event) => {
