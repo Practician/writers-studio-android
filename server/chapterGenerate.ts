@@ -68,6 +68,12 @@ export interface HumanizePipelineReport {
   patternDensity: number;
   gatePassed: boolean;
   passesRun: number;
+  /** Доборные сцены сверх плана битов (план кончился, а глава не дотянула до цели). */
+  topupScenes?: number;
+  /** Лицо повествования, зафиксированное по первой сцене и удержанное до конца. */
+  narrationPerson?: NarrationPerson;
+  /** Точечно заменённые иноязычные вставки: слово → русский эквивалент. */
+  foreignWordsReplaced?: Record<string, string>;
   /** Какой маршрут sepia-пайплайна был исполнен: полноценная генерация,
    *  перезапись детекторных сегментов или лёгкая доводка черновика. */
   sepiaRoute?: "generate_full_chapter" | "rewrite_detector_segments" | "humanize_draft";
@@ -98,6 +104,9 @@ export type GenerateFn = (params: {
   responseMimeType?: string;
   responseSchema?: unknown;
   maxOutputTokens?: number;
+  /** Таймаут одного запроса: сцены просят меньше общего клиентского, чтобы
+   *  зависший шлюз не съедал время ротации (живой прогон 20.09.2026 — 90 с на 504). */
+  timeoutMs?: number;
 }) => Promise<string>;
 
 /** Доводка действительно переписала блок, а не поправила пробелы и пунктуацию.
@@ -254,6 +263,20 @@ const SCENE_FOCUSES = [
   "Конкретика пространства: фактура стены, запах, звук шагов, что под ногами — без списка «сенсоров».",
 ];
 
+/** Цель главы по словам для литературного прохода: сцены добираются до неё. */
+export const SCENE_TARGET_WORDS = 3_300;
+/** Сколько слов реально даёт одна сцена (живой прогон 20.09.2026: 6 сцен → 2551 слово, ~425 на сцену). */
+export const SCENE_AVERAGE_WORDS = 430;
+/** Границы плана битов: выводятся из цели главы, а не из «5–7 сцен на глаз». */
+export const MIN_SCENE_BEATS = 8;
+export const MAX_SCENE_BEATS = 12;
+/** Доборные сцены сверх плана, если глава не дотянула до цели. */
+export const MAX_TOPUP_SCENES = 4;
+/** Таймаут одного запроса сцены: зависание шлюза на 90 с стоит дороже ротации на резервную модель. */
+export const SCENE_REQUEST_TIMEOUT_MS = 45_000;
+/** По скольким последним сценам ищется повтор: дословная реплика вернулась через одну сцену. */
+export const SCENE_ANTI_REPEAT_SCENES = 3;
+
 /** Только русская проза: латиница (кроме редких исключений) — брак. */
 export function russianLanguageIssues(text: string): string[] {
   const issues: string[] = [];
@@ -292,8 +315,8 @@ export const beatPlanSchema = {
         },
         required: ["title", "goal", "hook", "endsWith"],
       },
-      minItems: 6,
-      maxItems: 7,
+      minItems: MIN_SCENE_BEATS,
+      maxItems: MAX_SCENE_BEATS,
     },
   },
   required: ["beats"],
@@ -335,8 +358,110 @@ export function buildPersonaAndStyle(
 export const PREVIOUS_TAIL_BEAT_CHARS = 2800;
 export const PREVIOUS_TAIL_SCENE_CHARS = 900;
 
+export type NarrationPerson = "first" | "third" | "unknown";
+
+/** Лицо повествования по авторской речи: реплики в кавычках и после тире не считаются,
+ *  иначе болтливый персонаж перевешивает рассказчика. */
+export function detectNarrationPerson(text: string): NarrationPerson {
+  const narration = String(text || "")
+    .replace(/«[^»]*»/gu, " ")
+    .replace(/„[^“]*“/gu, " ")
+    .replace(/"[^"]*"/gu, " ")
+    .replace(/^[ \t]*[—–-][^\n]*$/gmu, " ")
+    .replace(/\s+/gu, " ");
+  const count = (pattern: RegExp) => (narration.match(pattern) || []).length;
+  const first = count(/(?:^|[^\p{L}])(?:я|меня|мне|мной|мною|мой|моя|моё|мое|мои|нас|нам|нами)(?![\p{L}])/giu);
+  const third = count(/(?:^|[^\p{L}])(?:он|она|оно|они|его|ему|ей|её|ее|их|им|ими|него|нему|неё|нее|них|ним)(?![\p{L}])/giu);
+  if (first >= 3 && first > third * 1.5) return "first";
+  if (third >= 3 && third > first * 1.5) return "third";
+  return "unknown";
+}
+
+export function povDirectiveFor(person: NarrationPerson): string {
+  if (person === "first") {
+    return "ЛИЦО ПОВЕСТВОВАНИЯ (жёстко): первое лицо — рассказчик говорит о себе «я», «меня», «мой». Не переходи на «он» о рассказчике.";
+  }
+  if (person === "third") {
+    return "ЛИЦО ПОВЕСТВОВАНИЯ (жёстко): третье лицо — о героях только «он», «она», по именам. Местоимения «я», «мы», «меня», «мой» о рассказчике ЗАПРЕЩЕНЫ (в прямой речи персонажей они допустимы).";
+  }
+  return "";
+}
+
+/** Сцена сменила лицо повествования — брак: в живом прогоне 20.09.2026 так съехала вторая половина главы. */
+export function narrationPersonMismatch(text: string, locked: NarrationPerson): boolean {
+  if (locked === "unknown") return false;
+  const found = detectNarrationPerson(text);
+  return found !== "unknown" && found !== locked;
+}
+
+/** Доборный бит: план кончился, а глава ещё не дотянула до цели
+ *  (живой прогон 20.09.2026 — 6 битов плана и обрыв на 2551 слове). */
+export function topupBeatFor(beats: ChapterBeat[], index: number, wordsSoFar: number): ChapterBeat {
+  const last = beats[beats.length - 1];
+  const missing = Math.max(0, SCENE_TARGET_WORDS - wordsSoFar);
+  return {
+    title: `Добор ${index - beats.length + 1}: продолжение после «${last?.title || "финала"}»`,
+    goal: `Разверни главу после «${last?.endsWith || "конца последнего бита"}»: ещё одна законченная сцена — новое действие, препятствие или разговор, ведущий к развязке главы. Нужно около ${missing} слов, чтобы глава дотянула до цели.`,
+    hook: "Конкретная деталь обстановки, предмет или действие, которых в главе ещё не было.",
+    endsWith: "Новый поворот, после которого главу можно закончить.",
+  };
+}
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+function contextAround(text: string, word: string): string {
+  const at = text.indexOf(word);
+  if (at < 0) return "";
+  return text.slice(Math.max(0, at - 40), Math.min(text.length, at + word.length + 40)).replace(/\s+/gu, " ").trim();
+}
+
+/** Латиница возвращается правками аудита («потирая нос back-стороной ладони», живой прогон
+ *  20.09.2026): проверка стояла только на черновике сцены. Здесь — точечная замена слова,
+ *  без переписывания текста целиком (полный проход вернул бы новые штампы). */
+export async function repairForeignWords(
+  text: string,
+  generate: GenerateFn,
+  options: { model: string },
+): Promise<{ text: string; replaced: Record<string, string> }> {
+  const allowed = new Set(["OLED", "USB", "GPS", "LED"]);
+  const found = [...new Set((String(text).match(/[A-Za-z]{2,}/gu) || []).filter((word) => !allowed.has(word.toUpperCase())))];
+  if (!found.length) return { text, replaced: {} };
+  try {
+    const raw = await generate({
+      model: options.model,
+      systemInstruction: "Ты корректор русской прозы. Отвечаешь только JSON, без пояснений и markdown.",
+      contents:
+        "В русском тексте остались иноязычные вставки. Для каждого слова дай русский эквивалент, подходящий по смыслу в этом месте (форма слова — как в тексте).\n"
+        + `Слова: ${JSON.stringify(found)}\n`
+        + `Контекст:\n${found.map((word) => `- «${word}»: …${contextAround(text, word)}…`).join("\n")}\n\n`
+        + 'Верни JSON: {"replacements":{"<слово>":"<русское слово>"}}',
+      temperature: 0.2,
+      responseMimeType: "application/json",
+      maxOutputTokens: 1_024,
+      timeoutMs: SCENE_REQUEST_TIMEOUT_MS,
+    });
+    const parsed = parseJsonResponse<{ replacements: Record<string, string> }>(raw, "Замена иноязычных вставок");
+    const replacements = parsed?.replacements || {};
+    let fixed = text;
+    const replaced: Record<string, string> = {};
+    for (const word of found) {
+      const ru = String(replacements[word] || "").trim();
+      if (!ru || /[A-Za-z]/u.test(ru)) continue;
+      const pattern = () => new RegExp(`([^\\p{L}]|^)(${escapeRegExp(word)})(?=[^\\p{L}]|$)`, "gu");
+      if (!pattern().test(fixed)) continue;
+      const before = fixed;
+      fixed = fixed.replace(pattern(), (_match, prefix: string) => `${prefix}${ru}`);
+      if (fixed !== before) replaced[word] = ru;
+    }
+    return { text: fixed, replaced };
+  } catch (error) {
+    console.warn("Foreign word repair failed:", error);
+    return { text, replaced: {} };
+  }
+}
+
 export function buildBeatPlanPrompt(input: ChapterGenerateInput): string {
-  return `Составь 5–7 сюжетных битов (сцен) для полноценной главы (~1800–2800 слов суммарно). Без прозы, только план. Все поля JSON — строго на русском языке.
+  return `Составь ${MIN_SCENE_BEATS}–${MAX_SCENE_BEATS} сюжетных битов (сцен) для полноценной главы (~${SCENE_TARGET_WORDS} слов суммарно, примерно ${SCENE_AVERAGE_WORDS} слов на бит). Без прозы, только план. Все поля JSON — строго на русском языке.
 
 Глава: «${input.currentChapterTitle}»
 Синопсис: ${input.currentChapterSummary || "не задан"}
@@ -347,7 +472,7 @@ ${input.previousChapter ? `Хвост предыдущей главы (для с
 ${input.customPrompt ? `Пожелания автора: ${input.customPrompt}\n` : ""}
 
 Требования:
-- 6–7 битов: экспозиция → развитие → кульминация сцены → последствия. Суммарно глава ≥1800 слов. Не обрывай главу на полпути.
+- ${MIN_SCENE_BEATS}–${MAX_SCENE_BEATS} битов: экспозиция → развитие → кульминация → последствия. Суммарно глава ≥${SCENE_TARGET_WORDS} слов. План обязан покрыть главу целиком: если битов меньше, глава оборвётся на полпути.
 - Каждый бит — одно законченное событие/решение; биты НЕ дублируют друг друга.
 - hook у каждого бита разный (не повторять «ключ/заряд/темнота» во всех).
 - hook — конкретный предмет, число, ощущение или действие, не абстракция.
@@ -365,6 +490,7 @@ export function buildScenePrompt(
   previousTail: string,
   styleExtras: string,
   antiRepeatNotes = "",
+  povDirective = "",
 ): string {
   const focus = SCENE_FOCUSES[beatIndex % SCENE_FOCUSES.length];
   return `Напиши фрагмент главы (бит ${beatIndex + 1} из ${beatCount}).
@@ -374,7 +500,7 @@ export function buildScenePrompt(
 - ЗАПРЕЩЕНЫ английские слова, латиница, транслит вроде «level», «ok», «phone», «wall», «corridor».
 - Цифры и «%» допустимы. Имена из канона — по-русски.
 - Не смешивай алфавиты в одном предложении.
-
+${povDirective ? `\n${povDirective}\n` : ""}
 Бит:
 - Название: ${beat.title}
 - Цель: ${beat.goal}
@@ -414,9 +540,12 @@ export function buildAntiRepeatNotes(previousScenes: string[]): string {
     lines.push(`- Уже встречались числа/проценты: ${numbers.join(", ")}. Не разжёвывай их снова без новой информации.`);
   }
   // Вытащим 2–3 «якоря» из конца последней сцены
-  const last = previousScenes[previousScenes.length - 1] || "";
-  const tail = last.replace(/\s+/gu, " ").trim().slice(-280);
-  if (tail) lines.push(`- Не пересказывай хвост: «…${tail}»`);
+  // Хвосты последних сцен, а не только предыдущей: в живом прогоне 20.09.2026 реплика
+  // «— Слышь, Вась…» вернулась дословно через одну сцену и проверку прошла.
+  for (const scene of previousScenes.slice(-SCENE_ANTI_REPEAT_SCENES)) {
+    const tail = scene.replace(/\s+/gu, " ").trim().slice(-220);
+    if (tail) lines.push(`- Не пересказывай и не повторяй реплики из куска: «…${tail}»`);
+  }
   lines.push("- Не начинай с тех же 4–6 слов, что предыдущий кусок.");
   return lines.join("\n");
 }
@@ -894,7 +1023,7 @@ async function planBeats(
     });
     const plan = parseJsonResponse<{ beats: ChapterBeat[] }>(planRaw, "План битов");
     if (Array.isArray(plan.beats) && plan.beats.length >= 3) {
-      return plan.beats.slice(0, 7).map((beat) => ({
+      return plan.beats.slice(0, MAX_SCENE_BEATS).map((beat) => ({
         title: String(beat.title || "Бит"),
         goal: String(beat.goal || ""),
         hook: String(beat.hook || ""),
@@ -918,14 +1047,30 @@ async function generateScenesDraft(
   sample: string,
   depth: HumanizeDepthConfig,
   candidateIndex: number,
-): Promise<{ draft: string; scenesGenerated: number }> {
+): Promise<{ draft: string; scenesGenerated: number; topupScenes: number; narrationPerson: NarrationPerson }> {
   const scenes: string[] = [];
   let tail = input.previousChapter ? input.previousChapter.slice(-PREVIOUS_TAIL_SCENE_CHARS) : "";
-  for (let index = 0; index < beats.length; index += 1) {
+  // Лицо повествования фиксируется по первой принятой сцене: хвост предыдущей сцены
+  // (900 знаков) его не удерживает — в живом прогоне 20.09.2026 вторая половина главы
+  // съехала из третьего лица в «я».
+  let narrationPerson: NarrationPerson = "unknown";
+  const plannedBeats = beats.length;
+  const maxScenes = Math.min(MAX_SCENE_BEATS, plannedBeats + MAX_TOPUP_SCENES);
+  let topupScenes = 0;
+  for (let index = 0; index < maxScenes; index += 1) {
+    const wordsSoFar = countWordsRu(scenes.join("\n\n"));
+    const isTopup = index >= plannedBeats;
+    if (isTopup) {
+      // Глава уже дотянула до цели — добор не нужен.
+      if (wordsSoFar >= SCENE_TARGET_WORDS) break;
+      topupScenes += 1;
+    }
+    const beat = isTopup ? topupBeatFor(beats, index, wordsSoFar) : beats[index];
     const sceneStyle = sample.length >= 300
       ? [styleBlock, positiveVoiceFewShots(sample, 1 + ((index + candidateIndex) % 2))].filter(Boolean).join("\n\n")
       : styleExtras;
     const antiRepeat = buildAntiRepeatNotes(scenes);
+    const povDirective = povDirectiveFor(narrationPerson);
     let cleaned = "";
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const extra =
@@ -937,22 +1082,28 @@ async function generateScenesDraft(
         systemInstruction,
         contents: buildScenePrompt(
           input,
-          beats[index],
+          beat,
           index + candidateIndex,
-          beats.length,
+          maxScenes,
           tail,
           sceneStyle,
           antiRepeat + extra,
+          povDirective,
         ),
         temperature: modelTemperature(input.model, depth.sceneTemperature, candidateIndex) + attempt * 0.03,
         // free Groq TPM: max_tokens входит в лимит; сервер ещё урежет для groq
         maxOutputTokens: 4096,
+        // Сцена — короткий запрос: 45 с хватает, а зависший на 90 с шлюз
+        // (живой прогон: 2.5-flash висел ровно CLIENT_TIMEOUT_MS) съедает время ротации.
+        timeoutMs: SCENE_REQUEST_TIMEOUT_MS,
       });
       cleaned = sceneText.replace(/^```(?:text|markdown)?\s*/i, "").replace(/```$/i, "").trim();
       const langIssues = russianLanguageIssues(cleaned);
       const words = countWordsRu(cleaned);
-      const prev = scenes[scenes.length - 1] || "";
-      const overlap = prev ? repeatedNgramShare(prev, cleaned, 5) : 0;
+      // Повтор ищем по последним сценам, а не только по предыдущей.
+      const overlap = scenes
+        .slice(-SCENE_ANTI_REPEAT_SCENES)
+        .reduce((max, scene) => Math.max(max, repeatedNgramShare(scene, cleaned, 5)), 0);
       if (langIssues.length) {
         console.warn(`Scene ${index + 1} cand ${candidateIndex + 1}: language issues, retry…`, langIssues[0]);
         continue;
@@ -966,12 +1117,17 @@ async function generateScenesDraft(
         console.warn(`Scene ${index + 1} cand ${candidateIndex + 1}: overlap, retry…`);
         continue;
       }
+      if (narrationPersonMismatch(cleaned, narrationPerson)) {
+        console.warn(`Scene ${index + 1} cand ${candidateIndex + 1}: narration person switched, retry…`);
+        continue;
+      }
       break;
     }
     scenes.push(cleaned);
+    if (narrationPerson === "unknown") narrationPerson = detectNarrationPerson(cleaned);
     tail = cleaned.slice(-PREVIOUS_TAIL_SCENE_CHARS);
   }
-  return { draft: scenes.join("\n\n"), scenesGenerated: scenes.length };
+  return { draft: scenes.join("\n\n"), scenesGenerated: scenes.length, topupScenes, narrationPerson };
 }
 
 export async function generateHumanizedChapter(
@@ -997,13 +1153,14 @@ export async function generateHumanizedChapter(
   let mode: "single" | "scenes" = "single";
   let scenesGenerated = 0;
   const rawCandidates: Array<{ text: string; score: AiTellScore; index: number }> = [];
+  const candidateMeta: Array<{ scenesGenerated: number; topupScenes: number; narrationPerson: NarrationPerson }> = [];
 
   if (depth.sceneGeneration) {
     const beats = await planBeats(input, generate);
     if (beats.length >= 3) {
       mode = "scenes";
       for (let cand = 0; cand < candidatesN; cand += 1) {
-        const { draft, scenesGenerated: sg } = await generateScenesDraft(
+        const { draft, scenesGenerated: sg, topupScenes, narrationPerson } = await generateScenesDraft(
           input,
           generate,
           beats,
@@ -1015,6 +1172,7 @@ export async function generateHumanizedChapter(
           cand,
         );
         scenesGenerated = sg;
+        candidateMeta[cand] = { scenesGenerated: sg, topupScenes, narrationPerson };
         rawCandidates.push({ text: draft, score: aiTellScore(draft), index: cand });
         console.warn(
           `Chapter candidate ${cand + 1}/${candidatesN}: AI-tell=${rawCandidates[cand].score.score} burst=${rawCandidates[cand].score.burstiness.toFixed(2)}`,
@@ -1041,6 +1199,8 @@ export async function generateHumanizedChapter(
 
   const chosen = pickBestChapterCandidate(rawCandidates, depth.scoreGate, depth.minBurstiness);
   console.warn(`Chose chapter candidate #${chosen.index + 1} (score=${chosen.score.score})`);
+  const chosenMeta = candidateMeta[chosen.index]
+    || { scenesGenerated, topupScenes: 0, narrationPerson: "unknown" as NarrationPerson };
 
   const before = chosen.score;
   const touchup = await runTouchupPipeline(chosen.text, generate, {
@@ -1049,10 +1209,13 @@ export async function generateHumanizedChapter(
     depth,
   });
   const hygiene = sanitizeGeneratedText(touchup.text);
-  const after = aiTellScore(hygiene.text);
+  // Правки аудита возвращают латиницу — чиним точечно, не переписывая текст целиком.
+  const foreign = await repairForeignWords(hygiene.text, generate, { model: input.model });
+  const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
+  const after = aiTellScore(finalHygiene.text);
 
   return {
-    text: hygiene.text,
+    text: finalHygiene.text,
     humanizeReport: {
       scoreBefore: before.score,
       scoreAfter: after.score,
@@ -1067,13 +1230,16 @@ export async function generateHumanizedChapter(
       sepiaRoute: "generate_full_chapter",
       reviewPasses: touchup.passesRun,
       recreatePasses: touchup.refinedBlocks,
-      scenesGenerated,
+      scenesGenerated: chosenMeta.scenesGenerated,
+      topupScenes: chosenMeta.topupScenes,
+      narrationPerson: chosenMeta.narrationPerson,
+      foreignWordsReplaced: foreign.replaced,
       depth: depth.id,
       mode,
       candidatesTried: rawCandidates.length,
       candidateScores: rawCandidates.map((c) => c.score.score),
       chosenCandidate: chosen.index,
-      textHygiene: hygiene.report,
+      textHygiene: finalHygiene.report,
     },
   };
 }
@@ -1197,10 +1363,12 @@ export async function rewriteDetectorAiSegments(
     },
   });
   const hygiene = sanitizeGeneratedText(touchup.text);
-  const after = aiTellScore(hygiene.text);
+  const foreign = await repairForeignWords(hygiene.text, generate, { model: options.model });
+  const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
+  const after = aiTellScore(finalHygiene.text);
 
   return {
-    text: hygiene.text,
+    text: finalHygiene.text,
     blocks: revised,
     rewrittenCount,
     humanizeReport: {
@@ -1221,7 +1389,8 @@ export async function rewriteDetectorAiSegments(
       depth: depth.id,
       mode: "single",
       detectorSegmentsRewritten: rewrittenCount,
-      textHygiene: hygiene.report,
+      foreignWordsReplaced: foreign.replaced,
+      textHygiene: finalHygiene.report,
     },
   };
 }
@@ -1249,9 +1418,11 @@ export async function humanizeProseDraft(
     },
   });
   const hygiene = sanitizeGeneratedText(touchup.text);
-  const after = aiTellScore(hygiene.text);
+  const foreign = await repairForeignWords(hygiene.text, generate, { model: options.model });
+  const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
+  const after = aiTellScore(finalHygiene.text);
   return {
-    text: hygiene.text,
+    text: finalHygiene.text,
     humanizeReport: {
       scoreBefore: before.score,
       scoreAfter: after.score,
@@ -1269,7 +1440,8 @@ export async function humanizeProseDraft(
       scenesGenerated: 0,
       depth: depth.id,
       mode: "single",
-      textHygiene: hygiene.report,
+      foreignWordsReplaced: foreign.replaced,
+      textHygiene: finalHygiene.report,
     },
   };
 }

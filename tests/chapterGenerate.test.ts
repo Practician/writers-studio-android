@@ -166,3 +166,136 @@ test("rewriteDetectorAiSegments rewrites only AI labels", async () => {
   assert.ok(result.text.includes("выпил воды") || result.text.includes("Человеческий"));
   assert.ok(!result.text.includes("Волна ужаса") || result.humanizeReport.scoreAfter <= result.humanizeReport.scoreBefore);
 });
+
+// --- сборка 78: добор сцен до цели, замок лица повествования, повтор по трём сценам, латиница после аудита ---
+
+import {
+  beatPlanSchema,
+  buildAntiRepeatNotes,
+  buildBeatPlanPrompt,
+  countWordsRu,
+  detectNarrationPerson,
+  generateHumanizedChapter,
+  MAX_SCENE_BEATS,
+  MIN_SCENE_BEATS,
+  narrationPersonMismatch,
+  povDirectiveFor,
+  repairForeignWords,
+  russianLanguageIssues,
+  SCENE_TARGET_WORDS,
+  topupBeatFor,
+} from "../server/chapterGenerate";
+
+const TEST_WORDS = ["коридор", "стена", "фонарь", "шаг", "поворот", "метка", "холод", "пыль", "дверь", "ключ", "провод", "экран", "ладонь", "шорох", "потолок", "пол", "щель", "тень", "влага", "гул"];
+
+/** Ровный поток слов без латиницы: 5-граммы разных сцен не совпадают (шаг 3 и период 20 взаимно просты). */
+function mockSceneText(index: number, words = 350): string {
+  const parts: string[] = [];
+  for (let i = 0; i < words; i += 1) {
+    if (i % 25 === 0) parts.push("Он");
+    parts.push(TEST_WORDS[(index * 7 + i * 3) % TEST_WORDS.length]);
+  }
+  return parts.join(" ");
+}
+
+test("detectNarrationPerson ignores dialogue lines", () => {
+  const third = "Илья шёл вдоль стены. Он держал фонарь низко. Васька отстал и кашлял. Он остановился у поворота.\n— Слышь, Вась, — сказал Илья. — У нас воды почти не осталось, я проверял.\nОн ждал ответа и смотрел на щель в стене.";
+  assert.equal(detectNarrationPerson(third), "third");
+  const first = "Я шёл вдоль стены. Мне было холодно. Я держал фонарь низко. Мой шаг сбился.";
+  assert.equal(detectNarrationPerson(first), "first");
+});
+
+test("narration person switch is a defect", () => {
+  const scene = "Я протёр лоб тыльной стороной ладони. Я слышал собственное дыхание. Меня вело в сторону.";
+  assert.equal(narrationPersonMismatch(scene, "third"), true);
+  assert.equal(narrationPersonMismatch(scene, "first"), false);
+  assert.equal(narrationPersonMismatch(scene, "unknown"), false);
+});
+
+test("pov directive locks the person for later scenes", () => {
+  assert.match(povDirectiveFor("third"), /третье лицо/);
+  assert.match(povDirectiveFor("first"), /первое лицо/);
+  assert.equal(povDirectiveFor("unknown"), "");
+});
+
+test("beat plan asks for scenes enough to fill the chapter", () => {
+  assert.equal(beatPlanSchema.properties.beats.minItems, MIN_SCENE_BEATS);
+  assert.equal(beatPlanSchema.properties.beats.maxItems, MAX_SCENE_BEATS);
+  const prompt = buildBeatPlanPrompt(baseInput({ currentChapterTitle: "Глава 4" }));
+  assert.ok(prompt.includes(String(SCENE_TARGET_WORDS)));
+  assert.ok(prompt.includes(`${MIN_SCENE_BEATS}–${MAX_SCENE_BEATS}`));
+});
+
+test("topup beat continues the chapter when the plan runs out", () => {
+  const beats = fallbackBeatsFromSynopsis(baseInput({ currentChapterTitle: "Глава 4. Ночь у чужого входа" }));
+  const beat = topupBeatFor(beats, beats.length, 2_000);
+  assert.match(beat.title, /Добор 1/);
+  assert.match(beat.goal, new RegExp(String(SCENE_TARGET_WORDS - 2_000)));
+});
+
+test("anti-repeat notes cover the last three scenes, not only the previous one", () => {
+  const scenes = [
+    "Первый кусок с уникальной репликой про котелок и воду.",
+    "Второй кусок про фонарь и метку на стене.",
+    "Третий кусок про поворот и узкую щель.",
+  ];
+  const notes = buildAntiRepeatNotes(scenes);
+  assert.ok(notes.includes("котелок"));
+});
+
+test("foreign words are replaced in place, without rewriting the text", async () => {
+  const text = "Он потёр нос back-стороной ладони и шагнул в проём.";
+  const generate = async () => JSON.stringify({ replacements: { back: "тыльной" } });
+  const result = await repairForeignWords(text, generate, { model: "mock" });
+  assert.equal(result.text, "Он потёр нос тыльной-стороной ладони и шагнул в проём.");
+  assert.deepEqual(result.replaced, { back: "тыльной" });
+  assert.equal(russianLanguageIssues(result.text).length, 0);
+});
+
+test("foreign word repair keeps the text when the model answers junk", async () => {
+  const text = "Он потёр нос back-стороной ладони.";
+  const generate = async () => "не json";
+  const result = await repairForeignWords(text, generate, { model: "mock" });
+  assert.equal(result.text, text);
+  assert.deepEqual(result.replaced, {});
+});
+
+test("scene generation tops the chapter up to the target and locks narration person", async () => {
+  const calls: Array<{ system: string; contents: string; timeoutMs?: number }> = [];
+  const generate = async (params: any): Promise<string> => {
+    calls.push({ system: params.systemInstruction, contents: params.contents, timeoutMs: params.timeoutMs });
+    if (/сценарист-структуралист/i.test(params.systemInstruction)) {
+      return JSON.stringify({
+        beats: Array.from({ length: 6 }, (_, i) => ({ title: `Бит ${i + 1}`, goal: `Событие ${i + 1}`, hook: `Зацепка ${i + 1}`, endsWith: `Конец ${i + 1}` })),
+      });
+    }
+    if (params.responseMimeType === "application/json") return JSON.stringify({ blocks: [] });
+    if (params.contents.includes("Бит:")) {
+      const sceneIndex = calls.filter((call) => call.contents.includes("Бит:")).length - 1;
+      return mockSceneText(sceneIndex);
+    }
+    return "";
+  };
+  const sample = Array.from({ length: 40 }, (_, i) => `Он шёл вдоль стены и считал шаги, номер ${i}. Пыль лежала на полу ровным слоем.`).join(" ");
+  const result = await generateHumanizedChapter(
+    baseInput({
+      currentChapterTitle: "Глава 4. Ночь у чужого входа",
+      currentChapterSummary: "Герой ищет вход",
+      authorSample: sample,
+      humanizeDepth: "maximum",
+      chapterCandidates: 1,
+    }),
+    generate,
+  );
+  assert.equal(result.humanizeReport.mode, "scenes");
+  assert.equal(result.humanizeReport.narrationPerson, "third");
+  assert.equal(result.humanizeReport.topupScenes, 4);
+  assert.equal(result.humanizeReport.scenesGenerated, 10);
+  assert.ok(countWordsRu(result.text) >= SCENE_TARGET_WORDS);
+  const sceneCalls = calls.filter((call) => call.contents.includes("Бит:"));
+  // Сценам выставлен короткий таймаут: зависший на 90 с шлюз не должен их держать.
+  assert.equal(sceneCalls[0].timeoutMs, 45_000);
+  // Первая сцена идёт без замка, вторая — уже с замком третьего лица.
+  assert.ok(!sceneCalls[0].contents.includes("ЛИЦО ПОВЕСТВОВАНИЯ"));
+  assert.ok(sceneCalls[1].contents.includes("ЛИЦО ПОВЕСТВОВАНИЯ"));
+});

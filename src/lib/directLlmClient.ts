@@ -40,6 +40,9 @@ type DirectRequest = {
   /** Явный лимит ответа: особенно важен для NVIDIA, где серверный default равен 1024. */
   maxTokens?: number;
   json?: boolean;
+  /** Таймаут одного запроса (мс). Сцены литературного прохода просят 45 с вместо 90:
+   *  зависший шлюз дороже быстрой ротации на резервную модель. */
+  timeoutMs?: number;
   /** Внутреннее: провайдеры, уже испробованные в этой цепочке каскада (не для внешних вызовов). */
   triedProviders?: readonly Exclude<DirectProvider, "auto">[];
 };
@@ -905,7 +908,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   // прежде чем сам вернёт 504 — это удваивает простой при повторе на том же ключе.
   // Обрываем раньше и обрабатываем как штатный таймаут шлюза (тот же код 504),
   // чтобы вся существующая логика ретраев/ротации/фолбэка сработала без изменений.
-  const CLIENT_TIMEOUT_MS = 90_000;
+  const CLIENT_TIMEOUT_MS = request.timeoutMs ?? 90_000;
   async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
     if (request.signal?.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
     if (Capacitor.isNativePlatform()) {
@@ -1533,6 +1536,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
     temperature: params.temperature,
     maxTokens: params.maxOutputTokens ?? maxTokensForAction(body?.action),
     json: params.responseMimeType === "application/json",
+    timeoutMs: params.timeoutMs,
   });
 
   // Персона повествования для пайплайна: паспорт голоса автора или выбранный
@@ -1641,6 +1645,8 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         const generated = await generateHumanizedChapter(input, pipelineGenerate);
         const words = countGeneratedWords(generated.text);
         const humanizedSegments = generated.humanizeReport.scenesGenerated || 1;
+        const topupScenes = generated.humanizeReport.topupScenes || 0;
+        const narrationPerson = generated.humanizeReport.narrationPerson;
         // Почему глава короче цели — в журнал: этот путь вообще не называл причину,
         // и автор видел только «2693/3300 слов после 6 фрагментов» (живой журнал 18.09.2026).
         notifyChapterVolume(
@@ -1650,7 +1656,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           words >= CHAPTER_TARGET_WORDS,
           words >= CHAPTER_TARGET_WORDS
             ? undefined
-            : `литературный проход собрал ${humanizedSegments} сцен и остановился — до цели главы не хватило ${CHAPTER_TARGET_WORDS - words} слов`,
+            : `литературный проход собрал ${humanizedSegments} сцен${topupScenes ? ` (включая ${topupScenes} доборных)` : ""} и остановился — до цели главы не хватило ${CHAPTER_TARGET_WORDS - words} слов`,
         );
         notifyHumanizePass(generated.humanizeReport.depth, generated.text.length, generated.text.length, {
           scoreBefore: generated.humanizeReport.scoreBefore,
@@ -1661,7 +1667,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           // Раньше сюда дважды передавалась одна и та же длина, и журнал писал
           // «17924 → 17924 символов» — тавтологию, по которой нельзя понять результат
           // прохода (живой журнал 18.09.2026). Теперь итог честный.
-          summary: `литературный проход завершён: текст ${generated.text.length} символов, сцен: ${humanizedSegments}`,
+          summary: `литературный проход завершён: текст ${generated.text.length} символов, сцен: ${humanizedSegments}${topupScenes ? ` (доборных ${topupScenes})` : ""}${narrationPerson && narrationPerson !== "unknown" ? `, лицо повествования: ${narrationPerson === "first" ? "первое" : "третье"}` : ""}`,
         });
         return json({
           result: generated.text,
