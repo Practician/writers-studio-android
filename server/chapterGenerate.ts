@@ -70,6 +70,14 @@ export interface HumanizePipelineReport {
   burstiness: number;
   openerRepetition: number;
   patternDensity: number;
+  /** Gate-оценка (без стаккато и thought-штрафа) и полная диагностическая сумма. */
+  gateScore?: number;
+  diagnosticScore?: number;
+  staccatoComponent?: number;
+  thoughtPenalty?: number;
+  dialogueShare?: number;
+  shortShare?: number;
+  maxShortChain?: number;
   gatePassed: boolean;
   passesRun: number;
   /** Доборные сцены сверх плана битов (план кончился, а глава не дотянула до цели). */
@@ -85,6 +93,8 @@ export interface HumanizePipelineReport {
   reviewPasses?: number;
   /** Число пересозданных фрагментов (recreate block'ов/кандидатов). */
   recreatePasses?: number;
+  /** Честная причина, если доводка ничего не меняла (штампов/ритм-аномалий нет). */
+  note?: string;
   scenesGenerated: number;
   depth: HumanizeDepth;
   mode: "single" | "scenes";
@@ -300,6 +310,14 @@ export const SCENE_SEAM_SENTENCES = 3;
  *  в живом прогоне 20.09.2026 журнал знал про 19 запросов к модели и 9 сцен, но не знал,
  *  какой шаг конвейера сделал какой запрос и что вернул короткий ответ. Теперь каждый шаг
  *  конвейера идёт отдельным событием. Вызов безопасен и на сервере (Node). */
+// Правило ритма фраз в промпте сцены. Прежняя формулировка (сборка ≤82) требовала
+// 25+ слов и не больше двух пятых коротких фраз — по живой приёмке именно она
+// выравнивала диалог: сборка 80 (33 % коротких) дала 2 живых сегмента внешнего
+// детектора, сборка 82 (13.6 %) — 0 живых при 21/21 AI, хотя локальный аудит «улучшился».
+// RHYTHM_RULE_OLD=1 возвращает прежний текст (для A/B), RHYTHM_RULE_OFF=1 убирает правило.
+const OLD_RHYTHM_RULE = "Ритм фраз: длину предложений чередуй, но без рубцов. Хотя бы одно длинное предложение на 25+ слов в сцене, а совсем коротких (до пяти слов) — не больше двух пятых от всех. Сплошной обмен короткими репликами на всю сцену — подпись модели, а не темп.";
+const RHYTHM_RULE = "Ритм фраз: длину предложений чередуй, не выравнивай под средний размер. Одна длинная фраза (25+ слов) на сцену — хорошо, если звучит живо, а не ради метра. Короткие фразы и обмен репликами — норма живой прозы: не подгоняй их под длину соседних.";
+
 export function emitChapterStep(message: string, level: "info" | "warn" = "info"): void {
   console.warn(`[глава] ${message}`);
   const host = globalThis as unknown as {
@@ -660,7 +678,7 @@ ${characterNotes ? `\n${characterNotes}\n` : ""}
 - Фокус этого куска: ${focus}
 
 Объём: ${scenePlan.minWords}–${scenePlan.maxWords} слов (полноценный кусок главы, не набросок). Раскрой действие и восприятие. Не добивай объём пустыми повторами и не пересказывай уже написанное.
-Ритм фраз: длину предложений чередуй, но без рубцов. Хотя бы одно длинное предложение на 25+ слов в сцене, а совсем коротких (до пяти слов) — не больше двух пятых от всех. Сплошной обмен короткими репликами на всю сцену — подпись модели, а не темп.
+${process.env.RHYTHM_RULE_OFF ? "" : (process.env.RHYTHM_RULE_OLD ? OLD_RHYTHM_RULE : RHYTHM_RULE)}
 
 ${architectureNotes(beatIndex)}${modelFingerprintGuidance(providerOfModel(input.model), input.model)}
 
@@ -975,6 +993,9 @@ function priorityMatches(block: string): string[] {
     .map((hit) => hit.match);
 }
 
+/** С какой доли соседних предложений с одним зачином включается ритм-доводка. */
+export const REPEATED_OPENER_TRIGGER = 0.2;
+
 export async function runTouchupPipeline(
   text: string,
   generate: GenerateFn,
@@ -984,11 +1005,12 @@ export async function runTouchupPipeline(
     depth: HumanizeDepthConfig;
     targetBurstiness?: number;
   },
-): Promise<{ text: string; refinedBlocks: number; passesRun: number; unresolvedLabels: string[] }> {
+): Promise<{ text: string; refinedBlocks: number; passesRun: number; unresolvedLabels: string[]; cleanNote?: string }> {
   let current = text;
   let refinedBlocks = 0;
   let passesRun = 0;
   let unresolvedLabels: string[] = [];
+  let cleanNote: string | undefined;
 
   const touchupOnce = async (
     blocks: string[],
@@ -1093,9 +1115,21 @@ export async function runTouchupPipeline(
       cleanScoreMax: options.depth.cleanScoreMax,
     });
     if (!flagged.length) {
-      // Штампов нет — возможно, нужен только ритм
+      // Штампов нет — остаётся только ритм: низкий разброс длин фраз или одинаковые зачины.
       const score = aiTellScore(current);
-      if (humanizeGatePassed(score, options.depth.scoreGate, options.depth.minBurstiness)) break;
+      const measurable = (score.words ?? 0) >= MIN_BURSTINESS_WORDS;
+      const flatRhythm = measurable && score.burstiness < options.depth.minBurstiness;
+      const sameOpeners = measurable && score.openerRepetition >= REPEATED_OPENER_TRIGGER;
+      if (!flatRhythm && !sameOpeners) {
+        if (humanizeGatePassed(score, options.depth.scoreGate, options.depth.minBurstiness)) {
+          cleanNote = "штампов и ритм-аномалий нет — доводка не требовалась";
+          break;
+        }
+        if (!measurable && round === options.depth.touchupRounds - 1) {
+          cleanNote = `штампов нет; ритм на ${score.words ?? 0} словах не измеряется (порог ${MIN_BURSTINESS_WORDS})`;
+          break;
+        }
+      }
     } else {
       passesRun += 1;
       try {
@@ -1127,10 +1161,13 @@ export async function runTouchupPipeline(
     const score = aiTellScore(current);
     if (humanizeGatePassed(score, options.depth.scoreGate, options.depth.minBurstiness)) break;
 
-    // Отдельный pass: низкий burstiness при уже чистых штампах.
-    // На коротком тексте разброс длин предложений — шум, поэтому не гоним пасс.
-    if ((score.words ?? 0) >= MIN_BURSTINESS_WORDS
-      && score.burstiness < options.depth.minBurstiness && heavyStampsClear(score)) {
+    // Отдельный pass: ровный ритм (низкий разброс длин фраз) или одинаковые зачины —
+    // уже при чистых штампах. На коротком тексте разброс длин — шум, пасс не гоним.
+    const rhythmFlat = (score.words ?? 0) >= MIN_BURSTINESS_WORDS
+      && score.burstiness < options.depth.minBurstiness;
+    const openersRepeat = (score.words ?? 0) >= MIN_BURSTINESS_WORDS
+      && score.openerRepetition >= REPEATED_OPENER_TRIGGER;
+    if ((rhythmFlat || openersRepeat) && heavyStampsClear(score)) {
       const structure = splitTextStructure(current);
       const rhythmFlags = flagBlocksForTouchup(structure.blocks, {
         maximum: Math.min(8, options.depth.maxTouchupBlocks),
@@ -1158,7 +1195,7 @@ export async function runTouchupPipeline(
     unresolvedLabels = [...new Set(priorityMatches(current))];
   }
 
-  return { text: current, refinedBlocks, passesRun, unresolvedLabels };
+  return { text: current, refinedBlocks, passesRun, unresolvedLabels, cleanNote };
 }
 
 function heavyStampsClear(score: ReturnType<typeof aiTellScore>): boolean {
@@ -1742,6 +1779,14 @@ export async function generateHumanizedChapter(
       burstiness: after.burstiness,
       openerRepetition: after.openerRepetition,
       patternDensity: after.patternDensity,
+      gateScore: after.score,
+      diagnosticScore: after.diagnosticScore,
+      staccatoComponent: after.staccatoComponent,
+      thoughtPenalty: after.thoughtPenalty,
+      dialogueShare: after.dialogueShare,
+      shortShare: after.shortShare,
+      maxShortChain: after.maxShortChain,
+      note: touchup.cleanNote,
       gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
       passesRun: touchup.passesRun,
       sepiaRoute: "generate_full_chapter",

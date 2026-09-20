@@ -226,13 +226,35 @@ export function repeatedOpenerShare(text: string): number {
 }
 
 export interface AiTellScore {
-  score: number; // 0 — человечно, 100 — набор генеративных признаков
+  /** Оценка по признакам внешнего детектора: штампы, интерфейсный лог, ровный ритм,
+   *  одинаковые зачины, инвентарь локации. Именно она идёт в gate. */
+  score: number;
+  /** Диагностика: score + стаккато + отсутствие thought-глаголов. В gate НЕ входит. */
+  diagnosticScore?: number;
+  /** Диагностика: балл за цепочки коротких предложений в нарративе. В gate не входит. */
+  staccatoComponent?: number;
+  /** Диагностика: балл за отсутствие глаголов мысли. В gate не входит. */
+  thoughtPenalty?: number;
+  /** Доля реплик диалога в тексте — по ним стаккато не считается. */
+  dialogueShare?: number;
+  /** Доля коротких предложений и самая длинная цепочка — по нарративу, без реплик. */
+  shortShare?: number;
+  maxShortChain?: number;
   patternDensity: number; // взвешенные попадания на 1000 слов
   burstiness: number;
   openerRepetition: number;
   /** Объём текста, по которому считался ритм (на коротком фрагменте burstiness шумит). */
   words?: number;
   hits: AiTellHit[];
+}
+
+/** Реплика героя. Обмен короткими фразами — рисунок живой прозы: в живой приёмке
+ *  2026-09 он совпал с единственным HUMAN-сегментом внешнего детектора, поэтому
+ *  в стаккато-штраф такие предложения не берём. */
+export function isDialogueSentence(sentence: string): boolean {
+  const trimmed = sentence.trim();
+  if (!trimmed) return false;
+  return /^[—–―-]\s/u.test(trimmed) || /^[«"„”]/.test(trimmed);
 }
 
 /** Доля «интерфейсных» попаданий: нумерованный лог, счётчики, англ. UI. */
@@ -249,14 +271,19 @@ export function interfaceTellShare(text: string): number {
  * Доля предложений ≤ maxWords и максимальная цепочка таких подряд.
  * Yandex-AI: shortShare×1.8, maxShortChain×2 vs HUMAN (live 2026-07).
  */
-export function shortSentenceStats(text: string, maxWords = 4): {
+export function shortSentenceStats(text: string, maxWords = 4, isDialogue?: (sentence: string) => boolean): {
   share: number;
   maxChain: number;
   count: number;
   total: number;
+  dialogueSkipped: number;
 } {
-  const lengths = splitSentences(text).map((sentence) => wordsOf(sentence).length).filter((n) => n > 0);
-  if (!lengths.length) return { share: 0, maxChain: 0, count: 0, total: 0 };
+  const sentences = splitSentences(text);
+  const measured = isDialogue ? sentences.filter((sentence) => !isDialogue(sentence)) : sentences;
+  const lengths = measured.map((sentence) => wordsOf(sentence).length).filter((n) => n > 0);
+  if (!lengths.length) {
+    return { share: 0, maxChain: 0, count: 0, total: 0, dialogueSkipped: sentences.length };
+  }
   let chain = 0;
   let maxChain = 0;
   let count = 0;
@@ -269,7 +296,7 @@ export function shortSentenceStats(text: string, maxWords = 4): {
       chain = 0;
     }
   }
-  return { share: count / lengths.length, maxChain, count, total: lengths.length };
+  return { share: count / lengths.length, maxChain, count, total: lengths.length, dialogueSkipped: sentences.length - measured.length };
 }
 
 export function aiTellScore(text: string): AiTellScore {
@@ -281,7 +308,7 @@ export function aiTellScore(text: string): AiTellScore {
   const burstiness = sentenceBurstiness(text);
   const openerRepetition = repeatedOpenerShare(text);
   const interfaceShare = interfaceTellShare(text);
-  const short = shortSentenceStats(text, 4);
+  const short = shortSentenceStats(text, 4, isDialogueSentence);
   const sentences = splitSentences(text);
 
   // Составляющие: штампы (до 45), UI-лог (до 15), стаккато (до 20), ровный ритм (до 15), зачины (до 10),
@@ -312,23 +339,42 @@ export function aiTellScore(text: string): AiTellScore {
   // Если текст >200 слов и thoughtVerbsPerK < 2 — штрафуем (AI-индикатор).
   let thoughtPenalty = 0;
   if (wordCount > 200) {
-    const thoughtVerbs = (text.match(/\b(?:подумал|подумала|решил|решила|понял|поняла|осознал|осознала|вспомнил|вспомнила|представил|представила|казались?|показалось?)\b/giu) || []).length;
+    const thoughtVerbs = (text.match(/\b(?:подумал|подумала|решил|решила|понял|поняла|осознал|осознала|вспомнил|вспомнила|представил|представила|казал(?:ся|ась|ось|ись|ись)|казаться|показал(?:ся|ась|ось))\b/giu) || []).length;
     const thoughtPerK = (thoughtVerbs / wordCount) * 1000;
     if (thoughtPerK < 2) {
       thoughtPenalty = Math.min((2 - thoughtPerK) * 3, 6);
     }
   }
 
+  // Gate-оценка собирается ТОЛЬКО из признаков внешнего детектора. Стаккато и
+  // thought-штраф в неё не входят: вместе они давали минимум 10-14 баллов при пороге 8
+  // у глубины «Максимум» — gate становился недостижимым по построению, а «улучшение»
+  // шло за счёт выравнивания реплик (сборка 80 → 82: локальный аудит лучше, внешний
+  // детектор хуже). Оба компонента остаются в отчёте как диагностика.
   const score = Math.round(
     Math.min(
       Math.max(0,
-        patternComponent + interfaceComponent + staccatoComponent + rhythmComponent + openerComponent
-        + inventoryComponent + thoughtPenalty
+        patternComponent + interfaceComponent + rhythmComponent + openerComponent
+        + inventoryComponent
       ),
       100,
     ),
   );
-  return { score, patternDensity, burstiness, openerRepetition, words: wordsOf(text).length, hits };
+  const diagnosticScore = Math.round(Math.min(Math.max(0, score + staccatoComponent + thoughtPenalty), 100));
+  return {
+    score,
+    diagnosticScore,
+    staccatoComponent: Math.round(staccatoComponent),
+    thoughtPenalty: Math.round(thoughtPenalty),
+    dialogueShare: sentences.length ? sentences.filter(isDialogueSentence).length / sentences.length : 0,
+    shortShare: short.share,
+    maxShortChain: short.maxChain,
+    patternDensity,
+    burstiness,
+    openerRepetition,
+    words: wordsOf(text).length,
+    hits,
+  };
 }
 
 /** 3+ последовательных описаний физики пространства — инвентарь локации.
