@@ -98,10 +98,19 @@ test("touchup pipeline removes catalog stamps via mock model", async () => {
   assert.equal(after.hits.filter((hit) => hit.id === "vremya-zamerlo").length, 0);
 });
 
-test("humanizeProseDraft report includes gate fields", async () => {
+test("humanizeProseDraft report includes enhanced phases and gate fields", async () => {
   // Связная бытовая фраза без стаккато (Yandex v2 штрафует цепочки «Шаг. Ещё.»)
   const clean = "Я шёл вдоль стены и слушал, как ключ тихо звенит в кармане. Воздух был тёплым, но сырости уже не было.";
-  const generate = async () => JSON.stringify({ blocks: [clean] });
+  const generate = async (params: { contents: string; responseMimeType?: string }) => {
+    if (/ЗАДАЧА ФАЗЫ 1/iu.test(params.contents)) {
+      return "Я шёл вдоль стены. Ключ тихо звенел в кармане. Воздух был тёплым, сырости уже не было.";
+    }
+    if (/ЗАДАЧА ФАЗЫ 3/iu.test(params.contents)) {
+      return "Я шёл вдоль стены. Ключ тихо звенел в кармане. Воздух был тёплым — сырости уже не было.";
+    }
+    if (params.responseMimeType === "application/json") return JSON.stringify({ blocks: [clean] });
+    return clean;
+  };
   const result = await humanizeProseDraft(clean, generate as any, {
     model: "mock",
     personaBlock: "",
@@ -110,6 +119,8 @@ test("humanizeProseDraft report includes gate fields", async () => {
   assert.equal(typeof result.humanizeReport.gatePassed, "boolean");
   assert.equal(result.humanizeReport.depth, "fast");
   assert.equal(result.humanizeReport.mode, "single");
+  assert.equal(result.humanizeReport.enhancedScoreUsed, true);
+  assert.ok((result.humanizeReport.phasesExecuted?.length ?? 0) >= 1);
   assert.ok(result.humanizeReport.scoreAfter <= 20);
 });
 

@@ -1119,13 +1119,18 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
                         {humanizeReport.sepiaRoute ? ` · маршрут: ${humanizeReport.sepiaRoute}` : ""}
                         {humanizeReport.reviewPasses != null ? ` · review: ${humanizeReport.reviewPasses}` : ""}
                         {humanizeReport.recreatePasses != null ? ` · recreate: ${humanizeReport.recreatePasses}` : ""}
+                        {humanizeReport.enhancedScoreUsed ? " · enhanced score: on" : ""}
+                        {humanizeReport.phasesExecuted?.length ? ` · фазы: ${humanizeReport.phasesExecuted.join(", ")}` : ""}
+                        {humanizeReport.topupScenes != null ? ` · topup: ${humanizeReport.topupScenes}` : ""}
+                        {humanizeReport.replanTriggered ? " · replan: да" : ""}
                       </>
                     ) : ""}
                   </p>
                 )}
-                {(humanizeReport.unresolvedLabels?.length ?? 0) > 0 && (
+                {((humanizeReport.unresolvedLabels?.length ?? 0) > 0 || (humanizeReport.architectureChecksApplied?.length ?? 0) > 0) && (
                   <p className="text-[10px] text-amber-400 mt-1">
-                    Не удалось убрать: {humanizeReport.unresolvedLabels!.join(", ")} — просмотрите вручную.
+                    {(humanizeReport.unresolvedLabels?.length ?? 0) > 0 ? `Не удалось убрать: ${humanizeReport.unresolvedLabels!.join(", ")}. ` : ""}
+                    {(humanizeReport.architectureChecksApplied?.length ?? 0) > 0 ? `Структурные сигналы: ${humanizeReport.architectureChecksApplied!.slice(0, 3).join(", ")}.` : ""}
                   </p>
                 )}
               </div>

@@ -747,10 +747,11 @@ test("rewrite_detector_segments batches AI segments through the pipeline and kee
   }));
   const payload = await response.json();
   assert.equal(response.status, 200);
-  // Два AI-сегмента уходят одним батч-вызовом пайплайна (не по одному на сегмент).
-  assert.equal(rewriteCalls.length, 1);
-  assert.equal(rewriteCalls[0].includes("ai-segments"), true);
-  assert.equal(rewriteCalls[0].includes("ФРАГМЕНТ:"), false);
+  // Два AI-сегмента уходят одним батч-вызовом на переписывание; дальше возможны sepia-фазы,
+  // но посегментной отправки быть не должно.
+  const segmentBatchCalls = rewriteCalls.filter((prompt) => prompt.includes("ai-segments"));
+  assert.equal(segmentBatchCalls.length, 1);
+  assert.equal(segmentBatchCalls[0].includes("ФРАГМЕНТ:"), false);
   // Пайплайн получает выбранную модель провайдера.
   assert.equal(requestedModels[0], "deepseek-ai/deepseek-v4-flash-0731");
   // HUMAN-сегменты сохраняются дословно и не отправлялись на переписывание.

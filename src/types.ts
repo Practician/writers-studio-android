@@ -114,6 +114,7 @@ export interface HumanizeReport {
   gatePassed?: boolean;
   passesRun?: number;
   scenesGenerated?: number;
+  topupScenes?: number;
   depth?: "fast" | "balanced" | "maximum";
   mode?: "single" | "scenes";
   candidatesTried?: number;
@@ -124,6 +125,19 @@ export interface HumanizeReport {
   sepiaRoute?: string;
   reviewPasses?: number;
   recreatePasses?: number;
+  enhancedScoreUsed?: boolean;
+  phasesExecuted?: string[];
+  negativeProfileUsed?: boolean;
+  architectureChecksApplied?: string[];
+  replanTriggered?: boolean;
+  extendedAiTellScore?: number;
+  extendedGateVerdict?: "PASS" | "REVIEW" | "FAIL";
+  extendedMetrics?: {
+    paragraphLengthCV: number;
+    passiveVoiceShare: number;
+    uniqueWordRatio200: number;
+    connectorDiversity: number;
+  };
   textHygiene?: {
     removedHiddenCharacters: number;
     normalizedSpaces: number;

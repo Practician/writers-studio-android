@@ -9,8 +9,9 @@
  *  - Groq (llama-3.3-70b): низкая предсказуемость токенов, diversity sampling
  *  - Yandex Detector: обратная инженерия из LOO-калибровки (src/data/labyrinth/adaptive-detector-seed.ts)
  * 
- * НЕ подключается к приложению напрямую. Все экспорты — чистые функции,
- * совместимые с интерфейсами server/humanStyle.ts.
+ * Даёт чистые функции для серверного sepia-пайплайна.
+ * Клиент не вызывает этот модуль напрямую, но APK идёт через server/chapterGenerate.ts,
+ * который использует эти экспорты как боевой enhanced-слой.
  */
 
 import type { AiTellPattern, AiTellCategory } from "./humanStyle";

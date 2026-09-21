@@ -8,14 +8,23 @@ import {
   parseJsonResponse,
 } from "./authorPipeline";
 import {
+  AI_TELL_CATALOG,
+  AI_TELL_CATALOG_V2_EXTRA,
   aiTellScore,
+  aiTellScoreEnhanced,
   blockHumanizeIssues,
   blockQualityIssues,
+  buildLexicalDiversifierPrompt,
+  buildMicroImperfectionsPrompt,
+  buildNegativeVoiceProfile,
+  buildRhythmBreakerPrompt,
+  computeExtendedMetrics,
   detectAiTells,
   extractNumbers,
   flagBlocksForTouchup,
   humanStyleDirectives,
   humanizeGatePassed,
+  negativeVoiceGuidanceBlock,
   pickBestVariant,
   rankChapterCandidate,
   positiveVoiceFewShots,
@@ -23,8 +32,10 @@ import {
   repeatedNgramShare,
   resolveHumanizeDepth,
   rhythmIssues,
+  runMultiDetectorGate,
   sentenceBurstiness,
   type AiTellScore,
+  type GenreContext,
   type HumanizeDepth,
   type HumanizeDepthConfig,
   voicePersonaBlock,
@@ -36,6 +47,7 @@ import {
   modelFingerprintGuidance,
 } from "./humanStyle";
 import { sanitizeGeneratedText, type TextHygieneReport } from "./textHygiene";
+import { computeStyleStats } from "../src/lib/authorAudit";
 
 // Сценовая генерация главы + многопроходная доводка.
 // Не оптимизирует под внешние детекторы — только локальный craft-score и голос автора.
@@ -93,6 +105,20 @@ export interface HumanizePipelineReport {
   reviewPasses?: number;
   /** Число пересозданных фрагментов (recreate block'ов/кандидатов). */
   recreatePasses?: number;
+  /** Включён ли расширенный scoring/gate и какие фазы реально исполнились. */
+  enhancedScoreUsed?: boolean;
+  phasesExecuted?: Array<"rhythm-breaker" | "lexical-diversifier" | "micro-imperfections">;
+  negativeProfileUsed?: boolean;
+  architectureChecksApplied?: string[];
+  replanTriggered?: boolean;
+  extendedAiTellScore?: number;
+  extendedGateVerdict?: "PASS" | "REVIEW" | "FAIL";
+  extendedMetrics?: {
+    paragraphLengthCV: number;
+    passiveVoiceShare: number;
+    uniqueWordRatio200: number;
+    connectorDiversity: number;
+  };
   /** Честная причина, если доводка ничего не меняла (штампов/ритм-аномалий нет). */
   note?: string;
   scenesGenerated: number;
@@ -234,6 +260,7 @@ export function isAcceptableRewrite(source: string, candidate: string, targetBur
   if (!candidate.trim() || candidate.trim() === source.trim()) return false;
   if (blockQualityIssues(source, candidate).length) return false;
   if (candidate.length > source.length * TOUCHUP_MAX_GROWTH) return false;
+  if (countWordsRu(source) >= 120 && countWordsRu(candidate) < Math.max(40, Math.floor(countWordsRu(source) * 0.7))) return false;
   const beforeHits = detectAiTells(source).length;
   const afterHits = detectAiTells(candidate).length;
   if (afterHits > beforeHits) return false;
@@ -353,6 +380,256 @@ export function russianLanguageIssues(text: string): string[] {
  *  (тире тоже попадало в счёт), а отчёт — по словоподобным токенам: глава считалась
  *  добранной по одному счётчику и недобранной по другому (живой прогон 20.09.2026 —
  *  цикл встал на 8 сценах, отчёт показал 3152/3300 слов). */
+type SepiaRoute = "generate_full_chapter" | "rewrite_detector_segments" | "humanize_draft";
+type SepiaPhaseName = "rhythm-breaker" | "lexical-diversifier" | "micro-imperfections";
+
+const COMBINED_AI_TELL_CATALOG = [...AI_TELL_CATALOG, ...AI_TELL_CATALOG_V2_EXTRA];
+
+interface StructuralDiagnostics {
+  penalty: number;
+  checks: string[];
+}
+
+interface ExtendedCandidateScore {
+  rank: number;
+  extendedAiTellScore: number;
+  extendedGateVerdict: "PASS" | "REVIEW" | "FAIL";
+  extendedMetrics: HumanizePipelineReport["extendedMetrics"];
+  architectureChecksApplied: string[];
+}
+
+interface EnhancedPipelineResult {
+  text: string;
+  phasesExecuted: SepiaPhaseName[];
+  reviewPasses: number;
+  negativeProfileUsed: boolean;
+  extendedAiTellScore: number;
+  extendedGateVerdict: "PASS" | "REVIEW" | "FAIL";
+  extendedMetrics: NonNullable<HumanizePipelineReport["extendedMetrics"]>;
+  architectureChecksApplied: string[];
+  note?: string;
+}
+
+function mapGenreContext(genre?: string): GenreContext {
+  const value = String(genre || "").toLowerCase();
+  if (/фэнтези|фентези|fantasy/u.test(value)) return "fantasy";
+  if (/фантастик|sci-?fi|космоопер/u.test(value)) return "scifi";
+  if (/триллер|детектив|thriller/u.test(value)) return "thriller";
+  if (/любовн|романтик|romance/u.test(value)) return "romance";
+  if (/ужас|хоррор|horror/u.test(value)) return "horror";
+  if (/литератур|literary|проза/u.test(value)) return "literary";
+  return "general";
+}
+
+function structuralPatternDiagnostics(text: string): StructuralDiagnostics {
+  const paragraphs = text
+    .split(/\n{2,}/u)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+  const checks: string[] = [];
+  let penalty = 0;
+
+  const openerCounts = new Map<string, number>();
+  for (const paragraph of paragraphs) {
+    const opener = paragraph
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .trim()
+      .split(/\s+/u)
+      .slice(0, 2)
+      .join(" ");
+    if (!opener) continue;
+    openerCounts.set(opener, (openerCounts.get(opener) || 0) + 1);
+  }
+  const repeatedOpeners = [...openerCounts.values()].filter((count) => count >= 3).length;
+  if (repeatedOpeners) {
+    penalty += repeatedOpeners * 3;
+    checks.push("повтор зачинов абзацев");
+  }
+
+  const reactionRepeats = (text.match(/(?:замер\p{L}*|застыл\p{L}*|прислушал(?:ся|ись)|не\s+ответил\p{L}*|промолчал\p{L}*|сухо\s+сказал\p{L}*)/giu) || []).length;
+  if (reactionRepeats >= 3) {
+    penalty += Math.min((reactionRepeats - 2) * 2, 8);
+    checks.push("повтор типа реакции на новое");
+  }
+
+  const sensoryOpeners = paragraphs.filter((paragraph) => /^(?:воздух|пахло|запах|свет|тишина|темнота)\b/iu.test(paragraph)).length;
+  if (sensoryOpeners >= 2) {
+    penalty += Math.min((sensoryOpeners - 1) * 2, 6);
+    checks.push("повтор сенсорного входа в сцену");
+  }
+
+  const repeatedEndings = paragraphs.filter((paragraph) => /(?:прислушал(?:ся|ись)|переглянул(?:ся|ись)|новый\s+вопрос|увидел(?:и)?\s+следующ|не\s+ответил\p{L}*|сухо\s+сказал\p{L}*)[.!?…»"]?$/iu.test(paragraph)).length;
+  if (repeatedEndings >= 2) {
+    penalty += Math.min((repeatedEndings - 1) * 2.5, 7);
+    checks.push("повтор концовки сцены");
+  }
+
+  return { penalty, checks };
+}
+
+function extendedMetricsPenalty(metrics: NonNullable<HumanizePipelineReport["extendedMetrics"]>): number {
+  let penalty = 0;
+  if (metrics.paragraphLengthCV < 0.35) penalty += (0.35 - metrics.paragraphLengthCV) * 20;
+  if (metrics.passiveVoiceShare > 0.15) penalty += (metrics.passiveVoiceShare - 0.15) * 35;
+  if (metrics.uniqueWordRatio200 < 0.52) penalty += (0.52 - metrics.uniqueWordRatio200) * 40;
+  if (metrics.connectorDiversity < 0.45) penalty += (0.45 - metrics.connectorDiversity) * 28;
+  return penalty;
+}
+
+function scoreCandidateWithEnhanced(
+  text: string,
+  score: AiTellScore,
+  depth: HumanizeDepthConfig,
+  genre?: string,
+  meta?: { topupScenes?: number; rejectedScenes?: number },
+): ExtendedCandidateScore {
+  const genreContext = mapGenreContext(genre);
+  const stats = computeStyleStats(text);
+  const extendedMetrics = computeExtendedMetrics(text, { ...stats });
+  const gate = runMultiDetectorGate(text, COMBINED_AI_TELL_CATALOG, genreContext, {
+    maxAiTellScore: Math.max(depth.scoreGate + 6, 18),
+    minParagraphCV: 0.32,
+    maxPassiveShare: 0.18,
+    minTTR200: 0.5,
+    minConnectorDiv: 0.42,
+  });
+  const structural = structuralPatternDiagnostics(text);
+  const extendedAiTellScore = aiTellScoreEnhanced(text, COMBINED_AI_TELL_CATALOG, genreContext);
+  const topupPenalty = meta?.topupScenes && meta.topupScenes > 1 ? (meta.topupScenes - 1) * 6 : 0;
+  const rejectedPenalty = (meta?.rejectedScenes || 0) * 6;
+  const gatePenalty = gate.verdict === "FAIL" ? 10 : gate.verdict === "REVIEW" ? 4 : -4;
+  const rank = rankChapterCandidate(score, depth.scoreGate, depth.minBurstiness)
+    + rejectedPenalty
+    + topupPenalty
+    + Math.max(0, extendedAiTellScore - Math.max(depth.scoreGate, 8)) * 0.7
+    + extendedMetricsPenalty(extendedMetrics)
+    + structural.penalty
+    + gatePenalty;
+  return {
+    rank: Number(rank.toFixed(2)),
+    extendedAiTellScore,
+    extendedGateVerdict: gate.verdict,
+    extendedMetrics,
+    architectureChecksApplied: gate.details.concat(structural.checks),
+  };
+}
+
+function sepiaPhasesForRoute(route: SepiaRoute): SepiaPhaseName[] {
+  if (route === "generate_full_chapter") return ["rhythm-breaker", "lexical-diversifier", "micro-imperfections"];
+  if (route === "rewrite_detector_segments") return ["lexical-diversifier", "micro-imperfections"];
+  return ["rhythm-breaker", "micro-imperfections"];
+}
+
+function cleanModelText(raw: string): string {
+  return String(raw || "").replace(/^```(?:text|markdown)?\s*/i, "").replace(/```$/i, "").trim();
+}
+
+function enhancedPhaseMaxTokens(charLength: number): number {
+  return Math.max(6_144, Math.min(16_000, Math.ceil(charLength / 2) + 1_024));
+}
+
+async function runEnhancedSepiaPipeline(
+  text: string,
+  generate: GenerateFn,
+  options: {
+    model: string;
+    route: SepiaRoute;
+    genre?: string;
+    personaBlock: string;
+    depth: HumanizeDepthConfig;
+    authorSample?: string;
+  },
+): Promise<EnhancedPipelineResult> {
+  let current = text.trim();
+  const phasesExecuted: SepiaPhaseName[] = [];
+  let reviewPasses = 0;
+  const sample = String(options.authorSample || "").trim();
+  const humanSamples = sample
+    ? sample.split(/\n{2,}/u).map((chunk) => chunk.trim()).filter((chunk) => chunk.length >= 80).slice(0, 8)
+    : [];
+  const negativeProfile = humanSamples.length
+    ? buildNegativeVoiceProfile(options.route, humanSamples, [current])
+    : null;
+  const negativeGuidance = negativeProfile ? negativeVoiceGuidanceBlock(negativeProfile) : "";
+  let note: string | undefined;
+
+  for (const phase of sepiaPhasesForRoute(options.route)) {
+    reviewPasses += 1;
+    const beforeDiag = scoreCandidateWithEnhanced(current, aiTellScore(current), options.depth, options.genre);
+    const targetBurst = [Math.max(0.45, options.depth.minBurstiness), Math.min(0.82, Math.max(0.58, options.depth.minBurstiness + 0.18))] as [number, number];
+    const prompt = phase === "rhythm-breaker"
+      ? buildRhythmBreakerPrompt(current, [options.personaBlock, negativeGuidance].filter(Boolean).join("\n\n"), targetBurst)
+      : phase === "lexical-diversifier"
+        ? buildLexicalDiversifierPrompt(
+            current,
+            sample,
+            negativeProfile
+              ? [...negativeProfile.forbiddenConstructions.slice(0, 12), ...negativeProfile.aiNgrams.slice(0, 8)]
+              : [],
+            [...new Set(detectAiTells(current).map((hit) => hit.label))],
+          )
+        : buildMicroImperfectionsPrompt(current, [options.personaBlock, negativeGuidance].filter(Boolean).join("\n\n"));
+    try {
+      const candidateRaw = await generate({
+        model: options.model,
+        systemInstruction: [
+          "Ты литературный редактор русской прозы. Верни только готовый текст.",
+          "Сохрани факты, имена, POV, события, канон и длину примерно в тех же пределах.",
+          phase === "micro-imperfections"
+            ? "Это фаза микро-несовершенств: правка точечная, без нового полирования."
+            : "Это одна фаза sepia-пайплайна: правь только то, что прямо указано задачей фазы.",
+          options.personaBlock,
+          negativeGuidance,
+        ].filter(Boolean).join("\n\n"),
+        contents: prompt,
+        temperature: phase === "lexical-diversifier" ? 0.72 : phase === "micro-imperfections" ? 0.66 : 0.68,
+        maxOutputTokens: enhancedPhaseMaxTokens(current.length),
+      });
+      const candidate = cleanModelText(candidateRaw);
+      if (!candidate || candidate === current) continue;
+      const beforeWords = countWordsRu(current);
+      const afterWords = countWordsRu(candidate);
+      const growthCap = phase === "micro-imperfections" ? 1.12 : 1.3;
+      const shrinkFloor = beforeWords >= 80
+        ? options.route === "rewrite_detector_segments"
+          ? Math.max(40, Math.floor(beforeWords * 0.7))
+          : options.route === "generate_full_chapter"
+            ? Math.max(120, Math.floor(beforeWords * 0.8))
+            : Math.max(30, Math.floor(beforeWords * 0.55))
+        : 0;
+      if (afterWords < shrinkFloor) continue;
+      if (afterWords > Math.max(Math.ceil(beforeWords * growthCap), beforeWords + 120)) continue;
+      const afterDiag = scoreCandidateWithEnhanced(candidate, aiTellScore(candidate), options.depth, options.genre);
+      const accept = afterDiag.rank <= beforeDiag.rank
+        || afterDiag.extendedAiTellScore < beforeDiag.extendedAiTellScore
+        || (phase === "rhythm-breaker" && aiTellScore(candidate).burstiness > aiTellScore(current).burstiness + 0.05)
+        || (options.route === "humanize_draft" && beforeWords < 80 && candidate !== current);
+      if (!accept) continue;
+      current = candidate;
+      phasesExecuted.push(phase);
+    } catch (error) {
+      console.warn(`Enhanced sepia phase failed (${phase}):`, error);
+    }
+  }
+
+  if (!phasesExecuted.length) {
+    note = "enhanced-фазы не дали принятой правки — остался базовый touchup";
+  }
+  const finalDiag = scoreCandidateWithEnhanced(current, aiTellScore(current), options.depth, options.genre);
+  return {
+    text: current,
+    phasesExecuted,
+    reviewPasses,
+    negativeProfileUsed: Boolean(negativeProfile),
+    extendedAiTellScore: finalDiag.extendedAiTellScore,
+    extendedGateVerdict: finalDiag.extendedGateVerdict,
+    extendedMetrics: finalDiag.extendedMetrics!,
+    architectureChecksApplied: [...new Set(finalDiag.architectureChecksApplied)],
+    ...(note ? { note } : {}),
+  };
+}
+
 export function countWordsRu(text: string): number {
   return (text.match(/[A-Za-zА-Яа-яЁё0-9]+(?:[-'][A-Za-zА-Яа-яЁё0-9]+)*/gu) || []).length;
 }
@@ -1922,12 +2199,17 @@ export async function generateHumanizedChapter(
   if (!rawCandidates.length) {
     throw new Error("Не удалось собрать ни одного пригодного черновика главы");
   }
+  const candidateDiagnostics = rawCandidates.map((candidate) => scoreCandidateWithEnhanced(
+    candidate.text,
+    candidate.score,
+    depth,
+    input.genre,
+    candidateMeta[candidate.index],
+  ));
   let chosen = rawCandidates[0];
-  let chosenRank = rankChapterCandidate(chosen.score, depth.scoreGate, depth.minBurstiness)
-    + ((candidateMeta[chosen.index]?.rejectedScenes || 0) * 6);
+  let chosenRank = candidateDiagnostics[0].rank;
   for (const candidate of rawCandidates.slice(1)) {
-    const rank = rankChapterCandidate(candidate.score, depth.scoreGate, depth.minBurstiness)
-      + ((candidateMeta[candidate.index]?.rejectedScenes || 0) * 6);
+    const rank = candidateDiagnostics[candidate.index]?.rank ?? Number.POSITIVE_INFINITY;
     if (rank < chosenRank) {
       chosen = candidate;
       chosenRank = rank;
@@ -1938,8 +2220,21 @@ export async function generateHumanizedChapter(
     || { scenesGenerated, topupScenes: 0, rejectedScenes: 0, narrationPerson: "unknown" as NarrationPerson };
 
   const before = chosen.score;
+  const replanTriggered = chosenMeta.topupScenes > 1;
+  if (replanTriggered) {
+    emitChapterStep("Добор превысил одну сцену — хвост главы считаем пересобранным после провала исходного плана.", "warn");
+  }
+  noteStep("sepia enhanced-фазы");
+  const enhanced = await runEnhancedSepiaPipeline(chosen.text, countedGenerate, {
+    model: input.model,
+    route: "generate_full_chapter",
+    genre: input.genre,
+    personaBlock,
+    depth,
+    authorSample: sample,
+  });
   noteStep("литературный проход (доводка аудита)");
-  const touchup = await runTouchupPipeline(chosen.text, countedGenerate, {
+  const touchup = await runTouchupPipeline(enhanced.text, countedGenerate, {
     model: input.model,
     personaBlock,
     depth,
@@ -1950,6 +2245,7 @@ export async function generateHumanizedChapter(
   const foreign = await repairForeignWords(hygiene.text, countedGenerate, { model: input.model });
   const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
   const after = aiTellScore(finalHygiene.text);
+  const finalDiagnostics = scoreCandidateWithEnhanced(finalHygiene.text, after, depth, input.genre, chosenMeta);
 
   const collapsedSteps = [...stepCounts.entries()].reduce((acc, [label, count]) => {
     const bucket = label.startsWith("сцена ")
@@ -1982,12 +2278,19 @@ export async function generateHumanizedChapter(
       dialogueShare: after.dialogueShare,
       shortShare: after.shortShare,
       maxShortChain: after.maxShortChain,
-      note: touchup.cleanNote,
       gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
-      passesRun: touchup.passesRun,
+      passesRun: enhanced.reviewPasses + touchup.passesRun,
       sepiaRoute: "generate_full_chapter",
-      reviewPasses: touchup.passesRun,
-      recreatePasses: touchup.refinedBlocks,
+      reviewPasses: enhanced.reviewPasses + touchup.passesRun,
+      recreatePasses: touchup.refinedBlocks + enhanced.phasesExecuted.length,
+      enhancedScoreUsed: true,
+      phasesExecuted: enhanced.phasesExecuted,
+      negativeProfileUsed: enhanced.negativeProfileUsed,
+      architectureChecksApplied: finalDiagnostics.architectureChecksApplied,
+      replanTriggered,
+      extendedAiTellScore: finalDiagnostics.extendedAiTellScore,
+      extendedGateVerdict: finalDiagnostics.extendedGateVerdict,
+      extendedMetrics: finalDiagnostics.extendedMetrics,
       scenesGenerated: chosenMeta.scenesGenerated,
       topupScenes: chosenMeta.topupScenes,
       narrationPerson: chosenMeta.narrationPerson,
@@ -1995,9 +2298,10 @@ export async function generateHumanizedChapter(
       depth: depth.id,
       mode,
       candidatesTried: rawCandidates.length,
-       candidateScores: rawCandidates.map((c) => c.score.score),
-       candidateRanks: rawCandidates.map((c) => Number(rankChapterCandidate(c.score, depth.scoreGate, depth.minBurstiness).toFixed(2))),
-       chosenCandidate: chosen.index,
+      candidateScores: rawCandidates.map((c) => c.score.score),
+      candidateRanks: candidateDiagnostics.map((candidate) => candidate.rank),
+      chosenCandidate: chosen.index,
+      note: [enhanced.note, touchup.cleanNote].filter(Boolean).join("; ") || undefined,
 
       textHygiene: finalHygiene.report,
     },
@@ -2052,6 +2356,14 @@ export async function rewriteDetectorAiSegments(
         sepiaRoute: "rewrite_detector_segments",
         reviewPasses: 0,
         recreatePasses: 0,
+        enhancedScoreUsed: true,
+        phasesExecuted: [],
+        negativeProfileUsed: false,
+        architectureChecksApplied: [],
+        replanTriggered: false,
+        extendedAiTellScore: scoreCandidateWithEnhanced(hygiene.text, after, depth, undefined).extendedAiTellScore,
+        extendedGateVerdict: scoreCandidateWithEnhanced(hygiene.text, after, depth, undefined).extendedGateVerdict,
+        extendedMetrics: scoreCandidateWithEnhanced(hygiene.text, after, depth, undefined).extendedMetrics,
         scenesGenerated: 0,
         depth: depth.id,
         mode: "single",
@@ -2111,8 +2423,14 @@ export async function rewriteDetectorAiSegments(
   }
 
   const text = revised.join("");
+  const enhanced = await runEnhancedSepiaPipeline(text, generate, {
+    model: options.model,
+    route: "rewrite_detector_segments",
+    personaBlock: options.personaBlock || "",
+    depth,
+  });
   // Лёгкий touchup только на склеенном результате — но без раздувания: один round, мало блоков
-  const touchup = await runTouchupPipeline(text, generate, {
+  const touchup = await runTouchupPipeline(enhanced.text, generate, {
     model: options.model,
     personaBlock: options.personaBlock || "",
     depth: {
@@ -2126,6 +2444,7 @@ export async function rewriteDetectorAiSegments(
   const foreign = await repairForeignWords(hygiene.text, generate, { model: options.model });
   const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
   const after = aiTellScore(finalHygiene.text);
+  const finalDiagnostics = scoreCandidateWithEnhanced(finalHygiene.text, after, depth);
 
   return {
     text: finalHygiene.text,
@@ -2142,10 +2461,19 @@ export async function rewriteDetectorAiSegments(
       openerRepetition: after.openerRepetition,
       patternDensity: after.patternDensity,
       gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
-      passesRun: touchup.passesRun + 1,
+      passesRun: enhanced.reviewPasses + touchup.passesRun + 1,
       sepiaRoute: "rewrite_detector_segments",
-      reviewPasses: touchup.passesRun + 1,
-      recreatePasses: touchup.refinedBlocks + rewrittenCount,
+      reviewPasses: enhanced.reviewPasses + touchup.passesRun + 1,
+      recreatePasses: touchup.refinedBlocks + rewrittenCount + enhanced.phasesExecuted.length,
+      enhancedScoreUsed: true,
+      phasesExecuted: enhanced.phasesExecuted,
+      negativeProfileUsed: enhanced.negativeProfileUsed,
+      architectureChecksApplied: finalDiagnostics.architectureChecksApplied,
+      replanTriggered: false,
+      extendedAiTellScore: finalDiagnostics.extendedAiTellScore,
+      extendedGateVerdict: finalDiagnostics.extendedGateVerdict,
+      extendedMetrics: finalDiagnostics.extendedMetrics,
+      note: [enhanced.note, touchup.cleanNote].filter(Boolean).join("; ") || undefined,
       scenesGenerated: 0,
       depth: depth.id,
       mode: "single",
@@ -2168,7 +2496,13 @@ export async function humanizeProseDraft(
 ): Promise<{ text: string; humanizeReport: HumanizePipelineReport }> {
   const depth = resolveHumanizeDepth(options.humanizeDepth ?? "fast");
   const before = aiTellScore(text);
-  const touchup = await runTouchupPipeline(text, generate, {
+  const enhanced = await runEnhancedSepiaPipeline(text, generate, {
+    model: options.model,
+    route: "humanize_draft",
+    personaBlock: options.personaBlock,
+    depth,
+  });
+  const touchup = await runTouchupPipeline(enhanced.text, generate, {
     model: options.model,
     personaBlock: options.personaBlock,
     depth: {
@@ -2182,6 +2516,7 @@ export async function humanizeProseDraft(
   const foreign = await repairForeignWords(hygiene.text, generate, { model: options.model });
   const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
   const after = aiTellScore(finalHygiene.text);
+  const finalDiagnostics = scoreCandidateWithEnhanced(finalHygiene.text, after, depth);
   return {
     text: finalHygiene.text,
     humanizeReport: {
@@ -2194,10 +2529,19 @@ export async function humanizeProseDraft(
       openerRepetition: after.openerRepetition,
       patternDensity: after.patternDensity,
       gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
-      passesRun: touchup.passesRun,
+      passesRun: enhanced.reviewPasses + touchup.passesRun,
       sepiaRoute: "humanize_draft",
-      reviewPasses: touchup.passesRun,
-      recreatePasses: touchup.refinedBlocks,
+      reviewPasses: enhanced.reviewPasses + touchup.passesRun,
+      recreatePasses: touchup.refinedBlocks + enhanced.phasesExecuted.length,
+      enhancedScoreUsed: true,
+      phasesExecuted: enhanced.phasesExecuted,
+      negativeProfileUsed: enhanced.negativeProfileUsed,
+      architectureChecksApplied: finalDiagnostics.architectureChecksApplied,
+      replanTriggered: false,
+      extendedAiTellScore: finalDiagnostics.extendedAiTellScore,
+      extendedGateVerdict: finalDiagnostics.extendedGateVerdict,
+      extendedMetrics: finalDiagnostics.extendedMetrics,
+      note: [enhanced.note, touchup.cleanNote].filter(Boolean).join("; ") || undefined,
       scenesGenerated: 0,
       depth: depth.id,
       mode: "single",
