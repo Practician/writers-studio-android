@@ -584,29 +584,22 @@ export const HUMANIZE_DEPTHS: Record<HumanizeDepth, HumanizeDepthConfig> = {
 export function rankChapterCandidate(score: AiTellScore, scoreGate = 12, minBurstiness = 0.45): number {
   const heavy = heavyStampHits(score).length;
   const gateBonus = humanizeGatePassed(score, scoreGate, minBurstiness) ? -8 : 0;
-  const burstPenalty = score.burstiness >= minBurstiness
+  const rhythmMeasurable = typeof score.words !== "number" || score.words >= MIN_BURSTINESS_WORDS;
+  const burstPenalty = !rhythmMeasurable || score.burstiness >= minBurstiness
     ? 0
     : ((minBurstiness - score.burstiness) / Math.max(minBurstiness, 0.01)) * 20;
-  return score.score + heavy * 12 + burstPenalty + gateBonus;
+  const shortSharePenalty = typeof score.shortShare === "number" && score.shortShare > 0.24
+    ? Math.min((score.shortShare - 0.24) * 35, 8)
+    : 0;
+  const shortChainPenalty = typeof score.maxShortChain === "number" && score.maxShortChain >= 3
+    ? Math.min((score.maxShortChain - 2) * 2.5, 8)
+    : 0;
+  const openerPenalty = score.openerRepetition >= 0.12
+    ? Math.min(((score.openerRepetition - 0.12) / 0.2) * 8, 8)
+    : 0;
+  return score.score + heavy * 12 + burstPenalty + shortSharePenalty + shortChainPenalty + openerPenalty + gateBonus;
 }
 
-export function pickBestChapterCandidate<T extends { text: string; score: AiTellScore }>(
-  candidates: T[],
-  scoreGate = 12,
-  minBurstiness = 0.45,
-): T {
-  if (!candidates.length) throw new Error("Нет кандидатов главы");
-  let best = candidates[0];
-  let bestRank = rankChapterCandidate(best.score, scoreGate, minBurstiness);
-  for (let index = 1; index < candidates.length; index += 1) {
-    const rank = rankChapterCandidate(candidates[index].score, scoreGate, minBurstiness);
-    if (rank < bestRank) {
-      best = candidates[index];
-      bestRank = rank;
-    }
-  }
-  return best;
-}
 
 export function resolveHumanizeDepth(value: unknown): HumanizeDepthConfig {
   if (value === "fast" || value === "maximum" || value === "balanced") {

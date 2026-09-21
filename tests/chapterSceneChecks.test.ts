@@ -1,11 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  advanceContinuityState,
+  buildContinuityNotes,
   buildLedgerNotes,
   buildReactionNotes,
   buildScenePrompt,
   buildSeamNotes,
   closingSentences,
+  continuityIssue,
   countSimiles,
   countWordsRu,
   eventClassesIn,
@@ -18,6 +21,7 @@ import {
   seamEchoIssue,
   silenceIssue,
   simileIssue,
+  type SceneContinuityState,
   type ChapterBeat,
   type ChapterGenerateInput,
   type ScenePlan,
@@ -77,6 +81,37 @@ test("дубль события: закрытие того же класса л�
   assert.match(buildLedgerNotes(["blocked"]), /выход перекрыт/);
 });
 
+test("continuity ledger ловит смену состояния предмета без перехода", () => {
+  const state: SceneContinuityState = {
+    facts: [{ entityId: "knife", entityLabel: "нож", stateId: "in_hand", stateLabel: "нож в руке" }],
+  };
+  const issue = continuityIssue(state, "Нож лежал на полу у самой стены, пока Илья смотрел в щель.");
+  assert.match(issue, /нож/);
+  assert.match(issue, /без перехода/);
+});
+
+test("continuity ledger ловит противоречие внутри одной сцены", () => {
+  const issue = continuityIssue(
+    { facts: [] },
+    "Нож лежал на полу у стены. Илья ещё держал нож перед собой и не опускал руку.",
+  );
+  assert.match(issue, /одновременно разные состояния/);
+});
+
+test("continuity ledger обновляет состояние и строит заметки для следующей сцены", () => {
+  const next = advanceContinuityState(
+    { facts: [] },
+    "Васька отстал в темноте. Рюкзак лежал у стены, а фонарь погас в ладони.",
+  );
+  assert.deepEqual(next.facts, [
+    { entityId: "vasya", entityLabel: "Васька", stateId: "behind", stateLabel: "Васька остался позади" },
+    { entityId: "backpack", entityLabel: "рюкзак", stateId: "on_floor", stateLabel: "рюкзак на полу" },
+    { entityId: "flashlight", entityLabel: "фонарь", stateId: "off", stateLabel: "фонарь погас" },
+  ]);
+  assert.match(buildContinuityNotes(next), /НЕПРЕРЫВНОСТЬ СЦЕНЫ/);
+  assert.match(buildContinuityNotes(next), /Васька остался позади/);
+});
+
 test("полосы длины сцен чередуются", () => {
   assert.deepEqual(sceneLengthBand(0), [260, 360]);
   assert.deepEqual(sceneLengthBand(1), [380, 520]);
@@ -89,13 +124,20 @@ test("промпт сцены несёт полосу длины, шов, рее
     maxWords: 360,
     seamNotes: buildSeamNotes(["Илья выставил шест и шагнул в проём."]),
     ledgerNotes: buildLedgerNotes(["blocked"]),
+    continuityNotes: buildContinuityNotes({
+      facts: [{ entityId: "knife", entityLabel: "нож", stateId: "in_hand", stateLabel: "нож в руке" }],
+    }),
     reactionNotes: buildReactionNotes(2, 3),
   };
   const prompt = buildScenePrompt(input, beat, 0, 9, "хвост предыдущей главы", "", "", "", plan);
   assert.match(prompt, /Объём: 260–360 слов/);
+  assert.match(prompt, /без метронома/);
+  assert.doesNotMatch(prompt, /рядом с двадцатисловной ставь фразу короче шести слов/);
   assert.match(prompt, /не больше двух на сцену/);
   assert.match(prompt, /ШОВ СЦЕН/);
   assert.match(prompt, /УЖЕ СЛУЧИЛОСЬ В ГЛАВЕ/);
+  assert.match(prompt, /НЕПРЕРЫВНОСТЬ СЦЕНЫ/);
+  assert.match(prompt, /нож в руке/);
   assert.match(prompt, /РЕАКЦИИ И МОЛЧАНИЕ/);
   assert.ok(prompt.includes("этот ход больше не повторяй"));
 });
@@ -103,8 +145,10 @@ test("промпт сцены несёт полосу длины, шов, рее
 test("молчание и «замер» упираются в потолок главы", () => {
   assert.equal(silenceIssue("Он не ответил.", 0), "");
   assert.notEqual(silenceIssue("Он не ответил.", MAX_SILENT_REACTIONS), "");
+  assert.equal(silenceIssue("Он не ответил сразу, а потом коротко бросил: «Пошли».", MAX_SILENT_REACTIONS), "");
   assert.equal(freezeIssue("Илья замер.", 0), "");
   assert.notEqual(freezeIssue("Илья застыл.", MAX_FREEZE_REACTIONS), "");
+  assert.equal(freezeIssue("Он потянулся к поясу за ножом, но замер, услышав скрежет сверху.", MAX_FREEZE_REACTIONS), "");
   assert.match(buildReactionNotes(2, 3), /больше не повторяй/);
   assert.match(buildReactionNotes(2, 3), /реакция на новое событие/);
 });
@@ -123,9 +167,11 @@ test("потолок главы выбран — требование сужае
 test("в одной сцене — одна реакция каждого рода", () => {
   assert.equal(silenceIssue("Он не ответил.", 0), "");
   assert.notEqual(silenceIssue("Он не ответил. Она промолчала.", 0), "");
+  assert.match(silenceIssue("Он не ответил. Она промолчала.", 0), /найдено 2 вхождения/);
   assert.match(silenceIssue("Он не ответил. Она промолчала.", 0), /допускается одно/);
   assert.equal(freezeIssue("Илья замер.", 0), "");
   assert.notEqual(freezeIssue("Илья замер. Васька застыл.", 0), "");
+  assert.match(freezeIssue("Илья замер. Васька застыл.", 0), /найдено 2 вхождения/);
 });
 
 test("служебные функции не портят счёт слов", () => {

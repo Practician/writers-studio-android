@@ -26,7 +26,7 @@ function m(t: string) {
 }
 for (const [f, label] of [
   ["/home/user/workspace/verify-app83/chapter83.txt", "НОВЫЙ прогон: патчи + шлюз"],
-  ["/home/user/workspace/verify-app83/chapter83.txt", "НОВЫЙ прогон (патчи + шлюз)"],
+  ["/home/user/workspace/verify-app83/chapter82.txt", "устаревший файл в verify-app83 (для сверки путаницы)"],
   ["/home/user/workspace/verify-app82/chapter82.txt", "прежний прокси-прогон (код 82)"],
   ["/home/user/uploaded_files/glava4_82.txt", "глава сборки 82 (внешний детектор 21/21 AI)"],
 ]) {
