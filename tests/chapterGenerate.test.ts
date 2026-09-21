@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aiTellScore, pickBestChapterCandidate, rankChapterCandidate, resolveHumanizeDepth } from "../server/humanStyle";
+import { aiTellScore, rankChapterCandidate, resolveHumanizeDepth } from "../server/humanStyle";
 import {
   fallbackBeatsFromSynopsis,
   humanizeProseDraft,
@@ -113,20 +113,12 @@ test("humanizeProseDraft report includes gate fields", async () => {
   assert.ok(result.humanizeReport.scoreAfter <= 20);
 });
 
-test("pickBestChapterCandidate prefers lower AI-tell and higher burstiness", () => {
-  const dirty = {
-    text: "a",
-    score: aiTellScore("Это был не просто страх. Волна ужаса накрыла его, и время словно остановилось."),
-    index: 0,
-  };
-  const clean = {
-    text: "b",
-    score: aiTellScore("Я шёл вдоль тёплой стены и считал сорок один шаг, пока ключ не перестал звенеть."),
-    index: 1,
-  };
-  const best = pickBestChapterCandidate([dirty, clean], 12, 0.45);
-  assert.equal(best.index, 1);
-  assert.ok(rankChapterCandidate(clean.score) < rankChapterCandidate(dirty.score));
+test("rankChapterCandidate prefers lower AI-tell and penalizes telegraph rhythm", () => {
+  const dirty = aiTellScore("Это был не просто страх. Волна ужаса накрыла его, и время словно остановилось.");
+  const clean = aiTellScore("Я шёл вдоль тёплой стены и считал сорок один шаг, пока ключ не перестал звенеть.");
+  const telegraph = aiTellScore("Он шагнул. Потом встал. Снова пошёл. Васька кивнул. Илья не ответил. Потом свернул.");
+  assert.ok(rankChapterCandidate(clean) < rankChapterCandidate(dirty));
+  assert.ok(rankChapterCandidate(clean) < rankChapterCandidate(telegraph));
 });
 
 test("rewriteDetectorAiSegments rewrites only AI labels", async () => {

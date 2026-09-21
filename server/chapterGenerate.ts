@@ -16,8 +16,8 @@ import {
   flagBlocksForTouchup,
   humanStyleDirectives,
   humanizeGatePassed,
-  pickBestChapterCandidate,
   pickBestVariant,
+  rankChapterCandidate,
   positiveVoiceFewShots,
   quantitativeVoiceBlock,
   repeatedNgramShare,
@@ -100,6 +100,7 @@ export interface HumanizePipelineReport {
   mode: "single" | "scenes";
   candidatesTried?: number;
   candidateScores?: number[];
+  candidateRanks?: number[];
   chosenCandidate?: number;
   detectorSegmentsRewritten?: number;
   textHygiene: TextHygieneReport;
@@ -685,6 +686,7 @@ ${architectureNotes(beatIndex)}${modelFingerprintGuidance(providerOfModel(input.
 ${previousTail ? `Продолжай сразу после этого хвоста (не повторяй его дословно и не пересказывай теми же фразами):\n"""\n${previousTail}\n"""\n` : "Это начало главы после предыдущих событий канона.\n"}
 ${scenePlan.seamNotes ? `${scenePlan.seamNotes}\n` : ""}
 ${scenePlan.ledgerNotes ? `${scenePlan.ledgerNotes}\n` : ""}
+${scenePlan.continuityNotes ? `${scenePlan.continuityNotes}\n` : ""}
 ${scenePlan.reactionNotes ? `РЕАКЦИИ И МОЛЧАНИЕ:\n${scenePlan.reactionNotes}\n` : ""}
 ${antiRepeatNotes ? `ЗАПРЕТ ПОВТОРОВ (уже было в предыдущих кусках — не копируй смысл дословно):\n${antiRepeatNotes}\n` : ""}
 
@@ -703,7 +705,8 @@ ${SCENE_SEPIA_MOVES}
 3. Не используй генеративные штампы и «голос ассистента».
 4. Закончи на действии/состоянии из endsWith, без морали и резюме: последняя фраза НЕ объясняет, что всё это значило, и не подводит итог.
 5. Продвинь сюжет: новое действие/поворот, а не повтор «шёл, считал, смотрел на заряд» и не переигровка колец гл.6.
-6. Чередуй длину фраз: рядом с двадцатисловной ставь фразу короче шести слов. Ни одного предложения длиннее тридцати слов.
+  6. Чередуй длину фраз без метронома: рядом могут стоять и короткая, и средняя, и длинная реплика, если это звучит живо. Не строй сцену из сплошных сверхкоротких фраз и не выравнивай предложения под одну длину.
+
 7. Объём этого фрагмента: ${scenePlan.minWords}–${scenePlan.maxWords} слов — одна цельная сцена, оборванная там, где кончается её событие.
 8. Сравнений («словно», «будто», «как будто», «похоже на») — не больше двух на сцену.`;
 }
@@ -773,6 +776,7 @@ export interface ScenePlan {
   seamNotes?: string;
   ledgerNotes?: string;
   reactionNotes?: string;
+  continuityNotes?: string;
 }
 
 const SIMILE_SRC = "(?:словно|будто|как\\s+будто|похоже\\s+на|напомина(?:л|ла|ло|ет|ют)|точно\\s+бы)";
@@ -780,6 +784,10 @@ const SIMILE_SRC = "(?:словно|будто|как\\s+будто|похоже
 // («Ситуация») не даёт границы ни в начале, ни в конце слова.
 const SILENT_SRC = "(?<![\\p{L}])(?:не\\s+ответил\\p{L}*|промолчал\\p{L}*|не\\s+отозвал\\p{L}*|ничего\\s+не\\s+сказал\\p{L}*)(?![\\p{L}])";
 const FREEZE_SRC = "(?<![\\p{L}])(?:замер\\p{L}*|застыл\\p{L}*|остолбенел\\p{L}*)(?![\\p{L}])";
+const SILENT_SOFTENING_WINDOW = 48;
+const FREEZE_SOFTENING_WINDOW = 64;
+const SILENT_SOFTENING_TAIL = /[.!?…]\s*(?:но|а потом|затем)(?![\p{L}])|:\s*[«"—–-]|,\s*(?:но|а потом|затем)(?![\p{L}])/iu;
+const FREEZE_SOFTENING_TAIL = /[,:]\s*(?:услышав|когда|увидев|почувствовав|заметив)(?![\p{L}])|,\s*но(?![\p{L}])/u;
 
 /** Классы событий, которые модель склонна «закрыть» второй раз другими словами.
  *  Лексическое сравнение этого не ловит: «Они остались взаперти» и через сцены
@@ -791,6 +799,146 @@ const EVENT_CLASSES: Array<{ id: string; label: string; src: string }> = [
   { id: "device", label: "прибор отказал или сел", src: "(?:разрядил\\p{L}*|сломал\\p{L}*|отказал\\p{L}*|не\\s+включ\\p{L}*|замолчал\\s+насовсем)" },
   { id: "wound", label: "травма, кровь", src: "(?:раскроил\\p{L}*|порез\\p{L}*|ожог\\p{L}*|ссадин\\p{L}*|хрустнул\\p{L}*)" },
 ];
+
+export interface SceneContinuityFact {
+  entityId: string;
+  entityLabel: string;
+  stateId: string;
+  stateLabel: string;
+}
+
+export interface SceneContinuityState {
+  facts: SceneContinuityFact[];
+}
+
+interface ContinuityStateRule {
+  stateId: string;
+  stateLabel: string;
+  src: string;
+  stable: boolean;
+}
+
+interface ContinuityRule {
+  entityId: string;
+  entityLabel: string;
+  states: ContinuityStateRule[];
+}
+
+interface ContinuityMention extends SceneContinuityFact {
+  stable: boolean;
+  index: number;
+}
+
+const CONTINUITY_RULES: ContinuityRule[] = [
+  {
+    entityId: "knife",
+    entityLabel: "нож",
+    states: [
+      { stateId: "in_hand", stateLabel: "нож в руке", src: "(?:держал\\p{L}*|сжал\\p{L}*|перехватил\\p{L}*|выставил\\p{L}*|поднял\\p{L}*)\\s+(?:нож|лезвие)", stable: true },
+      { stateId: "stowed", stateLabel: "нож убран", src: "(?:убрал\\p{L}*|сунул\\p{L}*|спрятал\\p{L}*)\\s+(?:нож|лезвие)", stable: true },
+      { stateId: "on_floor", stateLabel: "нож на полу", src: "(?:нож|лезвие)\\s+(?:лежал\\p{L}*|лежит|валялся|валяется|звенел\\p{L}*)\\s+(?:на\\s+полу|под\\s+ногами)", stable: true },
+      { stateId: "transition", stateLabel: "нож переместили", src: "(?:уронил\\p{L}*|выронил\\p{L}*|подобрал\\p{L}*|поднял\\p{L}*\\s+с\\s+пол\\p{L}*|поддел\\p{L}*)\\s+(?:нож|лезвие)", stable: false },
+    ],
+  },
+  {
+    entityId: "backpack",
+    entityLabel: "рюкзак",
+    states: [
+      { stateId: "on_back", stateLabel: "рюкзак на спине", src: "(?:рюкзак)\\s+(?:висел\\p{L}*|болтался|сидел\\p{L}*)\\s+(?:на\\s+спине|на\\s+плечах)", stable: true },
+      { stateId: "on_floor", stateLabel: "рюкзак на полу", src: "(?:рюкзак)\\s+(?:лежал\\p{L}*|лежит|валялся|стоял\\p{L}*)\\s+(?:на\\s+полу|у\\s+стены)", stable: true },
+      { stateId: "transition", stateLabel: "рюкзак переместили", src: "(?:сбросил\\p{L}*|скинул\\p{L}*|поднял\\p{L}*|взвалил\\p{L}*)\\s+(?:рюкзак)", stable: false },
+    ],
+  },
+  {
+    entityId: "flashlight",
+    entityLabel: "фонарь",
+    states: [
+      { stateId: "in_hand", stateLabel: "фонарь в руке", src: "(?:держал\\p{L}*|сжал\\p{L}*|поднял\\p{L}*|повёл\\p{L}*)\\s+(?:фонарь|фонарик)", stable: true },
+      { stateId: "off", stateLabel: "фонарь погас", src: "(?:фонарь|фонарик)\\s+(?:погас\\p{L}*|потух\\p{L}*|умер\\p{L}*)", stable: true },
+      { stateId: "on_floor", stateLabel: "фонарь на полу", src: "(?:фонарь|фонарик)\\s+(?:лежал\\p{L}*|лежит|катился|звенел\\p{L}*)\\s+(?:на\\s+полу|под\\s+ногами)", stable: true },
+      { stateId: "transition", stateLabel: "фонарь переместили", src: "(?:уронил\\p{L}*|выронил\\p{L}*|подобрал\\p{L}*|поднял\\p{L}*\\s+с\\s+пол\\p{L}*)\\s+(?:фонарь|фонарик)", stable: false },
+    ],
+  },
+  {
+    entityId: "slab",
+    entityLabel: "плита",
+    states: [
+      { stateId: "closed", stateLabel: "плита перекрывает выход", src: "(?:плита|створка|перегородка)\\s+(?:перекрывал\\p{L}*|закрывал\\p{L}*|запечатал\\p{L}*|встала\\s+поперёк)", stable: true },
+      { stateId: "open", stateLabel: "проход открыт", src: "(?:щель|проход|проём)\\s+(?:открылся|разошёлся|приоткрылся|оказался\\s+открыт)", stable: true },
+      { stateId: "transition", stateLabel: "плита сдвинулась", src: "(?:плита|створка|перегородка)\\s+(?:сдвинул\\p{L}*|дрогнул\\p{L}*|ушла|отползла|закрылась|разошлась)", stable: false },
+    ],
+  },
+  {
+    entityId: "vasya",
+    entityLabel: "Васька",
+    states: [
+      { stateId: "present", stateLabel: "Васька рядом", src: "(?:Васька|Васёк|Вася)\\s+(?:сказал\\p{L}*|ответил\\p{L}*|буркнул\\p{L}*|шёл\\p{L}*\\s+рядом|оказался\\s+рядом|встал\\s+рядом)", stable: true },
+      { stateId: "behind", stateLabel: "Васька остался позади", src: "(?:Васька|Васёк|Вася)\\s+(?:отстал\\p{L}*|остал\\p{L}*\\s+позади|исчез\\p{L}*|пропал\\p{L}*)", stable: true },
+      { stateId: "transition", stateLabel: "Васька сменил позицию", src: "(?:Васька|Васёк|Вася)\\s+(?:подош[её]л\\p{L}*|догнал\\p{L}*|вернулся|свернул\\p{L}*)", stable: false },
+    ],
+  },
+];
+
+function collectContinuityMentions(text: string): ContinuityMention[] {
+  const mentions: ContinuityMention[] = [];
+  const source = String(text || "");
+  for (const rule of CONTINUITY_RULES) {
+    for (const state of rule.states) {
+      const regex = new RegExp(state.src, "giu");
+      for (const match of source.matchAll(regex)) {
+        mentions.push({
+          entityId: rule.entityId,
+          entityLabel: rule.entityLabel,
+          stateId: state.stateId,
+          stateLabel: state.stateLabel,
+          stable: state.stable,
+          index: match.index ?? 0,
+        });
+      }
+    }
+  }
+  return mentions.sort((left, right) => left.index - right.index);
+}
+
+export function buildContinuityNotes(state: SceneContinuityState): string {
+  if (!state.facts.length) return "";
+  return `НЕПРЕРЫВНОСТЬ СЦЕНЫ (сохрани текущее состояние мира, меняй его только явным переходом): ${state.facts.map((fact) => `${fact.entityLabel}: ${fact.stateLabel}`).join("; ")}.`;
+}
+
+export function continuityIssue(state: SceneContinuityState, text: string): string {
+  const mentions = collectContinuityMentions(text);
+  if (!mentions.length) return "";
+  const previous = new Map(state.facts.map((fact) => [fact.entityId, fact]));
+  for (const rule of CONTINUITY_RULES) {
+    const entityMentions = mentions.filter((mention) => mention.entityId === rule.entityId);
+    if (!entityMentions.length) continue;
+    const stableStates = [...new Map(entityMentions.filter((mention) => mention.stable).map((mention) => [mention.stateId, mention])).values()];
+    const hasTransition = entityMentions.some((mention) => !mention.stable);
+    if (stableStates.length > 1 && !hasTransition) {
+      return `внутри сцены у сущности «${rule.entityLabel}» одновременно разные состояния: ${stableStates.map((stateHit) => stateHit.stateLabel).join(", ")}`;
+    }
+    const current = stableStates[stableStates.length - 1];
+    const before = previous.get(rule.entityId);
+    if (before && current && before.stateId !== current.stateId && !hasTransition) {
+      return `состояние сущности «${rule.entityLabel}» сменилось без перехода: раньше было «${before.stateLabel}», теперь — «${current.stateLabel}»`;
+    }
+  }
+  return "";
+}
+
+export function advanceContinuityState(state: SceneContinuityState, text: string): SceneContinuityState {
+  const next = new Map(state.facts.map((fact) => [fact.entityId, fact]));
+  for (const mention of collectContinuityMentions(text)) {
+    if (!mention.stable) continue;
+    next.set(mention.entityId, {
+      entityId: mention.entityId,
+      entityLabel: mention.entityLabel,
+      stateId: mention.stateId,
+      stateLabel: mention.stateLabel,
+    });
+  }
+  return { facts: [...next.values()] };
+}
 
 export function countPhrase(text: string, src: string): number {
   return (String(text).match(new RegExp(src, "giu")) || []).length;
@@ -901,11 +1049,28 @@ export function buildReactionNotes(silentUsed: number, freezeUsed: number): stri
   return lines.join("\n");
 }
 
+function countSoftenedSilentReactions(text: string): number {
+  return [...text.matchAll(new RegExp(SILENT_SRC, "giu"))].filter((match) => {
+    const index = match.index ?? 0;
+    const tail = text.slice(index + match[0].length, index + match[0].length + SILENT_SOFTENING_WINDOW);
+    return !SILENT_SOFTENING_TAIL.test(tail);
+  }).length;
+}
+
+function countSoftenedFreezeReactions(text: string): number {
+  return [...text.matchAll(new RegExp(FREEZE_SRC, "giu"))].filter((match) => {
+    const index = match.index ?? 0;
+    const tail = text.slice(index + match[0].length, index + match[0].length + FREEZE_SOFTENING_WINDOW);
+    return !FREEZE_SOFTENING_TAIL.test(tail);
+  }).length;
+}
+
 export function silenceIssue(text: string, used: number): string {
-  const found = countPhrase(text, SILENT_SRC);
+  const found = countSoftenedSilentReactions(text);
   if (!found) return "";
+
   if (found > 1) {
-    return `в сцене ${found} места «не ответил/промолчал» — на одну сцену допускается одно`;
+    return `в сцене найдено ${found} вхождения «не ответил/промолчал» — на одну сцену допускается одно`;
   }
   // Потолок уже выбран прошлыми сценами. Требовать «меньше» бессмысленно: условие
   // «в главе не больше двух» при трёх уже написанных невыполнимо при любом тексте,
@@ -913,23 +1078,24 @@ export function silenceIssue(text: string, used: number): string {
   // 6, 9, 10: три перезапроса подряд с одним и тем же замечанием, затем приёмка
   // «с замечаниями»). За выбранным потолком требование сужается до выполнимого нуля.
   if (used >= MAX_SILENT_REACTIONS) {
-    return `в сцене ${found} «не ответил/промолчал», а потолок ${MAX_SILENT_REACTIONS} на главу уже выбран — в этой сцене молчания быть не должно`;
+    return `найдено ${found} вхождение «не ответил/промолчал», а потолок ${MAX_SILENT_REACTIONS} на главу уже выбран — в этой сцене молчания быть не должно`;
   }
   if (used + found <= MAX_SILENT_REACTIONS) return "";
-  return `в сцене ${found} «не ответил/промолчал», в главе уже ${used} (потолок ${MAX_SILENT_REACTIONS}) — оставь не больше ${MAX_SILENT_REACTIONS - used}`;
+  return `найдено ${found} вхождение «не ответил/промолчал», в главе уже ${used} (потолок ${MAX_SILENT_REACTIONS}) — оставь не больше ${MAX_SILENT_REACTIONS - used}`;
 }
 
 export function freezeIssue(text: string, used: number): string {
-  const found = countPhrase(text, FREEZE_SRC);
+  const found = countSoftenedFreezeReactions(text);
   if (!found) return "";
+
   if (found > 1) {
-    return `в сцене ${found} места «замер/застыл» — на одну сцену допускается одно`;
+    return `в сцене найдено ${found} вхождения «замер/застыл» — на одну сцену допускается одно`;
   }
   if (used >= MAX_FREEZE_REACTIONS) {
-    return `в сцене ${found} «замер/застыл», а потолок ${MAX_FREEZE_REACTIONS} на главу уже выбран — реакция на новое событие должна быть другой (ошибка, злость, насмешка, усталость)`;
+    return `найдено ${found} вхождение «замер/застыл», а потолок ${MAX_FREEZE_REACTIONS} на главу уже выбран — реакция на новое событие должна быть другой (ошибка, злость, насмешка, усталость)`;
   }
   if (used + found <= MAX_FREEZE_REACTIONS) return "";
-  return `в сцене ${found} «замер/застыл», в главе уже ${used} (потолок ${MAX_FREEZE_REACTIONS}) — оставь не больше ${MAX_FREEZE_REACTIONS - used}`;
+  return `найдено ${found} вхождение «замер/застыл», в главе уже ${used} (потолок ${MAX_FREEZE_REACTIONS}) — оставь не больше ${MAX_FREEZE_REACTIONS - used}`;
 }
 
 export function buildSingleChapterPrompt(input: ChapterGenerateInput, styleExtras: string): string {
@@ -1490,6 +1656,7 @@ async function generateScenesDraft(
   // плитой», живой прогон 20.09.2026) — по строкам и 5-граммам это не ловится,
   // поэтому считаем классы событий и ходы реакции.
   const closedEvents: string[] = [];
+  let continuityState: SceneContinuityState = { facts: [] };
   let silentUsed = 0;
   let freezeUsed = 0;
   for (let index = 0; index < maxScenes; index += 1) {
@@ -1514,6 +1681,7 @@ async function generateScenesDraft(
       maxWords: band[1],
       seamNotes: buildSeamNotes(scenes),
       ledgerNotes: buildLedgerNotes(closedEvents),
+      continuityNotes: buildContinuityNotes(continuityState),
       reactionNotes: buildReactionNotes(silentUsed, freezeUsed),
     };
     let cleaned = "";
@@ -1591,22 +1759,29 @@ async function generateScenesDraft(
       // но две первые попытки перезапрашиваем с названным нарушением: именно эти
       // признаки (объясняющий финал, плотность сравнений, переигровка шва, дубль
       // события, одинаковые реакции) держали главу 20.09.2026 в «AI 23 из 24».
+      const hard: string[] = [];
       const soft: string[] = [];
       const explanation = explanationTailIssue(cleaned);
       if (explanation) soft.push(explanation);
       const similes = simileIssue(cleaned);
-      if (similes) soft.push(similes);
+      if (similes) hard.push(similes);
       const seam = seamEchoIssue(scenes, cleaned);
       if (seam) soft.push(seam);
       const eventRepeat = eventEchoIssue(closedEvents, cleaned);
       if (eventRepeat) soft.push(eventRepeat);
+      const continuity = continuityIssue(continuityState, cleaned);
+      if (continuity) soft.push(continuity);
       const silence = silenceIssue(cleaned, silentUsed);
       if (silence) soft.push(silence);
       const froze = freezeIssue(cleaned, freezeUsed);
       if (froze) soft.push(froze);
-      softNotes = soft;
-      if (soft.length && attempt < 2) {
-        emitChapterStep(`Сцена ${index + 1}${isTopup ? " (добор)" : ""}, попытка ${attempt + 1}: перезапрос — ${soft.join("; ")}.`);
+      softNotes = [...hard, ...soft];
+      if ((hard.length || soft.length) && attempt < 2) {
+        emitChapterStep(`Сцена ${index + 1}${isTopup ? " (добор)" : ""}, попытка ${attempt + 1}: перезапрос — ${[...hard, ...soft].join("; ")}.`);
+        continue;
+      }
+      if (hard.length) {
+        emitChapterStep(`Сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}: брак — ${hard.join("; ")}.`);
         continue;
       }
       accepted = true;
@@ -1622,13 +1797,14 @@ async function generateScenesDraft(
       continue;
     }
     scenes.push(cleaned);
-    const silentInScene = countPhrase(cleaned, SILENT_SRC);
-    const freezeInScene = countPhrase(cleaned, FREEZE_SRC);
+    const silentInScene = countSoftenedSilentReactions(cleaned);
+    const freezeInScene = countSoftenedFreezeReactions(cleaned);
     silentUsed += silentInScene;
     freezeUsed += freezeInScene;
     for (const eventClass of eventClassesIn(cleaned)) {
       if (!closedEvents.includes(eventClass)) closedEvents.push(eventClass);
     }
+    continuityState = advanceContinuityState(continuityState, cleaned);
     if (narrationPerson === "unknown") narrationPerson = detectNarrationPerson(cleaned);
     tail = cleaned.slice(-PREVIOUS_TAIL_SCENE_CHARS);
     const sceneWords = countWordsRu(cleaned);
@@ -1743,8 +1919,21 @@ export async function generateHumanizedChapter(
     }
   }
 
-  const chosen = pickBestChapterCandidate(rawCandidates, depth.scoreGate, depth.minBurstiness);
-  console.warn(`Chose chapter candidate #${chosen.index + 1} (score=${chosen.score.score})`);
+  if (!rawCandidates.length) {
+    throw new Error("Не удалось собрать ни одного пригодного черновика главы");
+  }
+  let chosen = rawCandidates[0];
+  let chosenRank = rankChapterCandidate(chosen.score, depth.scoreGate, depth.minBurstiness)
+    + ((candidateMeta[chosen.index]?.rejectedScenes || 0) * 6);
+  for (const candidate of rawCandidates.slice(1)) {
+    const rank = rankChapterCandidate(candidate.score, depth.scoreGate, depth.minBurstiness)
+      + ((candidateMeta[candidate.index]?.rejectedScenes || 0) * 6);
+    if (rank < chosenRank) {
+      chosen = candidate;
+      chosenRank = rank;
+    }
+  }
+  console.warn(`Chose chapter candidate #${chosen.index + 1} (score=${chosen.score.score}, rank=${chosenRank.toFixed(2)})`);
   const chosenMeta = candidateMeta[chosen.index]
     || { scenesGenerated, topupScenes: 0, rejectedScenes: 0, narrationPerson: "unknown" as NarrationPerson };
 
@@ -1762,7 +1951,14 @@ export async function generateHumanizedChapter(
   const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
   const after = aiTellScore(finalHygiene.text);
 
-  const stepsSummary = [...stepCounts.entries()].map(([label, count]) => `${label} ×${count}`).join("; ");
+  const collapsedSteps = [...stepCounts.entries()].reduce((acc, [label, count]) => {
+    const bucket = label.startsWith("сцена ")
+      ? label.replace(/, попытка \d+/, ", попытки")
+      : label;
+    acc.set(bucket, (acc.get(bucket) || 0) + count);
+    return acc;
+  }, new Map<string, number>());
+  const stepsSummary = [...collapsedSteps.entries()].map(([label, count]) => `${label} ×${count}`).join("; ");
   emitChapterStep(`Итог конвейера: запросов к модели ${requestNo} — ${stepsSummary}.`);
   emitChapterStep(
     `Сцен в главе: ${chosenMeta.scenesGenerated} (план ${plannedBeats} битов${chosenMeta.topupScenes ? `, добор ${chosenMeta.topupScenes}` : ""}${chosenMeta.rejectedScenes ? `, отброшено бракованных битов ${chosenMeta.rejectedScenes}` : ""}), слов ${countWordsRu(finalHygiene.text)}, режим ${mode === "scenes" ? "сцены" : "цельный проход"}, в дело пошёл вариант ${chosen.index + 1}/${candidatesN}.`,
@@ -1799,8 +1995,10 @@ export async function generateHumanizedChapter(
       depth: depth.id,
       mode,
       candidatesTried: rawCandidates.length,
-      candidateScores: rawCandidates.map((c) => c.score.score),
-      chosenCandidate: chosen.index,
+       candidateScores: rawCandidates.map((c) => c.score.score),
+       candidateRanks: rawCandidates.map((c) => Number(rankChapterCandidate(c.score, depth.scoreGate, depth.minBurstiness).toFixed(2))),
+       chosenCandidate: chosen.index,
+
       textHygiene: finalHygiene.report,
     },
   };
@@ -1936,9 +2134,10 @@ export async function rewriteDetectorAiSegments(
     humanizeReport: {
       scoreBefore: before.score,
       scoreAfter: after.score,
-      refinedBlocks: touchup.refinedBlocks + rewrittenCount,
-      flaggedLabels: [...new Set(before.hits.map((hit) => hit.label))].slice(0, 10),
+      refinedBlocks: touchup.refinedBlocks,
+      flaggedLabels: [...new Set(after.hits.map((hit) => hit.label))].slice(0, 10),
       unresolvedLabels: touchup.unresolvedLabels,
+
       burstiness: after.burstiness,
       openerRepetition: after.openerRepetition,
       patternDensity: after.patternDensity,
