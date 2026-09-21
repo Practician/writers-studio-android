@@ -378,3 +378,44 @@ test("сцена с превышением потолка молчаний ил�
   assert.ok(silentTotal <= 2, `молчаний должно остаться не больше 2, сейчас ${silentTotal}`);
   assert.ok(freezeTotal <= 3, `freeze-реакций должно остаться не больше 3, сейчас ${freezeTotal}`);
 });
+
+test("финальный rewrite не может вернуть молчание, freeze и первое лицо поверх принятой главы", async () => {
+  const sample = Array.from({ length: 40 }, (_, i) => `Он шёл вдоль стены и считал шаги, номер ${i}. Пыль лежала на полу ровным слоем.`).join(" ");
+  const sceneBase = `${mockSceneText(0, 320)} Это был не просто коридор. Волна ужаса накрыла его, и время словно остановилось.`;
+  const generate = async (params: any): Promise<string> => {
+    if (/сценарист-структуралист/i.test(params.systemInstruction)) {
+      return JSON.stringify({
+        beats: Array.from({ length: 8 }, (_, i) => ({ title: `Бит ${i + 1}`, goal: `Событие ${i + 1}`, hook: `Зацепка ${i + 1}`, endsWith: `Конец ${i + 1}` })),
+      });
+    }
+    if (/ЗАДАЧА ФАЗЫ/iu.test(params.contents)) {
+      return `${mockSceneText(40, 320)} Я шагнул на звук голоса. Илья не ответил. Васька замер у стены.`;
+    }
+    if (params.responseMimeType === "application/json") {
+      return JSON.stringify({
+        blocks: ["Я шагнул на звук голоса. Илья не ответил. Васька замер у стены."],
+      });
+    }
+    if (params.contents.includes("Бит:")) return sceneBase;
+    return sceneBase;
+  };
+
+  const result = await generateHumanizedChapter(
+    baseInput({
+      currentChapterTitle: "Глава 4. Ночь у чужого входа",
+      currentChapterSummary: "Герой ищет вход и слышит работу механизма",
+      previousChapter: sample,
+      humanizeDepth: "maximum",
+      chapterCandidates: 1,
+      authorSample: sample,
+    }),
+    generate,
+  );
+
+  assert.equal(result.humanizeReport.mode, "scenes");
+  assert.equal(result.humanizeReport.narrationPerson, "third");
+  assert.ok(!/\bя\b/iu.test(result.text), "первое лицо не должно возвращаться после rewrite");
+  assert.ok(!/не\s+ответил|промолчал/iu.test(result.text), "rewrite не должен возвращать молчание");
+  assert.ok(!/замер|застыл/iu.test(result.text), "rewrite не должен возвращать freeze-штамп");
+  assert.match(result.humanizeReport.note || "", /отклон(?:ен|ён|ена)/u);
+});

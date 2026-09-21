@@ -539,6 +539,7 @@ async function runEnhancedSepiaPipeline(
     personaBlock: string;
     depth: HumanizeDepthConfig;
     authorSample?: string;
+    lockedNarrationPerson?: NarrationPerson;
   },
 ): Promise<EnhancedPipelineResult> {
   let current = text.trim();
@@ -606,6 +607,11 @@ async function runEnhancedSepiaPipeline(
         || (phase === "rhythm-breaker" && aiTellScore(candidate).burstiness > aiTellScore(current).burstiness + 0.05)
         || (options.route === "humanize_draft" && beforeWords < 80 && candidate !== current);
       if (!accept) continue;
+      const regressions = rewriteRegressionIssues(current, candidate, options.lockedNarrationPerson ?? "unknown");
+      if (regressions.length) {
+        note = `enhanced-фаза отклонена: ${regressions.join("; ")}`;
+        continue;
+      }
       current = candidate;
       phasesExecuted.push(phase);
     } catch (error) {
@@ -613,7 +619,7 @@ async function runEnhancedSepiaPipeline(
     }
   }
 
-  if (!phasesExecuted.length) {
+  if (!phasesExecuted.length && !note) {
     note = "enhanced-фазы не дали принятой правки — остался базовый touchup";
   }
   const finalDiag = scoreCandidateWithEnhanced(current, aiTellScore(current), options.depth, options.genre);
@@ -1375,6 +1381,33 @@ export function freezeIssue(text: string, used: number): string {
   return `найдено ${found} вхождение «замер/застыл», в главе уже ${used} (потолок ${MAX_FREEZE_REACTIONS}) — оставь не больше ${MAX_FREEZE_REACTIONS - used}`;
 }
 
+function rewriteRegressionIssues(
+  beforeText: string,
+  afterText: string,
+  lockedNarrationPerson: NarrationPerson = "unknown",
+): string[] {
+  const issues: string[] = [];
+  const beforeSilent = countSoftenedSilentReactions(beforeText);
+  const afterSilent = countSoftenedSilentReactions(afterText);
+  if (afterSilent > beforeSilent) {
+    issues.push(`молчаний стало больше: ${beforeSilent} → ${afterSilent}`);
+  }
+  const beforeFreeze = countSoftenedFreezeReactions(beforeText);
+  const afterFreeze = countSoftenedFreezeReactions(afterText);
+  if (afterFreeze > beforeFreeze) {
+    issues.push(`freeze-реакций стало больше: ${beforeFreeze} → ${afterFreeze}`);
+  }
+  const beforeSimiles = countSimiles(beforeText);
+  const afterSimiles = countSimiles(afterText);
+  if (afterSimiles > beforeSimiles) {
+    issues.push(`сравнений стало больше: ${beforeSimiles} → ${afterSimiles}`);
+  }
+  if (narrationPersonMismatch(afterText, lockedNarrationPerson)) {
+    issues.push(`съехало лицо повествования (${lockedNarrationPerson === "first" ? "ожидалось первое" : "ожидалось третье"})`);
+  }
+  return issues;
+}
+
 export function buildSingleChapterPrompt(input: ChapterGenerateInput, styleExtras: string): string {
   return `Напиши целую полноценную главу для книги на основе предоставленных материалов.
 
@@ -1447,6 +1480,7 @@ export async function runTouchupPipeline(
     personaBlock: string;
     depth: HumanizeDepthConfig;
     targetBurstiness?: number;
+    lockedNarrationPerson?: NarrationPerson;
   },
 ): Promise<{ text: string; refinedBlocks: number; passesRun: number; unresolvedLabels: string[]; cleanNote?: string }> {
   let current = text;
@@ -1583,7 +1617,13 @@ export async function runTouchupPipeline(
           revised[index] = value;
           refinedBlocks += 1;
         }
-        current = reassembleText(revised, structure.separators);
+        const next = reassembleText(revised, structure.separators);
+        const regressions = rewriteRegressionIssues(current, next, options.lockedNarrationPerson ?? "unknown");
+        if (regressions.length) {
+          cleanNote = `доводка отклонена: ${regressions.join("; ")}`;
+        } else {
+          current = next;
+        }
 
         const survivors = flagged.filter((index) => priorityMatches(revised[index]).length);
         if (survivors.length && round === options.depth.touchupRounds - 1) {
@@ -1592,7 +1632,13 @@ export async function runTouchupPipeline(
             revised[index] = value;
             refinedBlocks += 1;
           }
-          current = reassembleText(revised, structure.separators);
+          const retryNext = reassembleText(revised, structure.separators);
+          const retryRegressions = rewriteRegressionIssues(current, retryNext, options.lockedNarrationPerson ?? "unknown");
+          if (retryRegressions.length) {
+            cleanNote = `повторная доводка отклонена: ${retryRegressions.join("; ")}`;
+          } else {
+            current = retryNext;
+          }
           unresolvedLabels = [...new Set(survivors.flatMap((index) => priorityMatches(revised[index])))];
         }
       } catch (error) {
@@ -1626,7 +1672,13 @@ export async function runTouchupPipeline(
             revised[index] = value;
             refinedBlocks += 1;
           }
-          current = reassembleText(revised, structure.separators);
+          const rhythmNext = reassembleText(revised, structure.separators);
+          const rhythmRegressions = rewriteRegressionIssues(current, rhythmNext, options.lockedNarrationPerson ?? "unknown");
+          if (rhythmRegressions.length) {
+            cleanNote = `ритм-доводка отклонена: ${rhythmRegressions.join("; ")}`;
+          } else {
+            current = rhythmNext;
+          }
         } catch (error) {
           console.warn("Rhythm touchup failed:", error);
         }
@@ -2233,18 +2285,25 @@ export async function generateHumanizedChapter(
     personaBlock,
     depth,
     authorSample: sample,
+    lockedNarrationPerson: chosenMeta.narrationPerson,
   });
   noteStep("литературный проход (доводка аудита)");
   const touchup = await runTouchupPipeline(enhanced.text, countedGenerate, {
     model: input.model,
     personaBlock,
     depth,
+    lockedNarrationPerson: chosenMeta.narrationPerson,
   });
   const hygiene = sanitizeGeneratedText(touchup.text);
   // Правки аудита возвращают латиницу — чиним точечно, не переписывая текст целиком.
   noteStep("русские слова после аудита");
   const foreign = await repairForeignWords(hygiene.text, countedGenerate, { model: input.model });
-  const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
+  const finalHygieneCandidate = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
+  const finalRewriteRegressions = rewriteRegressionIssues(chosen.text, finalHygieneCandidate.text, chosenMeta.narrationPerson);
+  if (finalRewriteRegressions.length) {
+    emitChapterStep(`Финальный rewrite отклонён: ${finalRewriteRegressions.join("; ")}. Оставлен сценовый черновик без деградации.`, "warn");
+  }
+  const finalHygiene = finalRewriteRegressions.length ? sanitizeGeneratedText(chosen.text) : finalHygieneCandidate;
   const after = aiTellScore(finalHygiene.text);
   const finalDiagnostics = scoreCandidateWithEnhanced(finalHygiene.text, after, depth, input.genre, chosenMeta);
 
@@ -2424,11 +2483,13 @@ export async function rewriteDetectorAiSegments(
   }
 
   const text = revised.join("");
+  const lockedNarrationPerson = detectNarrationPerson(text);
   const enhanced = await runEnhancedSepiaPipeline(text, generate, {
     model: options.model,
     route: "rewrite_detector_segments",
     personaBlock: options.personaBlock || "",
     depth,
+    lockedNarrationPerson,
   });
   // Лёгкий touchup только на склеенном результате — но без раздувания: один round, мало блоков
   const touchup = await runTouchupPipeline(enhanced.text, generate, {
@@ -2440,6 +2501,7 @@ export async function rewriteDetectorAiSegments(
       touchupRounds: 1,
       bestOfN: 1,
     },
+    lockedNarrationPerson,
   });
   const hygiene = sanitizeGeneratedText(touchup.text);
   const foreign = await repairForeignWords(hygiene.text, generate, { model: options.model });
@@ -2497,11 +2559,13 @@ export async function humanizeProseDraft(
 ): Promise<{ text: string; humanizeReport: HumanizePipelineReport }> {
   const depth = resolveHumanizeDepth(options.humanizeDepth ?? "fast");
   const before = aiTellScore(text);
+  const lockedNarrationPerson = detectNarrationPerson(text);
   const enhanced = await runEnhancedSepiaPipeline(text, generate, {
     model: options.model,
     route: "humanize_draft",
     personaBlock: options.personaBlock,
     depth,
+    lockedNarrationPerson,
   });
   const touchup = await runTouchupPipeline(enhanced.text, generate, {
     model: options.model,
@@ -2512,6 +2576,7 @@ export async function humanizeProseDraft(
       maxTouchupBlocks: Math.min(depth.maxTouchupBlocks, 12),
       bestOfN: depth.id === "maximum" ? 2 : 1,
     },
+    lockedNarrationPerson,
   });
   const hygiene = sanitizeGeneratedText(touchup.text);
   const foreign = await repairForeignWords(hygiene.text, generate, { model: options.model });
