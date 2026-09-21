@@ -2033,9 +2033,10 @@ async function generateScenesDraft(
         continue;
       }
       // Мягкие проверки. За них сцену не выбрасываем — глава оборвалась бы на полпути,
-      // но две первые попытки перезапрашиваем с названным нарушением: именно эти
-      // признаки (объясняющий финал, плотность сравнений, переигровка шва, дубль
-      // события, одинаковые реакции) держали главу 20.09.2026 в «AI 23 из 24».
+      // но две первые попытки перезапрашиваем с названным нарушением. Повторы
+      // «не ответил/промолчал» и «замер/застыл» — жёсткий брак: иначе третья попытка
+      // всё равно принималась «с замечаниями», и модель продавливала тот же штамп в
+      // хвост главы (живой прогон 21.09.2026: сцены 10 и 11 добора).
       const hard: string[] = [];
       const soft: string[] = [];
       const explanation = explanationTailIssue(cleaned);
@@ -2049,9 +2050,9 @@ async function generateScenesDraft(
       const continuity = continuityIssue(continuityState, cleaned);
       if (continuity) soft.push(continuity);
       const silence = silenceIssue(cleaned, silentUsed);
-      if (silence) soft.push(silence);
+      if (silence) hard.push(silence);
       const froze = freezeIssue(cleaned, freezeUsed);
-      if (froze) soft.push(froze);
+      if (froze) hard.push(froze);
       softNotes = [...hard, ...soft];
       if ((hard.length || soft.length) && attempt < 2) {
         emitChapterStep(`Сцена ${index + 1}${isTopup ? " (добор)" : ""}, попытка ${attempt + 1}: перезапрос — ${[...hard, ...soft].join("; ")}.`);

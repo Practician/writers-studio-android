@@ -341,3 +341,40 @@ test("забракованная сцена не попадает в главу"
   assert.ok(result.text.trim().length >= 200, "глава не пустая: сценовый маршрут уступил цельному проходу");
   assert.equal(result.humanizeReport.mode, "single");
 });
+
+test("сцена с превышением потолка молчаний или freeze не принимается даже на третьей попытке", async () => {
+  let sceneCall = 0;
+  const generate = async (params: any): Promise<string> => {
+    if (/сценарист-структуралист/i.test(params.systemInstruction)) {
+      return JSON.stringify({
+        beats: Array.from({ length: 8 }, (_, i) => ({ title: `Бит ${i + 1}`, goal: `Событие ${i + 1}`, hook: `Зацепка ${i + 1}`, endsWith: `Конец ${i + 1}` })),
+      });
+    }
+    if (params.responseMimeType === "application/json") return JSON.stringify({ blocks: [] });
+    if (!params.contents.includes("Бит:")) return mockSceneText(99, 420);
+    sceneCall += 1;
+    if (sceneCall <= 3) return mockSceneText(0, 280) + " Он не ответил.";
+    if (sceneCall <= 6) return mockSceneText(1, 280) + " Она промолчала.";
+    if (sceneCall <= 9) return mockSceneText(2, 280) + " Илья замер.";
+    if (sceneCall <= 12) return mockSceneText(3, 280) + " Васька застыл.";
+    return mockSceneText(sceneCall, 320);
+  };
+
+  const result = await generateHumanizedChapter(
+    baseInput({
+      currentChapterTitle: "Глава 4. Ночь у чужого входа",
+      currentChapterSummary: "Герой ищет вход и слышит работу механизма",
+      humanizeDepth: "maximum",
+      chapterCandidates: 1,
+      authorSample: Array.from({ length: 40 }, (_, i) => `Он шёл вдоль стены и считал шаги, номер ${i}. Пыль лежала на полу ровным слоем.`).join(" "),
+    }),
+    generate,
+  );
+
+  assert.equal(result.humanizeReport.mode, "scenes");
+  assert.ok(result.humanizeReport.topupScenes >= 1);
+  const silentTotal = (result.text.match(/(?:не\s+ответил\p{L}*|промолчал\p{L}*)/giu) || []).length;
+  const freezeTotal = (result.text.match(/(?:замер\p{L}*|застыл\p{L}*)/giu) || []).length;
+  assert.ok(silentTotal <= 2, `молчаний должно остаться не больше 2, сейчас ${silentTotal}`);
+  assert.ok(freezeTotal <= 3, `freeze-реакций должно остаться не больше 3, сейчас ${freezeTotal}`);
+});
