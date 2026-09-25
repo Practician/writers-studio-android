@@ -2339,6 +2339,9 @@ export default function App() {
                   </div>
                 )}
                 <textarea
+                  spellCheck={false}
+                  autoCorrect="off"
+                  autoCapitalize="sentences"
                   ref={textareaRef}
                   value={activeChapter.content}
                   onChange={handleEditorChange}
