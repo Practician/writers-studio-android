@@ -114,6 +114,10 @@ export default function App() {
   const [openAuthorRequest, setOpenAuthorRequest] = useState(0);
   const [quickContinueRequest, setQuickContinueRequest] = useState(0);
   const [focusMode, setFocusMode] = useState(false);
+  // Экранную клавиатуру на телефоне не обойти, а обвязку вокруг textarea — можно.
+  // Пока идёт ручной набор, прячем её, иначе поле сжимается до одной строки и текста не видно.
+  const [editorFocused, setEditorFocused] = useState(false);
+  const [isCompactViewport, setIsCompactViewport] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showStoryDetailsModal, setShowStoryDetailsModal] = useState(false);
   const [showNewStoryModal, setShowNewStoryModal] = useState(false);
@@ -810,6 +814,21 @@ export default function App() {
     const inner = proofreadMirrorRef.current?.firstElementChild as HTMLElement | null;
     if (inner) inner.style.transform = `translate(${-target.scrollLeft}px, ${-target.scrollTop}px)`;
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const query = window.matchMedia("(max-width: 1023px)");
+    const sync = () => setIsCompactViewport(query.matches);
+    sync();
+    query.addEventListener?.("change", sync);
+    return () => query.removeEventListener?.("change", sync);
+  }, []);
+
+  // На телефоне клавиатура забирает примерно половину высоты WebView. Если оставить
+  // вокруг редактора всю обвязку (заголовок главы, счётчик, плашку ИИ), textarea
+  // сжимается почти в ноль. В компактном режиме набора обвязку убираем, а полю
+  // задаём минимальную высоту — так в наборе видно текст, а не пустую полоску.
+  const compactEditing = editorFocused && isCompactViewport;
 
   // Sync edit story metadata states when modal opens or active story changes
   useEffect(() => {
@@ -2165,10 +2184,10 @@ export default function App() {
         {/* Center Section: The Editor Workspace */}
         <main className="min-w-0 flex-1 flex flex-col bg-[#0b0f19] h-full overflow-hidden relative">
           {activeChapter ? (
-            <div className="flex-1 flex flex-col h-full overflow-hidden p-3 sm:p-4 lg:p-6 max-w-4xl mx-auto w-full">
+            <div className={`flex-1 flex flex-col h-full max-w-4xl mx-auto w-full p-3 sm:p-4 lg:p-6 ${compactEditing ? "overflow-y-auto" : "overflow-hidden"}`}>
               
               {/* Chapter Title Edit Block */}
-              <div className="mb-3 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3 border-b border-slate-800/40 pb-3" id="chapter-title-edit-block">
+              <div className={`${compactEditing ? "hidden" : "mb-3 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3 border-b border-slate-800/40 pb-3"}`} id="chapter-title-edit-block">
                 <div className="flex-1 space-y-1 w-full">
                   <input
                     type="text"
@@ -2253,7 +2272,7 @@ export default function App() {
               </div>
 
               {/* Distraction-Free Textarea Editor */}
-              <div className="flex-1 bg-slate-900/30 border border-slate-800/60 rounded-xl overflow-hidden flex flex-col relative">
+              <div className={`flex-1 bg-slate-900/30 border border-slate-800/60 rounded-xl overflow-hidden flex flex-col relative ${compactEditing ? "min-h-[38dvh] shrink-0" : ""}`}>
                 {/* Зеркальный слой: тот же текст прозрачными буквами, видны только волны.
                     Ввод по-прежнему принимает textarea, редактор не подменяем. */}
                 {mirrorEnabled && (
@@ -2286,6 +2305,12 @@ export default function App() {
                   value={activeChapter.content}
                   onChange={handleEditorChange}
                   onScroll={handleEditorScroll}
+                  onFocus={() => {
+                    setEditorFocused(true);
+                    // Android не всегда сам подводит поле под клавиатуру — просим ближайшую прокрутку.
+                    window.setTimeout(() => textareaRef.current?.scrollIntoView({ block: "nearest" }), 120);
+                  }}
+                  onBlur={() => setEditorFocused(false)}
                   onMouseUp={handleTextSelection}
                   onKeyUp={handleTextSelection}
                   placeholder="Начните писать свой роман здесь... Вы также можете выделить нужный кусок и воспользоваться Редактором Стиля справа."
@@ -2332,7 +2357,7 @@ export default function App() {
                 )}
 
                 {/* Editor Footer / Metric Counter */}
-                <div className="h-10 border-t border-slate-800/60 px-3 sm:px-4 bg-slate-950/40 flex justify-between items-center shrink-0 text-[11px] sm:text-xs font-mono text-slate-400">
+                <div className={`h-10 border-t border-slate-800/60 px-3 sm:px-4 bg-slate-950/40 justify-between items-center shrink-0 text-[11px] sm:text-xs font-mono text-slate-400 ${compactEditing ? "hidden" : "flex"}`}>
                   <div className="flex gap-2 sm:gap-4">
                     <span>Слов: <strong>{getWordCount(activeChapter.content)}</strong></span>
                     <span className="hidden sm:inline">Символов: <strong>{getCharCount(activeChapter.content)}</strong></span>
@@ -2343,8 +2368,8 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Bottom Quick AI Continuer helper */}
-              {!focusMode && (
+              {/* Bottom Quick AI Continuer helper: в наборе на телефоне плашка уступает место тексту. */}
+              {!focusMode && !compactEditing && (
                 <div className="mt-3 flex items-center justify-between gap-3 p-3 bg-slate-900/40 border border-slate-800/80 rounded-xl shrink-0">
                   <div className="flex items-center gap-2">
                     <div className="p-1.5 bg-blue-500/10 text-blue-400 rounded-lg">
