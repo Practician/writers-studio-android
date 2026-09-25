@@ -4,6 +4,7 @@ import { Type } from "@google/genai";
 import dotenv from "dotenv";
 import fs from "fs";
 import type { AuthorEditAudit, AuthorVoiceSheet } from "./src/types";
+import { buildPlotCheckPrompt, parsePlotCheckResponse } from "./src/lib/plotCheck";
 import {
   DEFAULT_AUTHOR_MODEL,
   analysisSchema,
@@ -498,6 +499,15 @@ ${bookPlan ? `ПЛАН КНИГИ:\n"""\n${bookPlan}\n"""` : "ПЛАН КНИГ�
 5. Для каждого риска дайте короткое действие автора; не переписывайте фрагменты и не выдавайте сам текст главы.
 6. NextStep — одно конкретное следующее действие автора.
 7. Не используйте Markdown, ссылки, эмодзи, оценочные обещания и скрытые рассуждения.`;
+    } else if (action === "plot_check") {
+      // Смысловые стыковки: один запрос и только по кнопке автора. Ничего не применяем.
+      systemInstruction = "Вы — внимательный редактор-сюжетник. Вы ищете только смысловые нестыковки главы: пропущенные реакции, замороженные сцены, разрывы с предыдущей главой и материалами книги. Вы не переписываете текст и не выдумываете факты: каждый пункт опирается на дословную цитату из главы. Если уверенности нет — вы молчите.";
+      prompt = buildPlotCheckPrompt({
+        chapterTitle: String(req.body.chapterTitle || req.body.currentChapterTitle || ""),
+        text: typeof text === "string" ? text : "",
+        previousChapter: typeof req.body.previousChapter === "string" ? req.body.previousChapter : "",
+        canonDossier: typeof req.body.canonDossier === "string" ? req.body.canonDossier : "",
+      });
     } else if (action === "brainstorm") {
       systemInstruction = "You are a brilliant literary consultant and creative brainstorming partner. You generate rich, evocative, original ideas.";
       prompt = `Generate a set of 4-5 inspiring, creative, and non-cliché ideas for a story.
@@ -688,7 +698,9 @@ ${text || ""}
     let responseMimeType: string | undefined = undefined;
     let responseSchema: any = undefined;
 
-    if (action === "editorial_review") {
+    if (action === "plot_check") {
+      responseMimeType = "application/json";
+    } else if (action === "editorial_review") {
       responseMimeType = "application/json";
       responseSchema = {
         type: Type.OBJECT,
@@ -889,7 +901,9 @@ ${text || ""}
     }
 
     // Ровный ритм — отчасти следствие низкой температуры; для прозы поднимаем.
-    const temperature = action === "muse" || action === "brainstorm"
+    const temperature = action === "plot_check"
+      ? 0.2
+      : action === "muse" || action === "brainstorm"
       ? 0.9
       : humanizeEnabled
         ? (action === "improve" ? 0.75 : depthConfig.proseTemperature)
@@ -906,6 +920,22 @@ ${text || ""}
     });
 
     let reply = llmTextOrThrow(llmResult, "Генерация");
+
+    if (action === "plot_check") {
+      let parsed;
+      try {
+        parsed = parsePlotCheckResponse(reply, typeof text === "string" ? text : "");
+      } catch (parseError) {
+        console.warn("Проверка стыковок: не разобран ответ модели", parseError);
+        throw new Error("Проверка стыковок вернула некорректный ответ. Попробуйте ещё раз.");
+      }
+      return res.json({
+        plotCheck: parsed,
+        provider: llmResult.provider,
+        model: llmResult.model,
+        llmProvider: llmProvider || undefined,
+      });
+    }
 
     if (action === "editorial_review") {
       let review: any;

@@ -35,6 +35,7 @@ import {
 import { Story, Chapter, Character, WorldRule, TextSelection, AuthorEditTarget } from "./types";
 import { hashText } from "./lib/authorAudit";
 import { useChapterProofreading } from "./hooks/useChapterProofreading";
+import { useChapterPlotCheck } from "./hooks/useChapterPlotCheck";
 import {
   addPersonalWord,
   loadPersonalWords,
@@ -782,6 +783,43 @@ export default function App() {
   }, []);
 
   // Подсветка живёт в зеркальном слое под прозрачным textarea: редактор не подменяем.
+  /**
+   * Материалы книги для проверки стыковок: план, библия, герои, правила.
+   * Уезжают на сервер только по кнопке в панели проверки и только один раз за запрос.
+   */
+  const plotCheckDossier = useMemo(() => {
+    if (!activeStory) return "";
+    const parts: string[] = [];
+    if (activeStory.bookPlan) parts.push(`ПЛАН КНИГИ:\n${activeStory.bookPlan}`);
+    if (activeStory.worldBible) parts.push(`БИБЛИЯ МИРА:\n${activeStory.worldBible}`);
+    const characters = activeStory.characters
+      .map((character) => `${character.name} — ${character.role}: ${character.description} ${character.traits} ${character.goals}`)
+      .join("\n");
+    if (characters.trim()) parts.push(`ГЕРОИ:\n${characters}`);
+    const rules = activeStory.worldRules.map((rule) => `${rule.title}: ${rule.content}`).join("\n");
+    if (rules.trim()) parts.push(`ПРАВИЛА МИРА:\n${rules}`);
+    return parts.join("\n\n");
+  }, [activeStory]);
+
+  const previousChapterText = useMemo(() => {
+    if (!activeStory || !activeChapter) return "";
+    const index = activeStory.chapters.findIndex((chapter) => chapter.id === activeChapter.id);
+    if (index <= 0) return "";
+    const previous = activeStory.chapters[index - 1];
+    return `«${previous.title}»\n${previous.content || ""}`;
+  }, [activeStory, activeChapter]);
+
+  const plotCheck = useChapterPlotCheck({
+    chapterId: activeChapter?.id || "",
+    chapterTitle: activeChapter?.title || "",
+    text: activeChapter?.content || "",
+    previousChapter: previousChapterText,
+    canonDossier: plotCheckDossier,
+    model: selectedModel,
+    llmProvider,
+    platformFields: llmApiFields,
+  });
+
   const proofreadMirrorRef = useRef<HTMLDivElement>(null);
   const [editorMirrorWidth, setEditorMirrorWidth] = useState(0);
   const proofreadSegments = useMemo(
@@ -2483,6 +2521,9 @@ export default function App() {
                             onAddWord={handleAddPersonalWord}
                             onRemoveWord={handleRemovePersonalWord}
                             onReloadDictionary={proofread.reloadDictionary}
+                            plotCheck={plotCheck}
+                            onRunPlotCheck={plotCheck.run}
+                            onStopPlotCheck={plotCheck.stop}
                           />
                         </React.Suspense>
                       </div>
@@ -2585,6 +2626,9 @@ export default function App() {
                               onAddWord={handleAddPersonalWord}
                               onRemoveWord={handleRemovePersonalWord}
                               onReloadDictionary={proofread.reloadDictionary}
+                              plotCheck={plotCheck}
+                              onRunPlotCheck={plotCheck.run}
+                              onStopPlotCheck={plotCheck.stop}
                             />
                           </React.Suspense>
                         </div>

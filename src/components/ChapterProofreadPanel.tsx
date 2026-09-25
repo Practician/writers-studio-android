@@ -4,8 +4,10 @@ import { PUNCTUATION_RULE_LABELS } from "../lib/punctuationRules";
 import type { SpellIssue } from "../lib/spellRu";
 import type { StyleReport } from "../lib/styleObservations";
 import type { SpellDictionaryStatus } from "../lib/spellRuLoader";
+import { PLOT_CHECK_KIND_LABELS, PLOT_CHECK_MAX_ISSUES } from "../lib/plotCheck";
+import type { PlotCheckState } from "../hooks/useChapterPlotCheck";
 
-type Tab = "spelling" | "punctuation" | "style";
+type Tab = "spelling" | "punctuation" | "style" | "plot";
 
 export interface ChapterProofreadPanelProps {
   text: string;
@@ -23,6 +25,9 @@ export interface ChapterProofreadPanelProps {
   onAddWord: (word: string) => void;
   onRemoveWord: (word: string) => void;
   onReloadDictionary: () => void;
+  plotCheck: PlotCheckState;
+  onRunPlotCheck: () => void;
+  onStopPlotCheck: () => void;
 }
 
 const LIST_LIMIT = 60;
@@ -49,8 +54,11 @@ export default function ChapterProofreadPanel(props: ChapterProofreadPanelProps)
     onReplaceRange,
     onAddWord,
     onRemoveWord,
-    onReloadDictionary,
-  } = props;
+  onReloadDictionary,
+  plotCheck,
+  onRunPlotCheck,
+  onStopPlotCheck,
+} = props;
 
   const [open, setOpen] = useState(true);
   const [tab, setTab] = useState<Tab>("spelling");
@@ -70,6 +78,7 @@ export default function ChapterProofreadPanel(props: ChapterProofreadPanelProps)
     { id: "spelling", label: "Правописание", count: spellIssues.length },
     { id: "punctuation", label: "Пунктуация", count: punctuationIssues.length },
     { id: "style", label: "Стиль", count: observations.length },
+    { id: "plot", label: "Стыковки", count: plotCheck.issues.length },
   ];
 
   const handleSpellClick = (issue: SpellIssue) => {
@@ -99,6 +108,7 @@ export default function ChapterProofreadPanel(props: ChapterProofreadPanelProps)
           <span className="rounded bg-rose-500/10 px-1.5 py-0.5 text-rose-300">{spellIssues.length}</span>
           <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-300">{punctuationIssues.length}</span>
           <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-sky-300">{observations.length}</span>
+          <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-violet-300">{plotCheck.issues.length}</span>
           <span className="text-slate-500">{open ? "▾" : "▸"}</span>
         </span>
       </button>
@@ -320,7 +330,81 @@ export default function ChapterProofreadPanel(props: ChapterProofreadPanelProps)
               ))}
 
               <p className="text-[10px] text-slate-600">
-                Наблюдения — не приговор: это подсказки, что стоит перечитать. Смысловые нестыковки словарём не видны.
+                Наблюдения — не приговор: это подсказки, что стоит перечитать.
+                Смысловые нестыковки словарём не видны — их ищет вкладка «Стыковки».
+              </p>
+            </div>
+          )}
+
+          {tab === "plot" && (
+            <div className="space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-[10px] text-slate-500">
+                  Смысловые стыковки видит только модель, и только по кнопке. Ничего в тексте не меняется само.
+                </p>
+                {plotCheck.status === "running" ? (
+                  <button
+                    type="button"
+                    onClick={onStopPlotCheck}
+                    className="shrink-0 rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-300"
+                  >
+                    Остановить
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={onRunPlotCheck}
+                    className="shrink-0 rounded-md bg-slate-800 px-2 py-1 text-[11px] font-semibold text-slate-200 hover:bg-violet-900/40 hover:text-violet-200"
+                  >
+                    Проверить стыковки
+                  </button>
+                )}
+              </div>
+
+              {plotCheck.status === "running" && (
+                <p className="text-[11px] text-slate-400">Модель сверяет главу с предыдущей и с материалами книги…</p>
+              )}
+
+              {plotCheck.status === "error" && (
+                <p className="rounded-lg border border-rose-900/50 bg-rose-950/30 p-2 text-[11px] text-rose-300">
+                  {plotCheck.error || "Проверка не удалась."}
+                </p>
+              )}
+
+              {plotCheck.status === "done" && plotCheck.issues.length === 0 && (
+                <p className="text-[11px] text-slate-500">
+                  Нестыковок не нашлось: либо их нет, либо модель промолчала. Пустой список — не доказательство чистоты текста.
+                </p>
+              )}
+
+              {plotCheck.issues.map((issue, index) => (
+                <button
+                  key={`${issue.kind}:${issue.start}:${index}`}
+                  type="button"
+                  onClick={() => onSelectRange(issue.start, issue.end)}
+                  className="w-full rounded-lg bg-slate-900/50 p-2 text-left hover:bg-slate-900"
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold text-violet-300">{PLOT_CHECK_KIND_LABELS[issue.kind]}</span>
+                    <span className="shrink-0 rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-300">проверьте</span>
+                  </span>
+                  <span className="mt-0.5 block text-[11px] italic text-slate-400">«{issue.quote}»</span>
+                  <span className="mt-0.5 block text-[10px] text-slate-500">{issue.explanation}</span>
+                </button>
+              ))}
+
+              {plotCheck.truncated && (
+                <p className="text-[10px] text-slate-500">Показаны первые {PLOT_CHECK_MAX_ISSUES} мест.</p>
+              )}
+
+              {plotCheck.status === "done" && plotCheck.dropped > 0 && (
+                <p className="text-[10px] text-slate-600">
+                  Отброшено {plotCheck.dropped}: цитату не удалось найти в текущем тексте — глава изменилась после запроса.
+                </p>
+              )}
+
+              <p className="text-[10px] text-slate-600">
+                Модель может ошибаться: каждый пункт — повод перечитать, а не приговор.
               </p>
             </div>
           )}
