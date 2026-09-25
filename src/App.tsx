@@ -34,6 +34,15 @@ import {
 } from "lucide-react";
 import { Story, Chapter, Character, WorldRule, TextSelection, AuthorEditTarget } from "./types";
 import { hashText } from "./lib/authorAudit";
+import { useChapterProofreading } from "./hooks/useChapterProofreading";
+import {
+  addPersonalWord,
+  loadPersonalWords,
+  mergeKnownWords,
+  removePersonalWord,
+  savePersonalWords,
+} from "./lib/personalDictionary";
+import { buildHighlightSegments } from "./lib/proofreadHighlights";
 import { DEFAULT_STORIES } from "./defaultData";
 import {
   LABYRINTH_STORY_ID,
@@ -85,6 +94,8 @@ const AIPanel = React.lazy(() => import("./components/AIPanel"));
 const AgentPanel = React.lazy(() => import("./components/AgentPanel"));
 const BookPanel = React.lazy(() => import("./components/BookPanel"));
 const AuthorProfileModal = React.lazy(() => import("./components/AuthorProfileModal"));
+// Панель вычитки грузится только когда открыта вкладка «Глава».
+const ChapterProofreadPanel = React.lazy(() => import("./components/ChapterProofreadPanel"));
 
 export default function App() {
   const [stories, setStories] = useState<Story[]>([]);
@@ -703,6 +714,103 @@ export default function App() {
   const activeStory = stories.find(s => s.id === selectedStoryId) || stories[0];
   const activeChapter = activeStory?.chapters.find(c => c.id === selectedChapterId) || activeStory?.chapters[0];
 
+  // ==== Вычитка главы: словарь грузится только на вкладке «Глава» ====
+  const [personalWords, setPersonalWords] = useState<string[]>(() => loadPersonalWords());
+  const [authorSample, setAuthorSample] = useState("");
+  const [authorTerms, setAuthorTerms] = useState<string[]>([]);
+
+  // Образец автора нужен для сравнения стиля, защищённые термины — чтобы
+  // словарь не считал ошибками имена и названия из профиля.
+  useEffect(() => {
+    const storyId = activeStory?.id;
+    if (!storyId) {
+      setAuthorSample("");
+      setAuthorTerms([]);
+      return;
+    }
+    let alive = true;
+    loadAuthorProfile(storyId)
+      .then((profile) => {
+        if (!alive) return;
+        setAuthorSample(profile?.sample?.trim() || "");
+        setAuthorTerms(profile?.protectedTerms || []);
+      })
+      .catch(() => {
+        // Профиль автора не обязателен для проверки главы.
+      });
+    return () => {
+      alive = false;
+    };
+  }, [activeStory?.id]);
+
+  const knownWords = useMemo(
+    () =>
+      mergeKnownWords(
+        personalWords,
+        authorTerms,
+        (activeStory?.characters || []).map((character) => character.name),
+        (activeStory?.worldRules || []).map((rule) => rule.title),
+      ),
+    [personalWords, authorTerms, activeStory],
+  );
+
+  const proofread = useChapterProofreading({
+    text: activeChapter?.content || "",
+    enabled: activeTab === "text" && Boolean(activeChapter?.id),
+    knownWords,
+    referenceSample: authorSample,
+  });
+
+  const handleAddPersonalWord = useCallback((word: string) => {
+    setPersonalWords((current) => {
+      const next = addPersonalWord(current, word);
+      savePersonalWords(next);
+      return next;
+    });
+  }, []);
+
+  const handleRemovePersonalWord = useCallback((word: string) => {
+    setPersonalWords((current) => {
+      const next = removePersonalWord(current, word);
+      savePersonalWords(next);
+      return next;
+    });
+  }, []);
+
+  // Подсветка живёт в зеркальном слое под прозрачным textarea: редактор не подменяем.
+  const proofreadMirrorRef = useRef<HTMLDivElement>(null);
+  const [editorMirrorWidth, setEditorMirrorWidth] = useState(0);
+  const proofreadSegments = useMemo(
+    () =>
+      buildHighlightSegments(activeChapter?.content || "", [
+        ...proofread.spellIssues.map((issue) => ({ start: issue.start, end: issue.end, kind: "spelling" as const })),
+        ...proofread.punctuationIssues.map((issue) => ({ start: issue.start, end: issue.end, kind: "punctuation" as const })),
+      ]),
+    [activeChapter?.content, proofread.spellIssues, proofread.punctuationIssues],
+  );
+  // Слишком много подсветок превращает слой в тормоз: список в панели остаётся.
+  const mirrorEnabled = proofreadSegments.length > 0 && proofreadSegments.length <= 400;
+
+  useEffect(() => {
+    const editor = textareaRef.current;
+    if (!editor) return;
+    const update = () => setEditorMirrorWidth(editor.clientWidth);
+    update();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
+    observer?.observe(editor);
+    window.addEventListener("resize", update);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [activeTab, activeChapter?.id, mirrorEnabled]);
+
+  const handleEditorScroll = useCallback((event: React.UIEvent<HTMLTextAreaElement>) => {
+    const target = event.currentTarget;
+    const inner = proofreadMirrorRef.current?.firstElementChild as HTMLElement | null;
+    if (inner) inner.style.transform = `translate(${-target.scrollLeft}px, ${-target.scrollTop}px)`;
+  }, []);
+
   // Sync edit story metadata states when modal opens or active story changes
   useEffect(() => {
     if (showStoryDetailsModal && activeStory) {
@@ -1021,6 +1129,30 @@ export default function App() {
     const updatedStory = { ...activeStory, chapters, updatedAt: Date.now() };
     saveAllStories(stories.map(s => s.id === activeStory.id ? updatedStory : s));
   };
+
+  /** Клик по найденному месту: выделяем его в редакторе, автор правит сам. */
+  const handleProofreadSelect = useCallback((start: number, end: number) => {
+    const editor = textareaRef.current;
+    if (!editor) return;
+    editor.focus();
+    editor.setSelectionRange(start, end);
+    const lineIndex = editor.value.slice(0, start).split("\n").length - 1;
+    editor.scrollTop = Math.max(0, lineIndex * 28 - editor.clientHeight / 2);
+  }, []);
+
+  /** Замена одного места: только по кнопке автора, автоприменения нет. */
+  const handleProofreadReplace = useCallback(
+    (start: number, end: number, replacement: string) => {
+      if (!activeStory || !activeChapter) return;
+      const content = activeChapter.content || "";
+      if (start < 0 || end > content.length || end < start) return;
+      const next = content.slice(0, start) + replacement + content.slice(end);
+      handleUpdateStoryChapters(
+        activeStory.chapters.map((chapter) => (chapter.id === activeChapter.id ? { ...chapter, content: next } : chapter)),
+      );
+    },
+    [activeStory, activeChapter, handleUpdateStoryChapters],
+  );
 
   // 8. Create a New Book
   const handleCreateNewStory = async () => {
@@ -2122,14 +2254,42 @@ export default function App() {
 
               {/* Distraction-Free Textarea Editor */}
               <div className="flex-1 bg-slate-900/30 border border-slate-800/60 rounded-xl overflow-hidden flex flex-col relative">
+                {/* Зеркальный слой: тот же текст прозрачными буквами, видны только волны.
+                    Ввод по-прежнему принимает textarea, редактор не подменяем. */}
+                {mirrorEnabled && (
+                  <div ref={proofreadMirrorRef} aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
+                    <div
+                      className="whitespace-pre-wrap break-words px-4 sm:px-6 py-4 sm:py-6 text-[15px] sm:text-sm leading-7 sm:leading-relaxed font-sans text-transparent"
+                      style={{ width: editorMirrorWidth ? `${editorMirrorWidth}px` : "100%" }}
+                    >
+                      {proofreadSegments.map((segment, index) =>
+                        segment.kind === "plain" ? (
+                          <React.Fragment key={`plain-${index}`}>{segment.text}</React.Fragment>
+                        ) : (
+                          <span
+                            key={`${segment.kind}-${index}`}
+                            className={
+                              segment.kind === "spelling"
+                                ? "underline decoration-rose-500 decoration-wavy decoration-1 underline-offset-4"
+                                : "underline decoration-amber-400 decoration-dotted decoration-1 underline-offset-4"
+                            }
+                          >
+                            {segment.text}
+                          </span>
+                        ),
+                      )}
+                    </div>
+                  </div>
+                )}
                 <textarea
                   ref={textareaRef}
                   value={activeChapter.content}
                   onChange={handleEditorChange}
+                  onScroll={handleEditorScroll}
                   onMouseUp={handleTextSelection}
                   onKeyUp={handleTextSelection}
                   placeholder="Начните писать свой роман здесь... Вы также можете выделить нужный кусок и воспользоваться Редактором Стиля справа."
-                  className="flex-1 w-full p-4 sm:p-6 text-[15px] sm:text-sm leading-7 sm:leading-relaxed bg-transparent text-slate-100 outline-none resize-none font-sans scrollbar-thin placeholder:text-slate-600"
+                  className="relative z-10 flex-1 w-full p-4 sm:p-6 text-[15px] sm:text-sm leading-7 sm:leading-relaxed bg-transparent text-slate-100 outline-none resize-none font-sans scrollbar-thin placeholder:text-slate-600"
                   id="draft-editor-textarea"
                 />
 
@@ -2279,7 +2439,30 @@ export default function App() {
                       onClose={() => setShowAgent(false)}
                     />
                   ) : (
-                    <AIPanel
+                    <div className="flex h-full min-h-0 flex-col gap-3">
+                      <div className="shrink-0">
+                        <React.Suspense fallback={null}>
+                          <ChapterProofreadPanel
+                            text={activeChapter?.content || ""}
+                            dictionaryStatus={proofread.dictionaryStatus}
+                            dictionaryError={proofread.dictionaryError}
+                            spellIssues={proofread.spellIssues}
+                            spellTruncated={proofread.spellTruncated}
+                            checkedWords={proofread.checkedWords}
+                            punctuationIssues={proofread.punctuationIssues}
+                            styleReport={proofread.styleReport}
+                            personalWords={personalWords}
+                            suggest={proofread.suggest}
+                            onSelectRange={handleProofreadSelect}
+                            onReplaceRange={handleProofreadReplace}
+                            onAddWord={handleAddPersonalWord}
+                            onRemoveWord={handleRemovePersonalWord}
+                            onReloadDictionary={proofread.reloadDictionary}
+                          />
+                        </React.Suspense>
+                      </div>
+                      <div className="min-h-0 flex-1 overflow-hidden">
+                      <AIPanel
                       story={activeStory}
                       currentDraft={activeChapter?.content || ""}
                       selectedText={selectedText}
@@ -2296,6 +2479,8 @@ export default function App() {
                       onOpenAuthorProfile={() => setShowAuthorProfile(true)}
                       onOpenAgent={() => setShowAgent(true)}
                     />
+                      </div>
+                    </div>
                   )
                 )}
                 {activeTab === "book" && (
@@ -2356,6 +2541,29 @@ export default function App() {
                       {([ ["text", "Текст"], ["book", "Книга"], ["muse", "Муза"] ] as const).map(([tab, label]) => <button key={tab} type="button" onClick={() => { setActiveTab(tab); setShowAgent(false); }} className={`min-h-10 flex-1 rounded-lg ${activeTab === tab ? "bg-slate-800 text-slate-100" : "text-slate-400"}`}>{label}</button>)}
                     </div>
                     <div className="min-h-0 flex-1 overflow-y-auto touch-pan-y overscroll-contain p-3">
+                      {activeTab === "text" && (
+                        <div className="mb-3">
+                          <React.Suspense fallback={null}>
+                            <ChapterProofreadPanel
+                              text={activeChapter?.content || ""}
+                              dictionaryStatus={proofread.dictionaryStatus}
+                              dictionaryError={proofread.dictionaryError}
+                              spellIssues={proofread.spellIssues}
+                              spellTruncated={proofread.spellTruncated}
+                              checkedWords={proofread.checkedWords}
+                              punctuationIssues={proofread.punctuationIssues}
+                              styleReport={proofread.styleReport}
+                              personalWords={personalWords}
+                              suggest={proofread.suggest}
+                              onSelectRange={handleProofreadSelect}
+                              onReplaceRange={handleProofreadReplace}
+                              onAddWord={handleAddPersonalWord}
+                              onRemoveWord={handleRemovePersonalWord}
+                              onReloadDictionary={proofread.reloadDictionary}
+                            />
+                          </React.Suspense>
+                        </div>
+                      )}
                       <React.Suspense fallback={<div className="p-4 text-sm text-slate-500">Загрузка…</div>}>
                         {activeTab === "text" && (showAgent ? <AgentPanel story={activeStory} currentDraft={activeChapter?.content || ""} activeChapter={activeChapter} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onInsertText={handleInsertText} onClose={() => setShowAgent(false)} /> : <AIPanel story={activeStory} currentDraft={activeChapter?.content || ""} selectedText={selectedText} textSelection={textSelection} onInsertText={handleInsertText} onApplyAuthorEdit={handleApplyAuthorEdit} activeChapter={activeChapter} onUpdateStoryChapters={handleUpdateStoryChapters} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} openAuthorRequest={openAuthorRequest} quickContinueRequest={quickContinueRequest} onOpenAuthorProfile={() => setShowAuthorProfile(true)} onOpenAgent={() => setShowAgent(true)} />)}
                         {activeTab === "book" && <BookPanel story={activeStory} onUpdateCharacters={handleUpdateCharacters} onUpdateWorldRules={handleUpdateWorldRules} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onOpenBookMaterials={() => setShowStoryDetailsModal(true)} />}

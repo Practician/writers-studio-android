@@ -37,8 +37,8 @@ export interface CalibratedStyleResult {
   weakestMetrics: CalibratedStyleMetric[];
 }
 
-const PARTICLES = new Set(["же", "ведь", "вот", "ну", "однако", "чтож"]);
-const AI_PHRASES = [
+export const PARTICLES = new Set(["же", "ведь", "вот", "ну", "однако", "чтож"]);
+export const AI_PHRASES = [
   "не просто",
   "словно нехотя",
   "с пугающей скоростью",
@@ -48,7 +48,7 @@ const AI_PHRASES = [
   "не мог ошибиться",
   "перед лицом",
 ];
-const ABSTRACT_SUBJECT = /(?:^|[.!?]\s+)(паника|тишина|темнота|пустота|одиночество|ярость|страх|жажда|судьба)\s+(?:медленно\s+)?(?:полз|нав|накр|поглот|захлест|душ|тян|дав|вытесн)/giu;
+export const ABSTRACT_SUBJECT = /(?:^|[.!?]\s+)(паника|тишина|темнота|пустота|одиночество|ярость|страх|жажда|судьба)\s+(?:медленно\s+)?(?:полз|нав|накр|поглот|захлест|душ|тян|дав|вытесн)/giu;
 
 export function wordsOf(text: string): string[] {
   return text.match(/[а-яёa-z0-9]+(?:-[а-яёa-z0-9]+)?/giu) || [];
