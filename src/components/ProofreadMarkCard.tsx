@@ -27,10 +27,14 @@ export default function ProofreadMarkCard(props: ProofreadMarkCardProps) {
   const { mark, anchor, suggestions, inDictionary, onReplace, onAddWord, onRemoveWord, onSelectRange, onClose } = props;
   const quote = mark.quote.trim();
 
+  // Нажатие внутри карточки не должно отбирать фокус у поля редактора: на телефоне
+  // потеря фокуса переключает раскладку, и строка со счётчиком слов появляется
+  // поверх карточки. preventDefault на pointerdown оставляет фокус в поле.
   return (
     <div
       data-mark-card="true"
-      className="absolute z-20 w-[19rem] max-w-[calc(100%-1rem)] rounded-xl border border-slate-700/80 bg-slate-900/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur"
+      onPointerDown={(event) => event.preventDefault()}
+      className="absolute z-20 max-h-[calc(100%-0.75rem)] w-[19rem] max-w-[calc(100%-1rem)] overflow-y-auto overscroll-contain rounded-xl border border-slate-700/80 bg-slate-900/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur"
       style={{ top: anchor?.top ?? 8, left: anchor?.left ?? 8 }}
     >
       <div className="flex items-center justify-between gap-2">
@@ -65,13 +69,24 @@ export default function ProofreadMarkCard(props: ProofreadMarkCardProps) {
               </button>
             ))}
           </div>
+          {/* Кнопка словаря — полноценная кнопка высотой с палец: подчёркнутая
+              строка в десять точек была слишком мелкой мишенью, и нажатие по ней
+              не срабатывало. */}
           <div className="mt-1.5">
             {inDictionary ? (
-              <button type="button" onClick={() => onRemoveWord(mark.quote)} className="text-[10px] text-slate-400 underline">
+              <button
+                type="button"
+                onClick={() => onRemoveWord(mark.quote)}
+                className="min-h-8 w-full rounded-lg bg-slate-800 px-2 text-[11px] text-slate-300 hover:bg-rose-900/40 hover:text-rose-200"
+              >
                 Убрать из личного словаря
               </button>
             ) : (
-              <button type="button" onClick={() => onAddWord(mark.quote)} className="text-[10px] text-slate-400 underline">
+              <button
+                type="button"
+                onClick={() => onAddWord(mark.quote)}
+                className="min-h-8 w-full rounded-lg bg-slate-800 px-2 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-900/40 hover:text-emerald-200"
+              >
                 В личный словарь
               </button>
             )}

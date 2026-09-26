@@ -53,6 +53,8 @@ import {
 import { anchorRangesToText } from "./lib/proofreadHighlights";
 import { MIRROR_TEXT_INVARIANTS, applyMirrorStyle, mirrorMetricsFrom, readMirrorMetricSource } from "./lib/mirrorMetrics";
 import { MIRROR_MARK_LIMIT, marksNotice } from "./lib/proofreadMarks";
+import { placeMarkCard } from "./lib/markAnchor";
+import { normalizeSpellKey } from "./lib/spellRu";
 import { buildActiveMark, findMarkAtOffset, visibleMarkOrder, type ActiveMark } from "./lib/proofreadTap";
 import ChapterProofreadBar from "./components/ChapterProofreadBar";
 import ProofreadMarkCard from "./components/ProofreadMarkCard";
@@ -840,6 +842,13 @@ export default function App() {
   const [markVisibility, setMarkVisibility] = useState<MarkKindVisibility>(DEFAULT_MARK_VISIBILITY);
   const [activeMark, setActiveMark] = useState<ActiveMark | null>(null);
   const [markAnchor, setMarkAnchor] = useState<{ top: number; left: number } | null>(null);
+  /** Настоящий размер карточки метки: по нему видно, поместится ли она под словом. */
+  const [markCardSize, setMarkCardSize] = useState<{ width: number; height: number }>({
+    width: 0,
+    height: 0,
+  });
+  /** Высота поля редактора: карточка обязана целиком уместиться внутрь него. */
+  const [editorAreaHeight, setEditorAreaHeight] = useState(0);
 
   const proofreadSegments = useMemo(
     () =>
@@ -998,9 +1007,9 @@ export default function App() {
     );
   }, [markVisibility, plotCheck.issues, proofread.punctuationIssues, proofread.spellIssues]);
 
-  // Карточка встаёт над подчёркнутым местом: координаты слова берём из зеркального слоя,
-  // потому что textarea геометрии слова не отдаёт.
-  useEffect(() => {
+  // Карточка встаёт рядом с подчёркнутым местом: координаты слова берём из зеркального
+  // слоя, потому что textarea геометрии слова не отдаёт.
+  useLayoutEffect(() => {
     if (!activeMark) {
       setMarkAnchor(null);
       return;
@@ -1019,13 +1028,32 @@ export default function App() {
       setMarkAnchor(null);
       return;
     }
-    const CARD_WIDTH = 304;
-    const CARD_HEIGHT = 168;
-    const below = word.bottom - area.top + 8;
-    const top = below + CARD_HEIGHT > area.height ? Math.max(6, word.top - area.top - CARD_HEIGHT - 8) : below;
-    const left = Math.min(Math.max(word.left - area.left, 6), Math.max(6, area.width - CARD_WIDTH - 6));
-    setMarkAnchor({ top, left });
-  }, [activeMark, proofreadSegments, editorMirrorWidth]);
+    // Место считает чистая функция: карточка обязана поместиться в поле целиком,
+    // иначе её нижние кнопки срезает край поля и нажатие по ним не проходит.
+    setMarkAnchor(
+      placeMarkCard(
+        { top: word.top - area.top, bottom: word.bottom - area.top, left: word.left - area.left },
+        { width: area.width, height: area.height },
+        markCardSize,
+      ),
+    );
+  }, [activeMark, proofreadSegments, editorMirrorWidth, markCardSize, editorAreaHeight]);
+
+  // Высота карточки зависит от числа подсказок и длины причины: считаем её по
+  // нарисованной карточке, а не по константе. Пока не измерена — берём запас.
+  useLayoutEffect(() => {
+    const card = editorContainerRef.current?.querySelector<HTMLElement>('[data-mark-card="true"]');
+    if (!card) {
+      setMarkCardSize((current) => (current.width || current.height ? { width: 0, height: 0 } : current));
+      return;
+    }
+    const rect = card.getBoundingClientRect();
+    setMarkCardSize((current) =>
+      Math.abs(current.width - rect.width) < 1 && Math.abs(current.height - rect.height) < 1
+        ? current
+        : { width: rect.width, height: rect.height },
+    );
+  }, [activeMark, editorMirrorWidth, editorAreaHeight]);
 
   // Текст, глава или личный словарь поменялись — прежние смещения больше не действительны.
   useEffect(() => {
@@ -1046,6 +1074,19 @@ export default function App() {
   // сжимается почти в ноль. В компактном режиме набора обвязку убираем, а полю
   // задаём минимальную высоту — так в наборе видно текст, а не пустую полоску.
   const compactEditing = editorFocused && isCompactViewport;
+
+  // Высота поля меняется, когда появляется или исчезает обвязка вокруг него
+  // (полоска вычитки, строка со счётчиком слов). Карточка метки должна
+  // переехать вместе с полем, иначе её снова срежет край.
+  useLayoutEffect(() => {
+    const container = editorContainerRef.current;
+    if (!container) return;
+    const update = () => setEditorAreaHeight(container.clientHeight);
+    update();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
+    observer?.observe(container, { box: "content-box" });
+    return () => observer?.disconnect();
+  }, [activeTab, activeChapter?.id, compactEditing, marksEnabled]);
 
   // Sync edit story metadata states when modal opens or active story changes
   useEffect(() => {
@@ -1420,8 +1461,8 @@ export default function App() {
 
   const markInDictionary = useMemo(() => {
     if (activeMark?.kind !== "spelling") return false;
-    const word = activeMark.quote.toLocaleLowerCase("ru");
-    return personalWords.some((item) => item.toLocaleLowerCase("ru") === word);
+    const word = normalizeSpellKey(activeMark.quote);
+    return personalWords.some((item) => normalizeSpellKey(item) === word);
   }, [activeMark, personalWords]);
 
   // 8. Create a New Book
