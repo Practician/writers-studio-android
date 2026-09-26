@@ -50,6 +50,8 @@ import {
   type MarkKind,
   type MarkKindVisibility,
 } from "./lib/proofreadHighlights";
+import { anchorRangesToText } from "./lib/proofreadHighlights";
+import { mirrorMetricsFrom, readMirrorMetricSource } from "./lib/mirrorMetrics";
 import { buildActiveMark, findMarkAtOffset, visibleMarkOrder, type ActiveMark } from "./lib/proofreadTap";
 import ChapterProofreadBar from "./components/ChapterProofreadBar";
 import ProofreadMarkCard from "./components/ProofreadMarkCard";
@@ -842,18 +844,23 @@ export default function App() {
     () =>
       buildHighlightSegments(
         activeChapter?.content || "",
-        [
+        // Проверка идёт с задержкой: за это время автор мог дописать текст выше,
+        // и прежние смещения попали бы на чужие слова. Привязываем метки к тексту
+        // заново — по слову, а не по прежнему числу.
+        anchorRangesToText(activeChapter?.content || "", [
           ...proofread.spellIssues.map((issue, index) => ({
             start: issue.start,
             end: issue.end,
             kind: "spelling" as const,
             id: markId("spelling", index),
+            expected: issue.word,
           })),
           ...proofread.punctuationIssues.map((issue, index) => ({
             start: issue.start,
             end: issue.end,
             kind: "punctuation" as const,
             id: markId("punctuation", index),
+            expected: issue.found,
           })),
           ...plotCheck.issues.map((issue, index) => ({
             start: issue.start,
@@ -861,7 +868,7 @@ export default function App() {
             kind: "plot" as const,
             id: markId("plot", index),
           })),
-        ],
+        ]),
         markVisibility,
       ),
     [activeChapter?.content, proofread.spellIssues, proofread.punctuationIssues, plotCheck.issues, markVisibility],
@@ -869,20 +876,70 @@ export default function App() {
   // Слишком много меток превращает слой в тормоз: тогда волн в тексте нет,
   // но причины всё равно открываются нажатием — просто без подсветки.
   const mirrorEnabled = proofreadSegments.length > 0 && proofreadSegments.length <= 400;
+  // Раскладка зеркала обязана совпасть с полем ввода. Не совпала — волны не
+  // рисуем вовсе: метка под чужим словом хуже, чем её отсутствие.
+  const [marksAligned, setMarksAligned] = useState(true);
+  const marksAlignedRef = useRef(true);
+
+  const applyMirrorMetrics = useCallback(() => {
+    const editor = textareaRef.current;
+    const inner = proofreadMirrorRef.current?.firstElementChild as HTMLElement | null;
+    if (!editor || !inner) return;
+    // Метрики снимаем с живого поля: на телефоне системный шрифт и высота
+    // строки у div и у textarea расходятся, и волна уезжает под чужое слово.
+    Object.assign(
+      inner.style,
+      mirrorMetricsFrom(readMirrorMetricSource(window.getComputedStyle(editor)), editor.clientWidth),
+    );
+  }, []);
 
   useEffect(() => {
     const editor = textareaRef.current;
     if (!editor) return;
-    const update = () => setEditorMirrorWidth(editor.clientWidth);
+    const update = () => {
+      setEditorMirrorWidth(editor.clientWidth);
+      applyMirrorMetrics();
+    };
     update();
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
     observer?.observe(editor);
     window.addEventListener("resize", update);
+    // Шрифт может подгрузиться после первого кадра: тогда строки лягут иначе.
+    document.fonts?.ready.then(update).catch(() => undefined);
     return () => {
       observer?.disconnect();
       window.removeEventListener("resize", update);
     };
-  }, [activeTab, activeChapter?.id, mirrorEnabled]);
+  }, [activeTab, activeChapter?.id, mirrorEnabled, applyMirrorMetrics]);
+
+  useEffect(() => {
+    if (!mirrorEnabled) {
+      marksAlignedRef.current = true;
+      setMarksAligned(true);
+      return;
+    }
+    const editor = textareaRef.current;
+    const inner = proofreadMirrorRef.current?.firstElementChild as HTMLElement | null;
+    if (!editor || !inner) return;
+    // Когда текст не влезает в поле, высоты содержимого сравнимы напрямую:
+    // разошлись — значит зеркало уложило строки иначе, чем поле.
+    const aligned =
+      editor.scrollHeight <= editor.clientHeight + 2
+        ? true
+        : Math.abs(inner.scrollHeight - editor.scrollHeight) <= 2;
+    marksAlignedRef.current = aligned;
+    setMarksAligned((current) => (current === aligned ? current : aligned));
+  }, [
+    activeChapter?.id,
+    activeChapter?.content,
+    proofreadSegments,
+    markVisibility,
+    editorMirrorWidth,
+    mirrorEnabled,
+    applyMirrorMetrics,
+  ]);
+
+  const showMarks = mirrorEnabled && marksAligned;
 
   const handleEditorScroll = useCallback((event: React.UIEvent<HTMLTextAreaElement>) => {
     const target = event.currentTarget;
@@ -906,6 +963,7 @@ export default function App() {
   const handleEditorMarkTap = useCallback(() => {
     const editor = textareaRef.current;
     if (!editor) return;
+    if (!marksAlignedRef.current) return;
     if (Date.now() - lastTypingAtRef.current < 800) return;
     const hit = findMarkAtOffset(
       editor.selectionStart ?? 0,
@@ -2472,6 +2530,11 @@ export default function App() {
                     onRunPlotCheck={plotCheck.run}
                     onStopPlotCheck={plotCheck.stop}
                   />
+                  {mirrorEnabled && !marksAligned && (
+                    <p className="mt-1 text-[11px] text-amber-400/90" id="proofread-marks-off">
+                      Волны в тексте выключены: разметка не совпала с полем ввода. Текст целиком на месте, причины меток тоже — скажите нам, и мы поправим раскладку.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -2481,11 +2544,8 @@ export default function App() {
                     Ввод по-прежнему принимает textarea, редактор не подменяем. */}
                 {mirrorEnabled && (
                   <div ref={proofreadMirrorRef} aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
-                    <div
-                      className="whitespace-pre-wrap break-words px-4 sm:px-6 py-4 sm:py-6 text-[15px] sm:text-sm leading-7 sm:leading-relaxed font-sans text-transparent"
-                      style={{ width: editorMirrorWidth ? `${editorMirrorWidth}px` : "100%" }}
-                    >
-                      {proofreadSegments.map((segment, index) =>
+                    <div className="whitespace-pre-wrap break-words px-4 sm:px-6 py-4 sm:py-6 text-[15px] sm:text-sm leading-7 sm:leading-relaxed font-sans text-transparent">
+                      {showMarks ? proofreadSegments.map((segment, index) =>
                         segment.kind === "plain" ? (
                           <React.Fragment key={`plain-${index}`}>{segment.text}</React.Fragment>
                         ) : (
@@ -2503,6 +2563,8 @@ export default function App() {
                             {segment.text}
                           </span>
                         ),
+                      ) : (
+                        activeChapter?.content || ""
                       )}
                     </div>
                   </div>
