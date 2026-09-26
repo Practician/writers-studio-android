@@ -43,7 +43,16 @@ import {
   removePersonalWord,
   savePersonalWords,
 } from "./lib/personalDictionary";
-import { buildHighlightSegments } from "./lib/proofreadHighlights";
+import {
+  buildHighlightSegments,
+  markId,
+  DEFAULT_MARK_VISIBILITY,
+  type MarkKind,
+  type MarkKindVisibility,
+} from "./lib/proofreadHighlights";
+import { buildActiveMark, findMarkAtOffset, visibleMarkOrder, type ActiveMark } from "./lib/proofreadTap";
+import ChapterProofreadBar from "./components/ChapterProofreadBar";
+import ProofreadMarkCard from "./components/ProofreadMarkCard";
 import { DEFAULT_STORIES } from "./defaultData";
 import {
   LABYRINTH_STORY_ID,
@@ -95,8 +104,8 @@ const AIPanel = React.lazy(() => import("./components/AIPanel"));
 const AgentPanel = React.lazy(() => import("./components/AgentPanel"));
 const BookPanel = React.lazy(() => import("./components/BookPanel"));
 const AuthorProfileModal = React.lazy(() => import("./components/AuthorProfileModal"));
-// Панель вычитки грузится только когда открыта вкладка «Глава».
-const ChapterProofreadPanel = React.lazy(() => import("./components/ChapterProofreadPanel"));
+// Вычитки отдельной панелью больше нет: метки живут в тексте главы,
+// а переключатели — в полоске над редактором (ChapterProofreadBar).
 
 export default function App() {
   const [stories, setStories] = useState<Story[]>([]);
@@ -761,7 +770,9 @@ export default function App() {
 
   const proofread = useChapterProofreading({
     text: activeChapter?.content || "",
-    enabled: activeTab === "text" && Boolean(activeChapter?.id),
+    // Вычитка работает там, где автор набирает текст, — на экране главы,
+    // а не во вкладке «Текст»: словарь грузится и освобождается вместе с главой.
+    enabled: mobilePanel === null && Boolean(activeChapter?.id),
     knownWords,
     referenceSample: authorSample,
   });
@@ -821,16 +832,42 @@ export default function App() {
   });
 
   const proofreadMirrorRef = useRef<HTMLDivElement>(null);
+  const editorContainerRef = useRef<HTMLDivElement>(null);
   const [editorMirrorWidth, setEditorMirrorWidth] = useState(0);
+  const [markVisibility, setMarkVisibility] = useState<MarkKindVisibility>(DEFAULT_MARK_VISIBILITY);
+  const [activeMark, setActiveMark] = useState<ActiveMark | null>(null);
+  const [markAnchor, setMarkAnchor] = useState<{ top: number; left: number } | null>(null);
+
   const proofreadSegments = useMemo(
     () =>
-      buildHighlightSegments(activeChapter?.content || "", [
-        ...proofread.spellIssues.map((issue) => ({ start: issue.start, end: issue.end, kind: "spelling" as const })),
-        ...proofread.punctuationIssues.map((issue) => ({ start: issue.start, end: issue.end, kind: "punctuation" as const })),
-      ]),
-    [activeChapter?.content, proofread.spellIssues, proofread.punctuationIssues],
+      buildHighlightSegments(
+        activeChapter?.content || "",
+        [
+          ...proofread.spellIssues.map((issue, index) => ({
+            start: issue.start,
+            end: issue.end,
+            kind: "spelling" as const,
+            id: markId("spelling", index),
+          })),
+          ...proofread.punctuationIssues.map((issue, index) => ({
+            start: issue.start,
+            end: issue.end,
+            kind: "punctuation" as const,
+            id: markId("punctuation", index),
+          })),
+          ...plotCheck.issues.map((issue, index) => ({
+            start: issue.start,
+            end: issue.end,
+            kind: "plot" as const,
+            id: markId("plot", index),
+          })),
+        ],
+        markVisibility,
+      ),
+    [activeChapter?.content, proofread.spellIssues, proofread.punctuationIssues, plotCheck.issues, markVisibility],
   );
-  // Слишком много подсветок превращает слой в тормоз: список в панели остаётся.
+  // Слишком много меток превращает слой в тормоз: тогда волн в тексте нет,
+  // но причины всё равно открываются нажатием — просто без подсветки.
   const mirrorEnabled = proofreadSegments.length > 0 && proofreadSegments.length <= 400;
 
   useEffect(() => {
@@ -852,6 +889,75 @@ export default function App() {
     const inner = proofreadMirrorRef.current?.firstElementChild as HTMLElement | null;
     if (inner) inner.style.transform = `translate(${-target.scrollLeft}px, ${-target.scrollTop}px)`;
   }, []);
+
+  // «select» прилетает и при наборе тоже: не путаем печать с нажатием по слову.
+  const lastTypingAtRef = useRef(0);
+
+  const toggleMarkKind = useCallback((kind: MarkKind) => {
+    setMarkVisibility((current) => ({ ...current, [kind]: !current[kind] }));
+    setActiveMark(null);
+  }, []);
+
+  /**
+   * Нажатие в тексте. Textarea сама ставит каретку туда, куда попал палец,
+   * поэтому метку ищем по смещению каретки, а не по координатам нажатия:
+   * так работает и тап, и клавиатура, и выделение.
+   */
+  const handleEditorMarkTap = useCallback(() => {
+    const editor = textareaRef.current;
+    if (!editor) return;
+    if (Date.now() - lastTypingAtRef.current < 800) return;
+    const hit = findMarkAtOffset(
+      editor.selectionStart ?? 0,
+      { spelling: proofread.spellIssues, punctuation: proofread.punctuationIssues, plot: plotCheck.issues },
+      visibleMarkOrder(markVisibility),
+    );
+    if (!hit) {
+      setActiveMark(null);
+      return;
+    }
+    setActiveMark(
+      buildActiveMark(hit, {
+        spelling: proofread.spellIssues,
+        punctuation: proofread.punctuationIssues,
+        plot: plotCheck.issues,
+      }),
+    );
+  }, [markVisibility, plotCheck.issues, proofread.punctuationIssues, proofread.spellIssues]);
+
+  // Карточка встаёт над подчёркнутым местом: координаты слова берём из зеркального слоя,
+  // потому что textarea геометрии слова не отдаёт.
+  useEffect(() => {
+    if (!activeMark) {
+      setMarkAnchor(null);
+      return;
+    }
+    const container = editorContainerRef.current;
+    const target = proofreadMirrorRef.current?.querySelector<HTMLElement>(
+      `[data-mark-id="${markId(activeMark.kind, activeMark.index)}"]`,
+    );
+    if (!container || !target) {
+      setMarkAnchor(null);
+      return;
+    }
+    const word = target.getBoundingClientRect();
+    const area = container.getBoundingClientRect();
+    if (!word.height || !area.height) {
+      setMarkAnchor(null);
+      return;
+    }
+    const CARD_WIDTH = 304;
+    const CARD_HEIGHT = 168;
+    const below = word.bottom - area.top + 8;
+    const top = below + CARD_HEIGHT > area.height ? Math.max(6, word.top - area.top - CARD_HEIGHT - 8) : below;
+    const left = Math.min(Math.max(word.left - area.left, 6), Math.max(6, area.width - CARD_WIDTH - 6));
+    setMarkAnchor({ top, left });
+  }, [activeMark, proofreadSegments, editorMirrorWidth]);
+
+  // Текст, глава или личный словарь поменялись — прежние смещения больше не действительны.
+  useEffect(() => {
+    setActiveMark(null);
+  }, [activeChapter?.id, activeChapter?.content, personalWords]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.matchMedia) return;
@@ -1210,6 +1316,40 @@ export default function App() {
     },
     [activeStory, activeChapter, handleUpdateStoryChapters],
   );
+
+  /** Замена прямо из карточки метки: тот же порядок — только по нажатию автора. */
+  const applyMarkReplacement = useCallback(
+    (replacement: string) => {
+      if (!activeMark) return;
+      handleProofreadReplace(activeMark.start, activeMark.end, replacement);
+      setActiveMark(null);
+    },
+    [activeMark, handleProofreadReplace],
+  );
+
+  const addActiveMarkWord = useCallback(() => {
+    if (!activeMark || activeMark.kind !== "spelling") return;
+    handleAddPersonalWord(activeMark.quote);
+    setActiveMark(null);
+  }, [activeMark, handleAddPersonalWord]);
+
+  const removeActiveMarkWord = useCallback(() => {
+    if (!activeMark || activeMark.kind !== "spelling") return;
+    handleRemovePersonalWord(activeMark.quote);
+    setActiveMark(null);
+  }, [activeMark, handleRemovePersonalWord]);
+
+  // Подсказки считаются только для открытой карточки: словарь не дёргаем зря.
+  const markSuggestions = useMemo(
+    () => (activeMark?.kind === "spelling" ? proofread.suggest(activeMark.quote) : []),
+    [activeMark, proofread.suggest],
+  );
+
+  const markInDictionary = useMemo(() => {
+    if (activeMark?.kind !== "spelling") return false;
+    const word = activeMark.quote.toLocaleLowerCase("ru");
+    return personalWords.some((item) => item.toLocaleLowerCase("ru") === word);
+  }, [activeMark, personalWords]);
 
   // 8. Create a New Book
   const handleCreateNewStory = async () => {
@@ -2309,8 +2449,34 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Полоска вычитки: сами метки — в тексте, здесь только переключатели.
+                  В наборе на телефоне уступает место тексту, метки остаются. */}
+              {!compactEditing && (
+                <div className="mb-2 shrink-0">
+                  <ChapterProofreadBar
+                    dictionaryStatus={proofread.dictionaryStatus}
+                    dictionaryError={proofread.dictionaryError}
+                    checkedWords={proofread.checkedWords}
+                    spellTruncated={proofread.spellTruncated}
+                    counts={{
+                      spelling: proofread.spellIssues.length,
+                      punctuation: proofread.punctuationIssues.length,
+                      plot: plotCheck.issues.length,
+                    }}
+                    visible={markVisibility}
+                    onToggleKind={toggleMarkKind}
+                    styleReport={proofread.styleReport}
+                    onSelectRange={handleProofreadSelect}
+                    onReloadDictionary={proofread.reloadDictionary}
+                    plotCheck={plotCheck}
+                    onRunPlotCheck={plotCheck.run}
+                    onStopPlotCheck={plotCheck.stop}
+                  />
+                </div>
+              )}
+
               {/* Distraction-Free Textarea Editor */}
-              <div className={`flex-1 bg-slate-900/30 border border-slate-800/60 rounded-xl overflow-hidden flex flex-col relative ${compactEditing ? "min-h-[38dvh] shrink-0" : ""}`}>
+              <div ref={editorContainerRef} className={`flex-1 bg-slate-900/30 border border-slate-800/60 rounded-xl overflow-hidden flex flex-col relative ${compactEditing ? "min-h-[38dvh] shrink-0" : ""}`}>
                 {/* Зеркальный слой: тот же текст прозрачными буквами, видны только волны.
                     Ввод по-прежнему принимает textarea, редактор не подменяем. */}
                 {mirrorEnabled && (
@@ -2325,10 +2491,13 @@ export default function App() {
                         ) : (
                           <span
                             key={`${segment.kind}-${index}`}
+                            data-mark-id={segment.id}
                             className={
                               segment.kind === "spelling"
                                 ? "underline decoration-rose-500 decoration-wavy decoration-1 underline-offset-4"
-                                : "underline decoration-amber-400 decoration-dotted decoration-1 underline-offset-4"
+                                : segment.kind === "punctuation"
+                                  ? "underline decoration-amber-400 decoration-dotted decoration-1 underline-offset-4"
+                                  : "underline decoration-violet-500 decoration-wavy decoration-1 underline-offset-4"
                             }
                           >
                             {segment.text}
@@ -2344,8 +2513,13 @@ export default function App() {
                   autoCapitalize="sentences"
                   ref={textareaRef}
                   value={activeChapter.content}
-                  onChange={handleEditorChange}
+                  onChange={(event) => {
+                    lastTypingAtRef.current = Date.now();
+                    handleEditorChange(event);
+                  }}
                   onScroll={handleEditorScroll}
+                  onClick={handleEditorMarkTap}
+                  onSelect={handleEditorMarkTap}
                   onFocus={() => {
                     setEditorFocused(true);
                     // Android не всегда сам подводит поле под клавиатуру — просим ближайшую прокрутку.
@@ -2407,6 +2581,21 @@ export default function App() {
                     UTF-8 • Draft Mode
                   </div>
                 </div>
+
+                {/* Карточка метки: причина и замена там, где стоит подчёркнутое слово. */}
+                {activeMark && (
+                  <ProofreadMarkCard
+                    mark={activeMark}
+                    anchor={markAnchor}
+                    suggestions={markSuggestions}
+                    inDictionary={markInDictionary}
+                    onReplace={applyMarkReplacement}
+                    onAddWord={addActiveMarkWord}
+                    onRemoveWord={removeActiveMarkWord}
+                    onSelectRange={handleProofreadSelect}
+                    onClose={() => setActiveMark(null)}
+                  />
+                )}
               </div>
 
               {/* Bottom Quick AI Continuer helper: в наборе на телефоне плашка уступает место тексту. */}
@@ -2506,30 +2695,6 @@ export default function App() {
                     />
                   ) : (
                     <div className="flex h-full min-h-0 flex-col gap-3">
-                      <div className="shrink-0">
-                        <React.Suspense fallback={null}>
-                          <ChapterProofreadPanel
-                            text={activeChapter?.content || ""}
-                            dictionaryStatus={proofread.dictionaryStatus}
-                            dictionaryError={proofread.dictionaryError}
-                            spellIssues={proofread.spellIssues}
-                            spellTruncated={proofread.spellTruncated}
-                            checkedWords={proofread.checkedWords}
-                            punctuationIssues={proofread.punctuationIssues}
-                            styleReport={proofread.styleReport}
-                            personalWords={personalWords}
-                            suggest={proofread.suggest}
-                            onSelectRange={handleProofreadSelect}
-                            onReplaceRange={handleProofreadReplace}
-                            onAddWord={handleAddPersonalWord}
-                            onRemoveWord={handleRemovePersonalWord}
-                            onReloadDictionary={proofread.reloadDictionary}
-                            plotCheck={plotCheck}
-                            onRunPlotCheck={plotCheck.run}
-                            onStopPlotCheck={plotCheck.stop}
-                          />
-                        </React.Suspense>
-                      </div>
                       <div className="min-h-0 flex-1 overflow-hidden">
                       <AIPanel
                       story={activeStory}
@@ -2610,32 +2775,6 @@ export default function App() {
                       {([ ["text", "Текст"], ["book", "Книга"], ["muse", "Муза"] ] as const).map(([tab, label]) => <button key={tab} type="button" onClick={() => { setActiveTab(tab); setShowAgent(false); }} className={`min-h-10 flex-1 rounded-lg ${activeTab === tab ? "bg-slate-800 text-slate-100" : "text-slate-400"}`}>{label}</button>)}
                     </div>
                     <div className="min-h-0 flex-1 overflow-y-auto touch-pan-y overscroll-contain p-3">
-                      {activeTab === "text" && (
-                        <div className="mb-3">
-                          <React.Suspense fallback={null}>
-                            <ChapterProofreadPanel
-                              text={activeChapter?.content || ""}
-                              dictionaryStatus={proofread.dictionaryStatus}
-                              dictionaryError={proofread.dictionaryError}
-                              spellIssues={proofread.spellIssues}
-                              spellTruncated={proofread.spellTruncated}
-                              checkedWords={proofread.checkedWords}
-                              punctuationIssues={proofread.punctuationIssues}
-                              styleReport={proofread.styleReport}
-                              personalWords={personalWords}
-                              suggest={proofread.suggest}
-                              onSelectRange={handleProofreadSelect}
-                              onReplaceRange={handleProofreadReplace}
-                              onAddWord={handleAddPersonalWord}
-                              onRemoveWord={handleRemovePersonalWord}
-                              onReloadDictionary={proofread.reloadDictionary}
-                              plotCheck={plotCheck}
-                              onRunPlotCheck={plotCheck.run}
-                              onStopPlotCheck={plotCheck.stop}
-                            />
-                          </React.Suspense>
-                        </div>
-                      )}
                       <React.Suspense fallback={<div className="p-4 text-sm text-slate-500">Загрузка…</div>}>
                         {activeTab === "text" && (showAgent ? <AgentPanel story={activeStory} currentDraft={activeChapter?.content || ""} activeChapter={activeChapter} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onInsertText={handleInsertText} onClose={() => setShowAgent(false)} /> : <AIPanel story={activeStory} currentDraft={activeChapter?.content || ""} selectedText={selectedText} textSelection={textSelection} onInsertText={handleInsertText} onApplyAuthorEdit={handleApplyAuthorEdit} activeChapter={activeChapter} onUpdateStoryChapters={handleUpdateStoryChapters} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} openAuthorRequest={openAuthorRequest} quickContinueRequest={quickContinueRequest} onOpenAuthorProfile={() => setShowAuthorProfile(true)} onOpenAgent={() => setShowAgent(true)} />)}
                         {activeTab === "book" && <BookPanel story={activeStory} onUpdateCharacters={handleUpdateCharacters} onUpdateWorldRules={handleUpdateWorldRules} selectedModel={selectedModel} llmProvider={llmProvider} llmApiFields={llmApiFields} onOpenBookMaterials={() => setShowStoryDetailsModal(true)} />}
