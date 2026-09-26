@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from "react";
 // mammoth (~400 КБ) загружается динамически только при импорте .docx — см. extractDocxText
 const extractDocxText = async (arrayBuffer: ArrayBuffer): Promise<string> => {
   const mammoth = (await import("mammoth")).default;
@@ -51,7 +51,8 @@ import {
   type MarkKindVisibility,
 } from "./lib/proofreadHighlights";
 import { anchorRangesToText } from "./lib/proofreadHighlights";
-import { mirrorMetricsFrom, readMirrorMetricSource } from "./lib/mirrorMetrics";
+import { MIRROR_TEXT_INVARIANTS, applyMirrorStyle, mirrorMetricsFrom, readMirrorMetricSource } from "./lib/mirrorMetrics";
+import { MIRROR_MARK_LIMIT, marksNotice } from "./lib/proofreadMarks";
 import { buildActiveMark, findMarkAtOffset, visibleMarkOrder, type ActiveMark } from "./lib/proofreadTap";
 import ChapterProofreadBar from "./components/ChapterProofreadBar";
 import ProofreadMarkCard from "./components/ProofreadMarkCard";
@@ -875,11 +876,15 @@ export default function App() {
   );
   // Слишком много меток превращает слой в тормоз: тогда волн в тексте нет,
   // но причины всё равно открываются нажатием — просто без подсветки.
-  const mirrorEnabled = proofreadSegments.length > 0 && proofreadSegments.length <= 400;
-  // Раскладка зеркала обязана совпасть с полем ввода. Не совпала — волны не
-  // рисуем вовсе: метка под чужим словом хуже, чем её отсутствие.
-  const [marksAligned, setMarksAligned] = useState(true);
-  const marksAlignedRef = useRef(true);
+  const marksEnabled = proofreadSegments.length > 0 && proofreadSegments.length <= MIRROR_MARK_LIMIT;
+  // Волн может не быть — тогда причина написана прямо, и её видно всегда.
+  const marksNoticeText = marksNotice({
+    segmentCount: proofreadSegments.length,
+    dictionaryStatus: proofread.dictionaryStatus,
+    dictionaryError: proofread.dictionaryError,
+    spellTruncated: proofread.spellTruncated,
+    hasText: Boolean((activeChapter?.content || "").trim()),
+  });
 
   const applyMirrorMetrics = useCallback(() => {
     const editor = textareaRef.current;
@@ -887,22 +892,33 @@ export default function App() {
     if (!editor || !inner) return;
     // Метрики снимаем с живого поля: на телефоне системный шрифт и высота
     // строки у div и у textarea расходятся, и волна уезжает под чужое слово.
-    Object.assign(
-      inner.style,
+    applyMirrorStyle(
+      inner,
       mirrorMetricsFrom(readMirrorMetricSource(window.getComputedStyle(editor)), editor.clientWidth),
     );
   }, []);
 
-  useEffect(() => {
+  // Метрики ставим на каждый кадр вёрстки: ширина поля меняется не только при
+  // повороте экрана, но и когда в главе появляется полоса прокрутки, — а от
+  // ширины зависит, где перенесётся строка и, значит, где встанет волна.
+  useLayoutEffect(() => {
+    const editor = textareaRef.current;
+    if (!editor) return;
+    setEditorMirrorWidth(editor.clientWidth);
+    applyMirrorMetrics();
+  });
+
+  useLayoutEffect(() => {
     const editor = textareaRef.current;
     if (!editor) return;
     const update = () => {
       setEditorMirrorWidth(editor.clientWidth);
       applyMirrorMetrics();
     };
-    update();
+    // Полоса прокрутки съедает ширину содержимого, не меняя габаритов поля:
+    // следим за прямоугольником содержимого, иначе ширина останется прежней.
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
-    observer?.observe(editor);
+    observer?.observe(editor, { box: "content-box" });
     window.addEventListener("resize", update);
     // Шрифт может подгрузиться после первого кадра: тогда строки лягут иначе.
     document.fonts?.ready.then(update).catch(() => undefined);
@@ -910,36 +926,36 @@ export default function App() {
       observer?.disconnect();
       window.removeEventListener("resize", update);
     };
-  }, [activeTab, activeChapter?.id, mirrorEnabled, applyMirrorMetrics]);
+  }, [activeTab, activeChapter?.id, marksEnabled, applyMirrorMetrics]);
 
-  useEffect(() => {
-    if (!mirrorEnabled) {
-      marksAlignedRef.current = true;
-      setMarksAligned(true);
-      return;
-    }
+  // Раскладка слоя обязана совпасть с полем. Разошлась — метки не гасим, а
+  // доводим метрики и перемеряем: вычитка, пропавшая без объяснения, выглядит
+  // как поломка, а метка под чужим словом лечится тем же перемером.
+  useLayoutEffect(() => {
+    if (!marksEnabled) return;
     const editor = textareaRef.current;
     const inner = proofreadMirrorRef.current?.firstElementChild as HTMLElement | null;
     if (!editor || !inner) return;
-    // Когда текст не влезает в поле, высоты содержимого сравнимы напрямую:
-    // разошлись — значит зеркало уложило строки иначе, чем поле.
-    const aligned =
-      editor.scrollHeight <= editor.clientHeight + 2
-        ? true
-        : Math.abs(inner.scrollHeight - editor.scrollHeight) <= 2;
-    marksAlignedRef.current = aligned;
-    setMarksAligned((current) => (current === aligned ? current : aligned));
+    if (editor.scrollHeight <= editor.clientHeight + 2) return;
+    if (Math.abs(inner.scrollHeight - editor.scrollHeight) <= 2) return;
+    let tries = 0;
+    let frame = window.requestAnimationFrame(function retry() {
+      applyMirrorMetrics();
+      tries += 1;
+      if (tries < 3 && Math.abs(inner.scrollHeight - editor.scrollHeight) > 2) {
+        frame = window.requestAnimationFrame(retry);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [
     activeChapter?.id,
     activeChapter?.content,
     proofreadSegments,
     markVisibility,
     editorMirrorWidth,
-    mirrorEnabled,
+    marksEnabled,
     applyMirrorMetrics,
   ]);
-
-  const showMarks = mirrorEnabled && marksAligned;
 
   const handleEditorScroll = useCallback((event: React.UIEvent<HTMLTextAreaElement>) => {
     const target = event.currentTarget;
@@ -963,7 +979,6 @@ export default function App() {
   const handleEditorMarkTap = useCallback(() => {
     const editor = textareaRef.current;
     if (!editor) return;
-    if (!marksAlignedRef.current) return;
     if (Date.now() - lastTypingAtRef.current < 800) return;
     const hit = findMarkAtOffset(
       editor.selectionStart ?? 0,
@@ -2530,22 +2545,25 @@ export default function App() {
                     onRunPlotCheck={plotCheck.run}
                     onStopPlotCheck={plotCheck.stop}
                   />
-                  {mirrorEnabled && !marksAligned && (
-                    <p className="mt-1 text-[11px] text-amber-400/90" id="proofread-marks-off">
-                      Волны в тексте выключены: разметка не совпала с полем ввода. Текст целиком на месте, причины меток тоже — скажите нам, и мы поправим раскладку.
-                    </p>
-                  )}
                 </div>
+              )}
+
+              {/* Волн может не быть — тогда причина написана прямо. Строку видно и
+                  в наборе на телефоне, где полоска вычитки уступает место тексту. */}
+              {marksNoticeText && (
+                <p id="proofread-marks-note" className="mb-2 shrink-0 text-[11px] text-amber-400/90">
+                  {marksNoticeText}
+                </p>
               )}
 
               {/* Distraction-Free Textarea Editor */}
               <div ref={editorContainerRef} className={`flex-1 bg-slate-900/30 border border-slate-800/60 rounded-xl overflow-hidden flex flex-col relative ${compactEditing ? "min-h-[38dvh] shrink-0" : ""}`}>
                 {/* Зеркальный слой: тот же текст прозрачными буквами, видны только волны.
                     Ввод по-прежнему принимает textarea, редактор не подменяем. */}
-                {mirrorEnabled && (
+                {marksEnabled && (
                   <div ref={proofreadMirrorRef} aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
                     <div className="whitespace-pre-wrap break-words px-4 sm:px-6 py-4 sm:py-6 text-[15px] sm:text-sm leading-7 sm:leading-relaxed font-sans text-transparent">
-                      {showMarks ? proofreadSegments.map((segment, index) =>
+                      {proofreadSegments.map((segment, index) =>
                         segment.kind === "plain" ? (
                           <React.Fragment key={`plain-${index}`}>{segment.text}</React.Fragment>
                         ) : (
@@ -2563,9 +2581,10 @@ export default function App() {
                             {segment.text}
                           </span>
                         ),
-                      ) : (
-                        activeChapter?.content || ""
                       )}
+                      {/* Поле отводит последнему переводу строки отдельную строку,
+                          слой без него — строки расходятся, и метки уезжают. */}
+                      {(activeChapter?.content || "").endsWith("\n") ? <br /> : null}
                     </div>
                   </div>
                 )}
@@ -2592,6 +2611,8 @@ export default function App() {
                   onKeyUp={handleTextSelection}
                   placeholder="Начните писать свой роман здесь... Вы также можете выделить нужный кусок и воспользоваться Редактором Стиля справа."
                   className="relative z-10 flex-1 w-full p-4 sm:p-6 text-[15px] sm:text-sm leading-7 sm:leading-relaxed bg-transparent text-slate-100 outline-none resize-none font-sans scrollbar-thin placeholder:text-slate-600"
+                  // Те же правила переноса, что и у слоя: иначе строки лягут по-разному.
+                  style={MIRROR_TEXT_INVARIANTS}
                   id="draft-editor-textarea"
                 />
 
