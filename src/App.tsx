@@ -58,6 +58,7 @@ import { normalizeSpellKey } from "./lib/spellRu";
 import { buildActiveMark, findMarkAtOffset, visibleMarkOrder, type ActiveMark } from "./lib/proofreadTap";
 import ChapterProofreadBar from "./components/ChapterProofreadBar";
 import ProofreadMarkCard from "./components/ProofreadMarkCard";
+import { caretAfterReplace, lineIndexOfOffset, scrollTopToReveal } from "./lib/editorView";
 import { DEFAULT_STORIES } from "./defaultData";
 import {
   LABYRINTH_STORY_ID,
@@ -838,6 +839,8 @@ export default function App() {
 
   const proofreadMirrorRef = useRef<HTMLDivElement>(null);
   const editorContainerRef = useRef<HTMLDivElement>(null);
+  /** Куда вернуть каретку и прокрутку после замены из карточки метки. */
+  const pendingEditorViewRef = useRef<{ chapterId: string; caret: number; scrollTop: number } | null>(null);
   const [editorMirrorWidth, setEditorMirrorWidth] = useState(0);
   const [markVisibility, setMarkVisibility] = useState<MarkKindVisibility>(DEFAULT_MARK_VISIBILITY);
   const [activeMark, setActiveMark] = useState<ActiveMark | null>(null);
@@ -966,11 +969,34 @@ export default function App() {
     applyMirrorMetrics,
   ]);
 
-  const handleEditorScroll = useCallback((event: React.UIEvent<HTMLTextAreaElement>) => {
-    const target = event.currentTarget;
+  /**
+   * Зеркало обязано стоять ровно под полем. Зовём и при прокрутке пальцем, и после
+   * программной прокрутки: иначе волны остаются там, где поле стояло раньше.
+   */
+  const syncMirrorToEditor = useCallback(() => {
+    const editor = textareaRef.current;
     const inner = proofreadMirrorRef.current?.firstElementChild as HTMLElement | null;
-    if (inner) inner.style.transform = `translate(${-target.scrollLeft}px, ${-target.scrollTop}px)`;
+    if (!editor || !inner) return;
+    inner.style.transform = `translate(${-editor.scrollLeft}px, ${-editor.scrollTop}px)`;
   }, []);
+
+  const handleEditorScroll = useCallback(() => {
+    syncMirrorToEditor();
+  }, [syncMirrorToEditor]);
+
+  // Значение поля переписал не автор, а замена из карточки метки: WebView от этого
+  // уводит каретку в конец текста и показывает последнюю строку главы вместо
+  // исправленного слова. Возвращаем каретку на правку, а прокрутку — на место автора.
+  useLayoutEffect(() => {
+    const pending = pendingEditorViewRef.current;
+    if (!pending) return;
+    pendingEditorViewRef.current = null;
+    const editor = textareaRef.current;
+    if (!editor || pending.chapterId !== activeChapter?.id) return;
+    editor.setSelectionRange(pending.caret, pending.caret);
+    editor.scrollTop = pending.scrollTop;
+    syncMirrorToEditor();
+  }, [activeChapter?.content, activeChapter?.id, syncMirrorToEditor]);
 
   // «select» прилетает и при наборе тоже: не путаем печать с нажатием по слову.
   const lastTypingAtRef = useRef(0);
@@ -1413,9 +1439,17 @@ export default function App() {
     if (!editor) return;
     editor.focus();
     editor.setSelectionRange(start, end);
-    const lineIndex = editor.value.slice(0, start).split("\n").length - 1;
-    editor.scrollTop = Math.max(0, lineIndex * 28 - editor.clientHeight / 2);
-  }, []);
+    // Высоту строки берём у самого поля: постоянные 28 px промахиваются на крупном
+    // шрифте и длинных главах, и найденное место уезжает за экран.
+    const lineHeight = Number.parseFloat(window.getComputedStyle(editor).lineHeight);
+    editor.scrollTop = scrollTopToReveal(
+      lineIndexOfOffset(editor.value, start),
+      lineHeight,
+      editor.clientHeight,
+      Math.max(0, editor.scrollHeight - editor.clientHeight),
+    );
+    syncMirrorToEditor();
+  }, [syncMirrorToEditor]);
 
   /** Замена одного места: только по кнопке автора, автоприменения нет. */
   const handleProofreadReplace = useCallback(
@@ -1424,6 +1458,11 @@ export default function App() {
       const content = activeChapter.content || "";
       if (start < 0 || end > content.length || end < start) return;
       const next = content.slice(0, start) + replacement + content.slice(end);
+      pendingEditorViewRef.current = {
+        chapterId: activeChapter.id,
+        caret: caretAfterReplace(start, replacement, next.length),
+        scrollTop: textareaRef.current?.scrollTop ?? 0,
+      };
       handleUpdateStoryChapters(
         activeStory.chapters.map((chapter) => (chapter.id === activeChapter.id ? { ...chapter, content: next } : chapter)),
       );

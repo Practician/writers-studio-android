@@ -1,4 +1,5 @@
 import { Type } from "@google/genai";
+import { humanProfileScore } from "./humanStyleEnhanced";
 import {
   reassembleText,
   rewriteSchema,
@@ -251,6 +252,13 @@ function applyProseFallback(candidates: Array<string | null>, raw: string): void
   }
 }
 
+/** Сколько фраз нужно, чтобы средняя длина и её разброс что-то значили: на одной-двух
+ *  фразах профиль — шум (как и burstiness ниже MIN_BURSTINESS_WORDS). */
+export const PROFILE_MIN_SENTENCES = 5;
+export function countSentencesForProfile(text: string): number {
+  return (text.match(/[.!?…]+(?=\s|$)/gu) ?? []).length;
+}
+
 /** Приёмка одного переписанного блока по локальному аудиту.
  *  Ярусы: (1) штампов строго меньше; (2) столько же, но ритм ближе к цели или заметно
  *  живее; (3) столько же, но score не вырос, блок реально переработан и не раздут.
@@ -264,6 +272,10 @@ export function isAcceptableRewrite(source: string, candidate: string, targetBur
   const beforeHits = detectAiTells(source).length;
   const afterHits = detectAiTells(candidate).length;
   if (afterHits > beforeHits) return false;
+  // Правка не должна сплющивать фразу: у размеченных HUMAN-сегментов фраза длиннее
+  // и разбросаннее, чем у AI, а каталог штампов этого не видит вообще.
+  if (countSentencesForProfile(source) >= PROFILE_MIN_SENTENCES
+    && humanProfileScore(candidate) < humanProfileScore(source)) return false;
   if (afterHits < beforeHits) return true;
   const beforeBurst = sentenceBurstiness(source);
   const afterBurst = sentenceBurstiness(candidate);
@@ -331,6 +343,15 @@ export const SIMILES_PER_400_WORDS = 2;
 export const MAX_SILENT_REACTIONS = 2;
 /** «Замер / застыл» — та же реакция на каждое событие (в живом прогоне 12 раз). */
 export const MAX_FREEZE_REACTIONS = 3;
+
+/** Квоты реакций (молчание, «замер/застыл», сравнения) — стилистический тик, а не
+ *  поломка сюжета. За такой брак плановый бит не выбрасываем: 27.09.2026 на уже
+ *  выбранном потолке молчаний пропали сцены 9 и 11 — глава осталась без двух
+ *  запланированных битов, вместо них пошли доборные сцены. Доборный бит идёт сверх
+ *  плана, его потеря главу не ломает — там брак по квоте по-прежнему выбрасывает сцену. */
+export function keepQuotaOnlyBeat(quotaIssues: number, isTopup: boolean): boolean {
+  return quotaIssues > 0 && !isTopup;
+}
 /** Сколько последних предложений предыдущей сцены уходит в промпт как шов. */
 export const SCENE_SEAM_SENTENCES = 3;
 
@@ -529,7 +550,7 @@ function enhancedPhaseMaxTokens(charLength: number): number {
   return Math.max(6_144, Math.min(16_000, Math.ceil(charLength / 2) + 1_024));
 }
 
-async function runEnhancedSepiaPipeline(
+export async function runEnhancedSepiaPipeline(
   text: string,
   generate: GenerateFn,
   options: {
@@ -602,11 +623,25 @@ async function runEnhancedSepiaPipeline(
       if (afterWords < shrinkFloor) continue;
       if (afterWords > Math.max(Math.ceil(beforeWords * growthCap), beforeWords + 120)) continue;
       const afterDiag = scoreCandidateWithEnhanced(candidate, aiTellScore(candidate), options.depth, options.genre);
-      const accept = afterDiag.rank <= beforeDiag.rank
+      // Профиль — статистика длины фраз: на одной-двух фразах она шум, поэтому
+      // спрашиваем её только там, где есть что измерять (глава, сцена, сегмент).
+      const profileMeasurable = countSentencesForProfile(current) >= PROFILE_MIN_SENTENCES;
+      const profileGain = profileMeasurable ? humanProfileScore(candidate) - humanProfileScore(current) : 0;
+      const accept = profileGain >= 0 && (
+        afterDiag.rank <= beforeDiag.rank
         || afterDiag.extendedAiTellScore < beforeDiag.extendedAiTellScore
         || (phase === "rhythm-breaker" && aiTellScore(candidate).burstiness > aiTellScore(current).burstiness + 0.05)
-        || (options.route === "humanize_draft" && beforeWords < 80 && candidate !== current);
-      if (!accept) continue;
+        || (options.route === "humanize_draft" && beforeWords < 80 && candidate !== current)
+      );
+      if (!accept) {
+        // Сплющенный вариант (короче средняя фраза, меньше разброс) отбрасываем,
+        // даже если локальный аудит им доволен: профиль фразы измерен на отчётах
+        // самого детектора, аудит с ними не совпадает.
+        if (profileGain < 0) {
+          note = `enhanced-фаза ${phase} отклонена: сплющивает фразу (профиль ${profileGain.toFixed(2)})`;
+        }
+        continue;
+      }
       const regressions = rewriteRegressionIssues(current, candidate, options.lockedNarrationPerson ?? "unknown");
       if (regressions.length) {
         note = `enhanced-фаза отклонена: ${regressions.join("; ")}`;
@@ -1579,7 +1614,7 @@ export async function runTouchupPipeline(
       }
     }
     indexes.forEach((blockIndex, position) => {
-      const best = pickBestVariant(blocks[blockIndex], variantLists[position]);
+      const best = pickBestVariant(blocks[blockIndex], variantLists[position], humanProfileScore);
       if (best !== blocks[blockIndex]) result.set(blockIndex, best);
     });
     return result;
@@ -1947,7 +1982,7 @@ async function planBeats(
   return padBeatsToMinimum(fallbackBeatsFromSynopsis(input), input);
 }
 
-async function generateScenesDraft(
+export async function generateScenesDraft(
   input: ChapterGenerateInput,
   generate: GenerateFn,
   beats: ChapterBeat[],
@@ -2016,6 +2051,7 @@ async function generateScenesDraft(
     let cleaned = "";
     let accepted = false;
     let softNotes: string[] = [];
+    let bestQuota: { text: string; notes: string[]; hits: number } | null = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       // Замечания предыдущей попытки уходят в промпт прямым указанием: «выбери 3–5
       // приёмов» модель пропускает, а названное нарушение правит.
@@ -2085,16 +2121,17 @@ async function generateScenesDraft(
         continue;
       }
       // Мягкие проверки. За них сцену не выбрасываем — глава оборвалась бы на полпути,
-      // но две первые попытки перезапрашиваем с названным нарушением. Повторы
-      // «не ответил/промолчал» и «замер/застыл» — жёсткий брак: иначе третья попытка
-      // всё равно принималась «с замечаниями», и модель продавливала тот же штамп в
-      // хвост главы (живой прогон 21.09.2026: сцены 10 и 11 добора).
-      const hard: string[] = [];
+      // но две первые попытки перезапрашиваем с названным нарушением.
+      // «hard» переименован в quota: всё, что сюда попадает, — это потолки реакций
+      // (сравнения, молчание, «замер»), а не поломка сюжета. Такой брак стоит замечания,
+      // но не стоит бита: 27.09.2026 на выбранном потолке молчаний так исчезли сцены
+      // 9 и 11, и глава осталась без двух запланированных битов.
+      const quota: string[] = [];
       const soft: string[] = [];
       const explanation = explanationTailIssue(cleaned);
       if (explanation) soft.push(explanation);
       const similes = simileIssue(cleaned);
-      if (similes) hard.push(similes);
+      if (similes) quota.push(similes);
       const seam = seamEchoIssue(scenes, cleaned);
       if (seam) soft.push(seam);
       const eventRepeat = eventEchoIssue(closedEvents, cleaned);
@@ -2102,16 +2139,21 @@ async function generateScenesDraft(
       const continuity = continuityIssue(continuityState, cleaned);
       if (continuity) soft.push(continuity);
       const silence = silenceIssue(cleaned, silentUsed);
-      if (silence) hard.push(silence);
+      if (silence) quota.push(silence);
       const froze = freezeIssue(cleaned, freezeUsed);
-      if (froze) hard.push(froze);
-      softNotes = [...hard, ...soft];
-      if ((hard.length || soft.length) && attempt < 2) {
-        emitChapterStep(`Сцена ${index + 1}${isTopup ? " (добор)" : ""}, попытка ${attempt + 1}: перезапрос — ${[...hard, ...soft].join("; ")}.`);
+      if (froze) quota.push(froze);
+      softNotes = [...quota, ...soft];
+      // Держим самую чистую из забракованных попыток: если это плановый бит и брак
+      // только по квотам, он уйдёт в главу с замечаниями, а не пропадёт.
+      if (keepQuotaOnlyBeat(quota.length, isTopup) && (!bestQuota || quota.length < bestQuota.hits)) {
+        bestQuota = { text: cleaned, notes: [...quota, ...soft], hits: quota.length };
+      }
+      if ((quota.length || soft.length) && attempt < 2) {
+        emitChapterStep(`Сцена ${index + 1}${isTopup ? " (добор)" : ""}, попытка ${attempt + 1}: перезапрос — ${[...quota, ...soft].join("; ")}.`);
         continue;
       }
-      if (hard.length) {
-        emitChapterStep(`Сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}: брак — ${hard.join("; ")}.`);
+      if (quota.length) {
+        emitChapterStep(`Сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}: брак — ${quota.join("; ")}.`);
         continue;
       }
       accepted = true;
@@ -2120,6 +2162,15 @@ async function generateScenesDraft(
     // Брак в главу не попадает. Раньше после трёх неудачных попыток фрагмент
     // приклеивался безусловно — в живом прогоне 20.09.2026 так стали сценами ответы
     // на 196 и 54 символа, а объём главы при этом считался взятым.
+    if (!accepted && bestQuota) {
+      cleaned = bestQuota.text;
+      softNotes = bestQuota.notes;
+      accepted = true;
+      emitChapterStep(
+        `Сцена ${index + 1}/${maxScenes}${isTopup ? " (добор)" : ""}: принята с замечаниями — ${bestQuota.notes.join("; ")}. Бит сохранён.`,
+        "warn",
+      );
+    }
     if (!accepted) {
       emitChapterStep(`Сцена ${index + 1}: все три попытки бракованные — бит пропущен, глава не испорчена.`, "warn");
       console.warn(`Scene ${index + 1}: все 3 попытки бракованные — бит пропущен, текст главы не испорчен.`);

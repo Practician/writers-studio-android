@@ -830,19 +830,34 @@ export function changedBlockShare(sourceBlocks: string[], revisedBlocks: string[
 }
 
 // Выбрать лучший из N вариантов абзаца по AI-tell (ниже = лучше).
-export function pickBestVariant(source: string, variants: string[]): string {
+export function pickBestVariant(
+  source: string,
+  variants: string[],
+  /** Оценка «человечности» варианта (например humanProfileScore из humanStyleEnhanced):
+   *  варианты, сплющивающие фразу относительно исходной, в выбор не попадают вовсе. */
+  preferHuman?: (text: string) => number,
+): string {
   const sourceScore = paragraphAiTellScore(source).score;
+  const sourceHuman = preferHuman ? preferHuman(source) : Number.NEGATIVE_INFINITY;
   const candidates = variants
     .filter((variant) => typeof variant === "string" && variant.trim())
-    .filter((variant) => !blockQualityIssues(source, variant).length);
+    .filter((variant) => !blockQualityIssues(source, variant).length)
+    .filter((variant) => !preferHuman || preferHuman(variant) >= sourceHuman);
   if (!candidates.length) return source;
   let best = source;
   let bestScore = sourceScore;
+  let bestHuman = sourceHuman;
   for (const candidate of candidates) {
     const score = paragraphAiTellScore(candidate).score;
-    if (score < bestScore) {
+    const human = preferHuman ? preferHuman(candidate) : Number.NEGATIVE_INFINITY;
+    // Раньше побеждал просто меньший paragraphAiTellScore — то есть самый ровный
+    // вариант: каталог штампов на размеченных сегментах главы 4 даёт AUC 0.445,
+    // HUMAN-сегменты собирают штампов больше, чем AI. При равном счёте теперь
+    // берём тот, что ближе к человеческому профилю фразы.
+    if (score < bestScore || (preferHuman && score <= bestScore && human > bestHuman)) {
       best = candidate;
       bestScore = score;
+      bestHuman = human;
     }
   }
   return best;
