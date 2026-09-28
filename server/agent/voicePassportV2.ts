@@ -1,3 +1,5 @@
+import { computeStyleStats } from "../../src/lib/authorAudit";
+
 /**
  * voicePassportV2.ts
  *
@@ -85,6 +87,8 @@ export interface VoicePassportV2 {
   dialogueProfile:      DialogueProfile;
   paragraphRhythm:      ParagraphRhythm;
   syntaxPrefs:          SyntaxPreferences;
+  /** Ритм фраз и живые примеры: планка, по которой принимается черновик. */
+  sentenceRhythm:       SentenceRhythm;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -335,6 +339,116 @@ export function analyzeSyntaxPreferences(text: string): SyntaxPreferences {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// КОРИДОР ПАСПОРТА: ИЗМЕРИМЫЕ ГРАНИЦЫ И ПРИЁМКА ЧЕРНОВИКА
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Ритм фраз автора в измеримом виде + два живых примера «как это звучит».
+ *  Числа образца нужны не для справки: по этому коридору принимается черновик. */
+export interface SentenceRhythm {
+  meanWords: number;
+  spreadWords: number;
+  shortShare: number;
+  particlesPer1k: number;
+  exclamationsPer1k: number;
+  ellipsesPer1k: number;
+  /** Самая короткая и самая длинная фразы образца — амплитуда, которую надо держать. */
+  shortExample: string;
+  longExample: string;
+}
+
+/** Допуск вокруг нормы автора. Узкий там, где статистика образца устойчива (длина
+ *  фразы), широкий там, где она шумная (пунктуация на 1000 слов). */
+export interface VoicePassportCorridor {
+  meanLo: number; meanHi: number;
+  spreadLo: number; spreadHi: number;
+  shortLo: number; shortHi: number;
+  particlesLo: number; particlesHi: number;
+  exclamationsLo: number; exclamationsHi: number;
+  ellipsesLo: number; ellipsesHi: number;
+}
+
+const MAX_EXAMPLE_CHARS = 140;
+const fmt1 = (value: number): string => (Math.round(value * 10) / 10).toFixed(1);
+
+/** Метрики, которые в готовом тексте видны и, в отличие от каталога штампов,
+ *  совпадают с разметкой детектора: длина фразы и её разброс. */
+export function analyzeSentenceRhythm(text: string): SentenceRhythm {
+  const stats = computeStyleStats(text);
+  const sentences = (text.match(/[^.!?…]+[.!?…]+/gu) ?? [])
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => extractWords(sentence).length > 0);
+  const counted = sentences.map((sentence) => ({ sentence, words: extractWords(sentence).length }));
+  const shortest = counted.length ? counted.reduce((a, b) => (b.words < a.words ? b : a)) : null;
+  const longest = counted.length ? counted.reduce((a, b) => (b.words > a.words ? b : a)) : null;
+  const cut = (value: string): string =>
+    value.length > MAX_EXAMPLE_CHARS ? `${value.slice(0, MAX_EXAMPLE_CHARS - 1).trimEnd()}…` : value;
+  return {
+    meanWords: Math.round(stats.averageSentenceWords * 10) / 10,
+    spreadWords: Math.round(stats.sentenceLengthDeviation * 10) / 10,
+    shortShare: Math.round(stats.shortSentenceShare * 1000) / 1000,
+    particlesPer1k: Math.round(stats.particlesPerThousandWords * 10) / 10,
+    exclamationsPer1k: Math.round(stats.exclamationsPerThousandWords * 10) / 10,
+    ellipsesPer1k: Math.round(stats.ellipsesPerThousandWords * 10) / 10,
+    shortExample: shortest ? cut(shortest.sentence) : "",
+    longExample: longest ? cut(longest.sentence) : "",
+  };
+}
+
+export function voicePassportCorridor(passport: VoicePassportV2): VoicePassportCorridor {
+  const rhythm = passport.sentenceRhythm;
+  const meanSlack = Math.max(1.5, rhythm.meanWords * 0.25);
+  const spreadSlack = Math.max(1.0, rhythm.spreadWords * 0.3);
+  // Пунктуация на 1000 слов шумит сильнее длины фраз, поэтому границы множителем,
+  // а не «плюс-минус»: вымывание частиц и восклицаний — главный дефект черновика
+  // (живой замер 27.09.2026: частиц 4.7 при авторских 11.4, восклицаний 3.8 при 8.3).
+  const band = (target: number, loFactor: number, hiFactor: number) => ({
+    lo: Math.round(target * loFactor * 10) / 10,
+    hi: Math.round(target * hiFactor * 10) / 10,
+  });
+  const particles = band(rhythm.particlesPer1k, 0.5, 2);
+  const exclamations = band(rhythm.exclamationsPer1k, 0.4, 2.5);
+  const ellipses = band(rhythm.ellipsesPer1k, 0.5, 2.2);
+  return {
+    meanLo: Math.round((rhythm.meanWords - meanSlack) * 10) / 10,
+    meanHi: Math.round((rhythm.meanWords + meanSlack) * 10) / 10,
+    spreadLo: Math.round(Math.max(0, rhythm.spreadWords - spreadSlack) * 10) / 10,
+    spreadHi: Math.round((rhythm.spreadWords + spreadSlack) * 10) / 10,
+    shortLo: Math.max(0, Math.round((rhythm.shortShare - 0.10) * 1000) / 1000),
+    shortHi: Math.min(1, Math.round((rhythm.shortShare + 0.10) * 1000) / 1000),
+    particlesLo: particles.lo, particlesHi: particles.hi,
+    exclamationsLo: exclamations.lo, exclamationsHi: exclamations.hi,
+    ellipsesLo: ellipses.lo, ellipsesHi: ellipses.hi,
+  };
+}
+
+/** Нарушения коридора паспорта в готовом тексте. Пустой массив = черновик в норме автора.
+ *  Проверка идёт по тем же числам, что печатает voicePassportV2Block, поэтому автор
+ *  видит причину («фраза 12.0 слов при коридоре 6.5–10.8»), а не абстрактную оценку.
+ *  Метрики, которых в образце почти нет, не проверяются: иначе «ноль восклицаний
+ *  у автора» превращался бы в требование ноль восклицаний в тексте. */
+export function voiceFitIssues(text: string, passport: VoicePassportV2, minimumSentences = 5): string[] {
+  const stats = computeStyleStats(text);
+  if (stats.sentences < minimumSentences) return [];
+  const rhythm = analyzeSentenceRhythm(text);
+  const corridor = voicePassportCorridor(passport);
+  const author = passport.sentenceRhythm;
+  const issues: string[] = [];
+  const check = (label: string, value: number, lo: number, hi: number, unit: string, target: number, floor: number) => {
+    if (target < floor) return;
+    if (value < lo || value > hi) {
+      issues.push(`${label} ${fmt1(value)}${unit} при коридоре ${fmt1(lo)}–${fmt1(hi)}${unit}`);
+    }
+  };
+  check("средняя фраза", rhythm.meanWords, corridor.meanLo, corridor.meanHi, " слов", author.meanWords, 0);
+  check("разброс фраз", rhythm.spreadWords, corridor.spreadLo, corridor.spreadHi, "", author.spreadWords, 0);
+  check("короткие фразы", rhythm.shortShare * 100, corridor.shortLo * 100, corridor.shortHi * 100, "%", author.shortShare * 100, 0);
+  check("разговорные частицы", rhythm.particlesPer1k, corridor.particlesLo, corridor.particlesHi, " на 1000 слов", author.particlesPer1k, 1);
+  check("восклицания", rhythm.exclamationsPer1k, corridor.exclamationsLo, corridor.exclamationsHi, " на 1000 слов", author.exclamationsPer1k, 0.5);
+  check("многоточия", rhythm.ellipsesPer1k, corridor.ellipsesLo, corridor.ellipsesHi, " на 1000 слов", author.ellipsesPer1k, 0.5);
+  return issues;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ГЛАВНАЯ ФУНКЦИЯ: ПОЛНЫЙ АНАЛИЗ
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -353,6 +467,7 @@ export function buildVoicePassportV2(storyId: string, sampleText: string): Voice
     dialogueProfile:    analyzeDialogueProfile(sampleText),
     paragraphRhythm:    analyzeParagraphRhythm(sampleText),
     syntaxPrefs:        analyzeSyntaxPreferences(sampleText),
+    sentenceRhythm:     analyzeSentenceRhythm(sampleText),
   };
 }
 
@@ -371,6 +486,20 @@ export function voicePassportV2Block(passport: VoicePassportV2): string {
     "═══ ПАСПОРТ ГОЛОСА АВТОРА v2 (ДЕТЕРМИНИРОВАННЫЙ АНАЛИЗ) ═══",
     "",
   ];
+  const corridor = voicePassportCorridor(passport);
+  lines.push(`● КОРИДОР ЧЕРНОВИКА (по нему черновик принимается, а не «звучит хорошо»):
+  - средняя фраза: ${fmt1(corridor.meanLo)}–${fmt1(corridor.meanHi)} слов
+  - разброс длины фраз: ${fmt1(corridor.spreadLo)}–${fmt1(corridor.spreadHi)}
+  - короткие фразы (до 4 слов): ${Math.round(corridor.shortLo * 100)}–${Math.round(corridor.shortHi * 100)}%
+  - разговорные частицы: ${fmt1(corridor.particlesLo)}–${fmt1(corridor.particlesHi)} на 1000 слов
+  - восклицания: ${fmt1(corridor.exclamationsLo)}–${fmt1(corridor.exclamationsHi)} на 1000 слов
+  - многоточия: ${fmt1(corridor.ellipsesLo)}–${fmt1(corridor.ellipsesHi)} на 1000 слов`);
+  if (passport.sentenceRhythm.shortExample || passport.sentenceRhythm.longExample) {
+    lines.push(`● КАК ЭТО ЗВУЧИТ У АВТОРА (держи эту амплитуду, а не ровный темп):
+  - самая короткая фраза образца: «${passport.sentenceRhythm.shortExample}»
+  - самая длинная: «${passport.sentenceRhythm.longExample}»`);
+  }
+  lines.push("");
 
   // Характерные слова
   if (wf.characteristicWords.length > 0) {
@@ -416,6 +545,9 @@ export function voicePassportV2Block(passport: VoicePassportV2): string {
   }
 
   lines.push("");
+  lines.push("Коридор — приёмка черновика, а не украшение: текст вне коридора уходит на переписывание.");
+  lines.push("Частицы, восклицания и многоточия не вставляй механически — они должны стоять там, где их поставил бы автор.");
+  lines.push("");
   lines.push("═══════════════════════════════════════════════════════════");
 
   return lines.join("\n");
@@ -429,4 +561,7 @@ export const VOICE_PASSPORT_V2 = {
   dialogue:       analyzeDialogueProfile,
   rhythm:         analyzeParagraphRhythm,
   syntax:         analyzeSyntaxPreferences,
+  sentenceRhythm: analyzeSentenceRhythm,
+  corridor:       voicePassportCorridor,
+  fitIssues:      voiceFitIssues,
 };

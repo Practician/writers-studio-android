@@ -40,8 +40,10 @@ import {
   generateHumanizedChapter,
   humanizeProseDraft,
   rewriteDetectorAiSegments,
+  PASSPORT_MIN_CHARS,
   type GenerateFn,
 } from "./server/chapterGenerate";
+import { buildVoicePassportV2, voicePassportV2Block } from "./server/agent/voicePassportV2";
 import microEditRouter from "./server/api/microEdit";
 import { sanitizeGeneratedText } from "./server/textHygiene";
 import {
@@ -819,6 +821,12 @@ ${text || ""}
         prompt += `\n\nОБРАЗЕЦ АВТОРСКОЙ МАНЕРЫ (только ритм, лексика и интонация; события и персонажей из образца не переносить):\n"""\n${excerpts}\n"""`;
         const statsBlock = quantitativeVoiceBlock(authorSample);
         if (statsBlock) systemInstruction += `\n\n${statsBlock}`;
+        // Детерминированный паспорт v2 (ритм фраз, пунктуация, диалоги, абзацы):
+        // тот же блок, что в generateHumanizedChapter, — обе руки пишут по одной норме.
+        if (authorSample.trim().length >= PASSPORT_MIN_CHARS) {
+          const passportBlock = voicePassportV2Block(buildVoicePassportV2("live", authorSample.trim()));
+          if (passportBlock) systemInstruction += `\n\n${passportBlock}`;
+        }
       }
     }
 

@@ -1,5 +1,6 @@
 import { Type } from "@google/genai";
 import { humanProfileScore } from "./humanStyleEnhanced";
+import { buildVoicePassportV2, voiceFitIssues, voicePassportV2Block, type VoicePassportV2 } from "./agent/voicePassportV2";
 import {
   reassembleText,
   rewriteSchema,
@@ -255,6 +256,8 @@ function applyProseFallback(candidates: Array<string | null>, raw: string): void
 /** Сколько фраз нужно, чтобы средняя длина и её разброс что-то значили: на одной-двух
  *  фразах профиль — шум (как и burstiness ниже MIN_BURSTINESS_WORDS). */
 export const PROFILE_MIN_SENTENCES = 5;
+/** Ниже этого образца детерминированный паспорт голоса не строим: ритм — шум. */
+export const PASSPORT_MIN_CHARS = 300;
 export function countSentencesForProfile(text: string): number {
   return (text.match(/[.!?…]+(?=\s|$)/gu) ?? []).length;
 }
@@ -561,6 +564,8 @@ export async function runEnhancedSepiaPipeline(
     depth: HumanizeDepthConfig;
     authorSample?: string;
     lockedNarrationPerson?: NarrationPerson;
+    /** Коридор паспорта голоса: фаза не должна уводить текст дальше от нормы автора. */
+    passport?: VoicePassportV2;
   },
 ): Promise<EnhancedPipelineResult> {
   let current = text.trim();
@@ -627,7 +632,11 @@ export async function runEnhancedSepiaPipeline(
       // спрашиваем её только там, где есть что измерять (глава, сцена, сегмент).
       const profileMeasurable = countSentencesForProfile(current) >= PROFILE_MIN_SENTENCES;
       const profileGain = profileMeasurable ? humanProfileScore(candidate) - humanProfileScore(current) : 0;
-      const accept = profileGain >= 0 && (
+      // Паспорт — планка, а не украшение промпта: фаза не имеет права уводить текст
+      // дальше от нормы автора (вымыть частицы и восклицания, выровнять фразу).
+      const fitBefore = options.passport ? voiceFitIssues(current, options.passport, PROFILE_MIN_SENTENCES).length : 0;
+      const fitAfter = options.passport ? voiceFitIssues(candidate, options.passport, PROFILE_MIN_SENTENCES).length : 0;
+      const accept = fitAfter <= fitBefore && profileGain >= 0 && (
         afterDiag.rank <= beforeDiag.rank
         || afterDiag.extendedAiTellScore < beforeDiag.extendedAiTellScore
         || (phase === "rhythm-breaker" && aiTellScore(candidate).burstiness > aiTellScore(current).burstiness + 0.05)
@@ -637,6 +646,9 @@ export async function runEnhancedSepiaPipeline(
         // Сплющенный вариант (короче средняя фраза, меньше разброс) отбрасываем,
         // даже если локальный аудит им доволен: профиль фразы измерен на отчётах
         // самого детектора, аудит с ними не совпадает.
+        if (fitAfter > fitBefore) {
+          note = `enhanced-фаза ${phase} отклонена: уводит от паспорта голоса (${fitAfter} нарушений коридора против ${fitBefore})`;
+        }
         if (profileGain < 0) {
           note = `enhanced-фаза ${phase} отклонена: сплющивает фразу (профиль ${profileGain.toFixed(2)})`;
         }
@@ -723,7 +735,13 @@ export function buildPersonaAndStyle(
   const learnedBlock = typeof input.adaptiveStyleGuidance === "string"
     ? input.adaptiveStyleGuidance.slice(0, 4_000).trim()
     : "";
-  const statsBlock = [sample.length >= 300 ? quantitativeVoiceBlock(sample) : "", learnedBlock]
+  // Детерминированный паспорт v2 рядом с описательным: числа образца (ритм фраз,
+  // пунктуация, диалоги, абзацы) модель держит лучше прилагательных, а коридор из
+  // тех же чисел служит приёмкой черновика в generateHumanizedChapter.
+  const passportV2Block = sample.length >= PASSPORT_MIN_CHARS
+    ? voicePassportV2Block(buildVoicePassportV2(input.title || "local", sample))
+    : "";
+  const statsBlock = [sample.length >= 300 ? quantitativeVoiceBlock(sample) : "", passportV2Block, learnedBlock]
     .filter(Boolean)
     .join("\n\n");
   return { personaBlock, styleBlock, fewShots, statsBlock };
@@ -2323,6 +2341,17 @@ export async function generateHumanizedChapter(
   const chosenMeta = candidateMeta[chosen.index]
     || { scenesGenerated, topupScenes: 0, rejectedScenes: 0, narrationPerson: "unknown" as NarrationPerson };
 
+  // Планка для черновика: паспорт голоса меряем до всякой редактуры, чтобы автор
+  // видел, что именно не удержала модель (в живом замере 27.09.2026 — фраза 12.0
+  // слов при авторских 8.6 и частицы 4.7 против 11.4).
+  const chapterPassport = sample.length >= PASSPORT_MIN_CHARS
+    ? buildVoicePassportV2(input.title || "local", sample)
+    : null;
+  const draftFitIssues = chapterPassport ? voiceFitIssues(chosen.text, chapterPassport) : [];
+  if (draftFitIssues.length) {
+    emitChapterStep(`Черновик вне коридора паспорта голоса: ${draftFitIssues.join("; ")}`, "warn");
+  }
+
   const before = chosen.score;
   const replanTriggered = chosenMeta.topupScenes > 1;
   if (replanTriggered) {
@@ -2336,6 +2365,7 @@ export async function generateHumanizedChapter(
     personaBlock,
     depth,
     authorSample: sample,
+    passport: chapterPassport ?? undefined,
     lockedNarrationPerson: chosenMeta.narrationPerson,
   });
   noteStep("литературный проход (доводка аудита)");
