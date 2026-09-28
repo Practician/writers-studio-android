@@ -48,6 +48,7 @@ import {
   modelFingerprintGuidance,
 } from "./humanStyle";
 import { sanitizeGeneratedText, type TextHygieneReport } from "./textHygiene";
+import { filterByPairJudge, stripEditorNoise, type PairJudgeConfig, type PairJudgeStats } from "./pairJudge";
 import { computeStyleStats } from "../src/lib/authorAudit";
 
 // Сценовая генерация главы + многопроходная доводка.
@@ -130,6 +131,8 @@ export interface HumanizePipelineReport {
   candidateRanks?: number[];
   chosenCandidate?: number;
   detectorSegmentsRewritten?: number;
+  /** Итоги слепого парного судьи (см. server/pairJudge.ts), если он был подключён. */
+  pairJudge?: PairJudgeStats;
   textHygiene: TextHygieneReport;
 }
 
@@ -191,7 +194,7 @@ export function extractRewrittenBlocks(raw: string, expected: number): Array<str
       })();
   const positional: string[] = [];
   for (const entry of list) {
-    const text = (() => {
+    const text_ = (() => {
       if (typeof entry === "string") return entry;
       if (entry && typeof entry === "object") {
         const record = entry as Record<string, unknown>;
@@ -200,7 +203,8 @@ export function extractRewrittenBlocks(raw: string, expected: number): Array<str
         }
       }
       return "";
-    })().trim();
+    })();
+    const text = stripEditorNoise(text_);
     if (!text) continue;
     const index = (() => {
       if (!entry || typeof entry !== "object") return null;
@@ -1516,6 +1520,8 @@ export async function runTouchupPipeline(
     depth: HumanizeDepthConfig;
     targetBurstiness?: number;
     lockedNarrationPerson?: NarrationPerson;
+    /** Слепой судья «какой из двух написал человек»: без него приёмка только по локальному аудиту. */
+    pairJudge?: PairJudgeConfig;
   },
 ): Promise<{ text: string; refinedBlocks: number; passesRun: number; unresolvedLabels: string[]; cleanNote?: string }> {
   let current = text;
@@ -1572,12 +1578,17 @@ export async function runTouchupPipeline(
       const candidates = extractRewrittenBlocks(raw, indexes.length);
       applyProseFallback(candidates, raw);
       if (candidates.some((value) => value != null)) {
+        const passed: Array<{ key: number; original: string; candidate: string }> = [];
         indexes.forEach((blockIndex, position) => {
           const candidate = candidates[position];
           if (!candidate) return;
           if (isAcceptableRewrite(blocks[blockIndex], candidate, options.targetBurstiness)) {
-            result.set(blockIndex, candidate);
+            passed.push({ key: blockIndex, original: blocks[blockIndex], candidate });
           }
+        });
+        const accepted = await filterByPairJudge(passed, options.pairJudge);
+        passed.forEach((item) => {
+          if (accepted.has(item.key)) result.set(item.key, item.candidate);
         });
       } else {
         console.warn("Авто-доводка: ответ модели не содержит блоков", raw.slice(0, 200));
@@ -2419,6 +2430,15 @@ export async function generateHumanizedChapter(
   };
 }
 
+/** Правка сегмента должна нести те же краевые пробелы и переводы строк, что и оригинал:
+ *  сегменты склеиваются без разделителя, а разбор ответа модели обрезает пробелы —
+ *  без этого абзацы слипались бы. */
+export function keepEdgeWhitespace(original: string, candidate: string): string {
+  const lead = original.match(/^\s*/u)?.[0] ?? "";
+  const trail = original.match(/\s*$/u)?.[0] ?? "";
+  return `${lead}${candidate.trim()}${trail}`;
+}
+
 export interface DetectorSegmentInput {
   text: string;
   label: string;
@@ -2432,6 +2452,8 @@ export async function rewriteDetectorAiSegments(
     model: string;
     personaBlock?: string;
     humanizeDepth?: HumanizeDepth | string;
+    /** Слепой парный судья: правка сегмента принимается, только если она «человечнее» оригинала в обоих порядках. */
+    pairJudge?: PairJudgeConfig;
   },
 ): Promise<{ text: string; blocks: string[]; humanizeReport: HumanizePipelineReport; rewrittenCount: number }> {
   if (!Array.isArray(segments) || !segments.length) {
@@ -2484,6 +2506,9 @@ export async function rewriteDetectorAiSegments(
     };
   }
 
+  // Лицо повествования берём по всему исходному тексту: на одном сегменте оно не измеряется.
+  const lockedNarrationPerson = detectNarrationPerson(originalJoined);
+
   // Батчами по 4 сегмента — меньше риск обрезания JSON
   const revised = segments.map((segment) => segment.text);
   let rewrittenCount = 0;
@@ -2520,80 +2545,88 @@ export async function rewriteDetectorAiSegments(
       // разбираем толерантно и принимаем по тем же правилам, что и авто-доводка.
       const candidates = extractRewrittenBlocks(raw, batch.length);
       applyProseFallback(candidates, raw);
+      const passed: Array<{ key: number; original: string; candidate: string }> = [];
       batch.forEach((segmentIndex, position) => {
-        const candidate = candidates[position];
-        if (!candidate) return;
+        const raw = candidates[position];
+        if (!raw) return;
+        const candidate = keepEdgeWhitespace(segments[segmentIndex].text, raw);
+        if (narrationPersonMismatch(candidate, lockedNarrationPerson)) return;
         if (isAcceptableRewrite(segments[segmentIndex].text, candidate)) {
-          revised[segmentIndex] = candidate;
-          rewrittenCount += 1;
+          passed.push({ key: segmentIndex, original: segments[segmentIndex].text, candidate });
         }
+      });
+      const accepted = await filterByPairJudge(passed, options.pairJudge);
+      passed.forEach((item) => {
+        if (!accepted.has(item.key)) return;
+        revised[item.key] = item.candidate;
+        rewrittenCount += 1;
       });
     } catch (error) {
       console.warn("Detector segment batch failed:", error);
     }
   }
 
-  const text = revised.join("");
-  const lockedNarrationPerson = detectNarrationPerson(text);
-  const enhanced = await runEnhancedSepiaPipeline(text, generate, {
-    model: options.model,
-    route: "rewrite_detector_segments",
-    personaBlock: options.personaBlock || "",
-    depth,
-    lockedNarrationPerson,
-  });
-  // Лёгкий touchup только на склеенном результате — но без раздувания: один round, мало блоков
-  const touchup = await runTouchupPipeline(enhanced.text, generate, {
-    model: options.model,
-    personaBlock: options.personaBlock || "",
-    depth: {
-      ...depth,
-      maxTouchupBlocks: Math.min(8, depth.maxTouchupBlocks),
-      touchupRounds: 1,
-      bestOfN: 1,
-    },
-    lockedNarrationPerson,
-  });
-  const hygiene = sanitizeGeneratedText(touchup.text);
-  const foreign = await repairForeignWords(hygiene.text, generate, { model: options.model });
-  const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
-  const after = aiTellScore(finalHygiene.text);
-  const finalDiagnostics = scoreCandidateWithEnhanced(finalHygiene.text, after, depth);
+  // Строгий режим кнопки «переписать только AI-сегменты»: HUMAN и не принятые AI-сегменты
+  // остаются в тексте дословно. Раньше склейка целиком шла через глобальные фазы sepia и
+  // доводку — это вызовы модели на полном тексте, они вправе переписать любой абзац,
+  // включая размеченные детектором как человеческие. Гигиена и замена латиницы
+  // применяются только к тем сегментам, которые действительно были переписаны.
+  const hygiene = { removedHiddenCharacters: 0, normalizedSpaces: 0, normalizedLineEndings: false, changed: false };
+  const foreignReplaced: Record<string, string> = {};
+  for (let index = 0; index < revised.length; index += 1) {
+    if (revised[index] === segments[index].text) continue;
+    const clean = sanitizeGeneratedText(revised[index]);
+    hygiene.removedHiddenCharacters += clean.report.removedHiddenCharacters;
+    hygiene.normalizedSpaces += clean.report.normalizedSpaces;
+    hygiene.normalizedLineEndings = hygiene.normalizedLineEndings || clean.report.normalizedLineEndings;
+    hygiene.changed = hygiene.changed || clean.report.changed;
+    let value = clean.text;
+    const foreign = await repairForeignWords(value, generate, { model: options.model });
+    if (Object.keys(foreign.replaced).length) {
+      Object.assign(foreignReplaced, foreign.replaced);
+      value = sanitizeGeneratedText(foreign.text).text;
+    }
+    revised[index] = value;
+  }
+  const finalText = revised.join("");
+  const after = aiTellScore(finalText);
+  const finalDiagnostics = scoreCandidateWithEnhanced(finalText, after, depth);
+  const batchesRun = Math.ceil(aiIndexes.length / batchSize);
 
   return {
-    text: finalHygiene.text,
+    text: finalText,
     blocks: revised,
     rewrittenCount,
     humanizeReport: {
       scoreBefore: before.score,
       scoreAfter: after.score,
-      refinedBlocks: touchup.refinedBlocks,
+      refinedBlocks: 0,
       flaggedLabels: [...new Set(after.hits.map((hit) => hit.label))].slice(0, 10),
-      unresolvedLabels: touchup.unresolvedLabels,
-
+      unresolvedLabels: [],
       burstiness: after.burstiness,
       openerRepetition: after.openerRepetition,
       patternDensity: after.patternDensity,
       gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
-      passesRun: enhanced.reviewPasses + touchup.passesRun + 1,
+      passesRun: batchesRun,
       sepiaRoute: "rewrite_detector_segments",
-      reviewPasses: enhanced.reviewPasses + touchup.passesRun + 1,
-      recreatePasses: touchup.refinedBlocks + rewrittenCount + enhanced.phasesExecuted.length,
+      reviewPasses: batchesRun,
+      recreatePasses: rewrittenCount,
       enhancedScoreUsed: true,
-      phasesExecuted: enhanced.phasesExecuted,
-      negativeProfileUsed: enhanced.negativeProfileUsed,
+      phasesExecuted: [],
+      negativeProfileUsed: false,
       architectureChecksApplied: finalDiagnostics.architectureChecksApplied,
       replanTriggered: false,
       extendedAiTellScore: finalDiagnostics.extendedAiTellScore,
       extendedGateVerdict: finalDiagnostics.extendedGateVerdict,
       extendedMetrics: finalDiagnostics.extendedMetrics,
-      note: [enhanced.note, touchup.cleanNote].filter(Boolean).join("; ") || undefined,
+      note: "HUMAN-сегменты и непринятые правки сохранены дословно; глобальные фазы по всему тексту не запускались",
       scenesGenerated: 0,
       depth: depth.id,
       mode: "single",
       detectorSegmentsRewritten: rewrittenCount,
-      foreignWordsReplaced: foreign.replaced,
-      textHygiene: finalHygiene.report,
+      ...(options.pairJudge ? { pairJudge: { ...options.pairJudge.stats } } : {}),
+      foreignWordsReplaced: foreignReplaced,
+      textHygiene: hygiene,
     },
   };
 }
@@ -2606,6 +2639,7 @@ export async function humanizeProseDraft(
     model: string;
     personaBlock: string;
     humanizeDepth?: HumanizeDepth | string;
+    pairJudge?: PairJudgeConfig;
   },
 ): Promise<{ text: string; humanizeReport: HumanizePipelineReport }> {
   const depth = resolveHumanizeDepth(options.humanizeDepth ?? "fast");
@@ -2628,6 +2662,7 @@ export async function humanizeProseDraft(
       bestOfN: depth.id === "maximum" ? 2 : 1,
     },
     lockedNarrationPerson,
+    pairJudge: options.pairJudge,
   });
   const hygiene = sanitizeGeneratedText(touchup.text);
   const foreign = await repairForeignWords(hygiene.text, generate, { model: options.model });
@@ -2662,6 +2697,7 @@ export async function humanizeProseDraft(
       scenesGenerated: 0,
       depth: depth.id,
       mode: "single",
+      ...(options.pairJudge ? { pairJudge: { ...options.pairJudge.stats } } : {}),
       foreignWordsReplaced: foreign.replaced,
       textHygiene: finalHygiene.report,
     },

@@ -17,6 +17,7 @@ import {
 } from "../../server/humanStyle";
 import type { GenreContext } from "../../server/humanStyleEnhanced";
 import { sanitizeGeneratedText } from "../../server/textHygiene";
+import { createPairJudgeStats, type PairJudgeConfig } from "../../server/pairJudge";
 import {
   countWordsRu,
   generateHumanizedChapter,
@@ -1567,6 +1568,39 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
     return [persona, adaptive].filter(Boolean).join("\n\n");
   })();
 
+  // Слепой парный судья «какой из двух написал человек» (server/pairJudge.ts).
+  // Судить лучше моделью другого провайдера, чем та, что писала правку: собственный
+  // токен-профиль автору не виден. Если ключ один — судит тот же провайдер.
+  // Отключается полем pairJudge: false в теле запроса.
+  const buildPairJudge = (): PairJudgeConfig | undefined => {
+    if (body?.pairJudge === false) return undefined;
+    let writer: Exclude<DirectProvider, "auto">;
+    try {
+      writer = selectProvider(credentials.provider, credentials.keys, credentials.model);
+    } catch {
+      return undefined;
+    }
+    const judgeProvider = pickRewriteProvider(writer, credentials.keys);
+    const sameProvider = judgeProvider === writer;
+    return {
+      model: sameProvider ? (credentials.model || "") : "",
+      stats: createPairJudgeStats(),
+      generate: (params) => directGenerate({
+        provider: judgeProvider,
+        // Модель писателя принадлежит его провайдеру; у другого берём его модель по умолчанию.
+        model: sameProvider ? params.model : undefined,
+        apiKeys: credentials.keys,
+        signal: init?.signal,
+        system: params.systemInstruction,
+        prompt: params.contents,
+        temperature: params.temperature,
+        maxTokens: params.maxOutputTokens ?? 1_024,
+        json: params.responseMimeType === "application/json",
+        timeoutMs: params.timeoutMs,
+      }),
+    };
+  };
+
   try {
     if (path === "/api/llm/status") {
       return json({ geminiKeys: credentials.keys.gemini ? 1 : 0, groqConfigured: Boolean(credentials.keys.groq), nvidiaConfigured: Boolean(credentials.keys.nvidia), openrouterConfigured: Boolean(credentials.keys.openrouter) });
@@ -1620,6 +1654,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             model: credentials.model || "",
             personaBlock: pipelinePersonaBlock,
             humanizeDepth: normalizeHumanizeDepth(body?.humanizeDepth, "maximum"),
+            pairJudge: buildPairJudge(),
           },
         );
         return json({
@@ -1779,6 +1814,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             model: credentials.model || "",
             personaBlock: pipelinePersonaBlock,
             humanizeDepth: depth,
+            pairJudge: buildPairJudge(),
           });
           const polishedWords = countGeneratedWords(polished.text);
           // Постпроход иногда разгоняет текст (лишние сравнения/описания — обвес,
