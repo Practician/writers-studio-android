@@ -110,63 +110,32 @@ function textToParagraphs(
 
 export async function exportChapterDocx(storyTitle: string, chapter: Chapter): Promise<DocxExportResult> {
   const docx = await import("docx");
-  const { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, BorderStyle } = docx;
+  const { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel } = docx;
 
   const bodyParas = textToParagraphs(chapter.content || "", { Paragraph, TextRun, AlignmentType });
 
+  // Перед прозой — только название главы. Название книги, строка «Глава: …» и синопсис
+  // раньше печатались перед текстом, и именно этот служебный блок первым сегментом
+  // уходил в нейродетектор: шапка из подписей выглядит машинным текстом и портила
+  // оценку всей главы (в отчёте по главе 4 сегмент 1 начинался с «Вейпер Вася и трусы
+  // из паракорда Глава: … Синопсис: …»). Название книги остаётся в имени файла,
+  // синопсис — в приложении, а не в тексте главы.
   const children: InstanceType<typeof Paragraph>[] = [
     new Paragraph({
       heading: HeadingLevel.HEADING_1,
       alignment: AlignmentType.CENTER,
-      spacing: { after: 200 },
+      spacing: { after: 240 },
       children: [
         new TextRun({
-          text: storyTitle,
+          text: chapter.title,
           bold: true,
           font: "Times New Roman",
-          size: 32,
+          size: 28,
         }),
       ],
     }),
-    new Paragraph({
-      alignment: AlignmentType.CENTER,
-      spacing: { after: 120 },
-      children: [
-        new TextRun({
-          text: `Глава: ${chapter.title}`,
-          italics: true,
-          font: "Times New Roman",
-          size: 22,
-          color: "555555",
-        }),
-      ],
-    }),
+    ...bodyParas,
   ];
-
-  if (chapter.summary?.trim()) {
-    children.push(
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: { after: 360 },
-        border: {
-          bottom: { style: BorderStyle.SINGLE, size: 6, color: "EEEEEE", space: 8 },
-        },
-        children: [
-          new TextRun({
-            text: `Синопсис: ${chapter.summary}`,
-            italics: true,
-            font: "Times New Roman",
-            size: 20,
-            color: "666666",
-          }),
-        ],
-      }),
-    );
-  } else {
-    children.push(new Paragraph({ spacing: { after: 360 }, children: [] }));
-  }
-
-  children.push(...bodyParas);
 
   const doc = new Document({
     styles: {

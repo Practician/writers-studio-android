@@ -79,15 +79,15 @@ export const AI_TELL_CATALOG: AiTellPattern[] = [
   { id: "inflated-significance", category: "bureaucratic", pattern: /знаменует собой (?:ключевой|важный) этап|символизирует приверженность|непреходящее значение|более широкие тенденции|закладывает основу для|знаковый момент|поворотный пункт|неизгладимый след/iu, label: "раздувание значимости", weight: 2 },
   { id: "challenges-and-prospects", category: "bureaucratic", pattern: /несмотря на (?:эти )?вызовы|сталкивается с (?:целым |широким )?рядом вызовов|вызовы и (?:перспективы|наследие)|перспективы развития/iu, label: "формула «вызовы и перспективы»", weight: 2 },
   { id: "empty-intensifier", category: "lexical", pattern: /(?:действительно|абсолютно|безусловно|по-настоящему|невероятно) (?:важн|огромн|уникальн|значим|серь[её]зн|глубок)/iu, label: "пустой усилитель перед оценкой", weight: 1 },
-  { id: "technical-jargon", category: "lexical", pattern: /(?:валидир|итерир|оптимизир)[а-яё]* (?:гипотез|решени|процесс|флоу)|(?:скоуп|дефолтн(?:ый|ая|ое)|флоу онбординг|релевантн(?:ый|ая|ое))\b/iu, label: "техножаргон без пояснения", weight: 1 },
+  { id: "technical-jargon", category: "lexical", pattern: /(?:валидир|итерир|оптимизир)[а-яё]* (?:гипотез|решени|процесс|флоу)|(?:скоуп|дефолтн(?:ый|ая|ое)|флоу онбординг|релевантн(?:ый|ая|ое))(?![а-яёa-z])/iu, label: "техножаргон без пояснения", weight: 1 },
   { id: "pseudo-depth", category: "lexical", pattern: /по сути,? вс[её] упирается|настоящий вопрос в том|глубинн(?:ая|ая же|ую) (?:проблема|готовность|причина)|если копнуть глубже|суть в том,? что|в конечном сч[её]те[^.!?]{0,50}(?:вс[её]|главное|важно)/iu, label: "анонс псевдоглубокого вывода", weight: 2 },
   // — структурные формулы
-  { id: "eto-bylo-ne", category: "structural", pattern: /это был[оаи]? не (?:просто )?[^.!?]{3,40}[.,] (?:это|а)\b/iu, label: "зеркальное «это было не X — это Y»", weight: 3 },
+  { id: "eto-bylo-ne", category: "structural", pattern: /это был[оаи]? не (?:просто )?[^.!?]{3,40}[.,] (?:это|а)(?![а-яёa-z])/iu, label: "зеркальное «это было не X — это Y»", weight: 3 },
   { id: "ritoricheskii-otvet", category: "structural", pattern: /\?\s+(?:Да|Нет|Возможно|Наверное)[,.]/u, label: "риторический вопрос + ответ", weight: 2 },
   { id: "slovno-budto-kaskad", category: "structural", pattern: /(?:словно|будто)[^.!?]{0,80}(?:словно|будто)/iu, label: "два «словно/будто» в одной фразе", weight: 2 },
   { id: "ne-tolko-no-i", category: "structural", pattern: /не только[^.!?]{0,60}но и/iu, label: "«не только… но и»", weight: 2 },
   { id: "odnako-vs[eё]-zhe", category: "structural", pattern: /однако вс[её] же/iu, label: "«однако всё же»", weight: 1 },
-  { id: "vdrug-vnezapno", category: "structural", pattern: /(?:^|[.!?…]\s+|\n\s*)(?:И )?вдруг\b/iu, label: "зачин «Вдруг…»", weight: 2 },
+  { id: "vdrug-vnezapno", category: "structural", pattern: /(?:^|[.!?…]\s+|\n\s*)(?:И )?вдруг(?![а-яёa-z])/iu, label: "зачин «Вдруг…»", weight: 2 },
   { id: "false-range", category: "structural", pattern: /от [^,.!?\n]{2,35} до [^,.!?\n]{2,35},\s*от [^,.!?\n]{2,35} до /iu, label: "шаблонный двойной диапазон «от X до Y»", weight: 2 },
   { id: "aphorism-formula", category: "structural", pattern: /(?:^|[.!?…]\s+)[А-ЯЁA-Z][^.!?\n]{1,35} (?:—|–|-) (?:это )?(?:язык|валюта|архитектура|зеркало) [^.!?\n]{2,35}[.!?]/u, label: "плакатная формула «X — валюта/язык Y»", weight: 2 },
   { id: "fragment-stack", category: "structural", pattern: /(?:Без|Никаких|Ноль) [^.!?]{1,30}[.!?]\s+(?:Без|Никаких|Ноль) [^.!?]{1,30}[.!?]\s+(?:Только|Без|Никаких|Ноль)(?=\s|[.!?…]|$)/iu, label: "стопка рубленых отрицательных фрагментов", weight: 2 },
@@ -134,7 +134,7 @@ export const AI_TELL_CATALOG: AiTellPattern[] = [
   // — «водянистый» повтор: одна мысль дважды (описание + вывод)
   { id: "double-thought", category: "structural", pattern: /(?:понял|осознал|решил|подумал)[а-яё]*\s*,?\s*что\s+[^.!?]{10,80}[.!?]\s+[^.!?]{0,20}(?:это\s+означал[аои]?|значит|стало\s+ясно|было\s+понятно)/iu, label: "мысль + её перефразировка (двойное объяснение)", weight: 2 },
   // — «инженерный дневник»: системный обход/подсчёт без эмоции
-  { id: "counting-steps", category: "structural", pattern: /считая\s+шаги|шаг[аиуов]*\s+считал\b|на\s+(?:тридцат|сорок|пятьдесят|шестьдесят|семьдесят|восемьдесят|девяносто)[а-яё]*\s+(?:шаг|счёт)/iu, label: "инженерный подсчёт шагов/метров", weight: 2 },
+  { id: "counting-steps", category: "structural", pattern: /считая\s+шаги|шаг[аиуов]*\s+считал(?![а-яёa-z])|на\s+(?:тридцат|сорок|пятьдесят|шестьдесят|семьдесят|восемьдесят|девяносто)[а-яё]*\s+(?:шаг|счёт)/iu, label: "инженерный подсчёт шагов/метров", weight: 2 },
   { id: "instrument-readout", category: "interface", pattern: /тепловизор\s+включался|телефон\s+(?:вс[её]\s+ещ[ёе]\s+)?показывал\s+(?:около\s+)?двадцат/iu, label: "считывание приборов", weight: 2 },
 ];
 
@@ -225,6 +225,90 @@ export function repeatedOpenerShare(text: string): number {
   return repeats / (openers.length - 1);
 }
 
+const OPENER_PRONOUNS = new Set([
+  "он", "она", "оно", "они", "я", "ты", "мы", "вы",
+  "это", "этот", "эта", "эти", "тот", "та", "те", "вот",
+]);
+
+/** Имена, встречающиеся в тексте с заглавной буквы не в начале предложения:
+ *  в начале предложения с заглавной начинается любое слово, а вот внутри фразы
+ *  заглавная — уже имя собственное. */
+function properNamesIn(text: string): Set<string> {
+  const names = new Map<string, number>();
+  for (const sentence of splitSentences(text)) {
+    const tokens = sentence.split(/\s+/u);
+    for (let index = 1; index < tokens.length; index += 1) {
+      const raw = tokens[index].replace(/^[«"(—–-]+|[,.;:!?)»"]+$/gu, "");
+      if (!/^[А-ЯЁ][а-яё-]{1,}(?:[а-яё-]+)?$/u.test(raw)) continue;
+      const key = raw.toLowerCase();
+      names.set(key, (names.get(key) || 0) + 1);
+    }
+  }
+  return new Set([...names].filter(([, count]) => count >= 2).map(([key]) => key));
+}
+
+/**
+ * Доля зачинов, которые ведут текст «по умолчанию»: местоимение или имя героя.
+ *
+ * Прежняя метрика считала только СОСЕДНИЕ одинаковые зачины, поэтому на тексте,
+ * где 32 % предложений начинаются с «он», «Илья» или «Васька», но не подряд,
+ * она давала 1 % и пропускала однородность целиком. Здесь считается именно класс
+ * зачина: у живой прозы он держится около 15–20 %, у машинной зашкаливает.
+ */
+export function openerClassShare(text: string): number {
+  const sentences = splitSentences(text);
+  if (sentences.length < 8) return 0;
+  const names = properNamesIn(text);
+  let generic = 0;
+  for (const sentence of sentences) {
+    const opener = wordsOf(sentence)[0]?.toLowerCase().replace(/[^\p{L}ё-]/gu, "") ?? "";
+    if (!opener) continue;
+    if (OPENER_PRONOUNS.has(opener) || names.has(opener)) generic += 1;
+  }
+  return generic / sentences.length;
+}
+
+const SPEECH_TAGS = /(?:сказал[аиу]?|сказал|спросил[аиу]?|спросила|буркнул[аиу]?|прошептал[аиу]?|ответил[аиу]?|пробормотал[аиу]?|выкрикнул[аиу]?|крикнул[аиу]?|прохрипел[аиу]?|выпалил[аиу]?|произн[её]с|заявил[аиу]?|шепотом|ворчал[аиу]?|кинул[аиу]?|объявил[аиу]?|пробормотал)/iu;
+
+/** Реплика размечена по-русски: тире в начале или ёлочки вокруг слов. */
+function isMarkedSpeech(sentence: string): boolean {
+  const trimmed = sentence.trim();
+  if (/^[—–―-]\s/u.test(trimmed)) return true;
+  return /[«»„“"”]/u.test(sentence);
+}
+
+export interface SpeechFormattingStats {
+  /** Предложений с речевым тегом («сказал», «прошептал»). */
+  tagged: number;
+  /** Из них без тире и без ёлочек — реплика осталась голым текстом. */
+  unmarked: number;
+  /** Доля размеченных реплик (1 — все размечены). */
+  markedShare: number;
+  /** Примеры немаркированных реплик для разбора в проходе. */
+  samples: string[];
+}
+
+/**
+ * Проверка типографики прямой речи.
+ *
+ * Раньше речь вообще не проверялась: `isDialogueSentence` узнаёт только предложения,
+ * начинающиеся с тире или ёлочки, поэтому текст без разметки давал dialogueShare = 0,
+ * а весь ритмический и стаккато-аудит считался по репликам вместе с нарративом.
+ * В живой прозе реплика без кавычек и тире — не опечатка автора, а признак того,
+ * что прямая речь вообще не размечена: в главе 4 так были размечены 17 предложений
+ * из 18, при трёх парах ёлочек на 23 тысячи знаков.
+ */
+export function speechFormattingStats(text: string): SpeechFormattingStats {
+  const taggedSentences = splitSentences(text).filter((sentence) => SPEECH_TAGS.test(sentence));
+  const unmarked = taggedSentences.filter((sentence) => !isMarkedSpeech(sentence));
+  return {
+    tagged: taggedSentences.length,
+    unmarked: unmarked.length,
+    markedShare: taggedSentences.length ? (taggedSentences.length - unmarked.length) / taggedSentences.length : 1,
+    samples: unmarked.slice(0, 5).map((sentence) => sentence.slice(0, 120)),
+  };
+}
+
 export interface AiTellScore {
   /** Оценка по признакам внешнего детектора: штампы, интерфейсный лог, ровный ритм,
    *  одинаковые зачины, инвентарь локации. Именно она идёт в gate. */
@@ -240,6 +324,12 @@ export interface AiTellScore {
   /** Доля коротких предложений и самая длинная цепочка — по нарративу, без реплик. */
   shortShare?: number;
   maxShortChain?: number;
+  /** Доля зачинов вида «он / Илья / это» — однородность повествования. */
+  openerClassShare?: number;
+  /** Прямая речь: сколько реплик размечено тире или ёлочками (1 — все). */
+  speechMarkedShare?: number;
+  /** Немаркированных реплик (речевой тег без тире и кавычек). */
+  speechUnmarked?: number;
   patternDensity: number; // взвешенные попадания на 1000 слов
   burstiness: number;
   openerRepetition: number;
@@ -307,6 +397,8 @@ export function aiTellScore(text: string): AiTellScore {
   const patternDensity = (weighted / wordCount) * 1000;
   const burstiness = sentenceBurstiness(text);
   const openerRepetition = repeatedOpenerShare(text);
+  const openerGeneric = openerClassShare(text);
+  const speech = speechFormattingStats(text);
   const interfaceShare = interfaceTellShare(text);
   const short = shortSentenceStats(text, 4, isDialogueSentence);
   const sentences = splitSentences(text);
@@ -329,6 +421,20 @@ export function aiTellScore(text: string): AiTellScore {
     ? 0
     : Math.min(((rhythmFloor - burstiness) / rhythmFloor) * 15, 15);
   const openerComponent = Math.min(openerRepetition * 50, 10);
+  // Однородность зачинов: класс «он / имя героя / это» живёт в коридоре 15–20 %,
+  // выше 25 % текст ведёт себя как список кадров с одним и тем же зачином. Считаем
+  // мягче повторов подряд: это признак сюжета, а не опечатка, и высокий балл штрафует
+  // до 8 при потолке gate 8 — как полный провал, но не выше.
+  const openerClassComponent = openerGeneric <= 0.25
+    ? 0
+    : Math.min(((openerGeneric - 0.25) / 0.25) * 8, 8);
+  // Прямая речь: размеченная речь — норма русской прозы, неразмеченная — признак
+  // того, что речь вообще не оформлена, и сильная машинная черта. Штрафуем по доле
+  // немаркированных, но не на полную: в тексте без речевых тегов (чистый нарратив)
+  // проверка молчит.
+  const speechMarkingComponent = speech.tagged >= 3
+    ? Math.min(((1 - speech.markedShare) / 0.6) * 8, 8)
+    : 0;
 
   // Inventory-детектор: 3+ предложения подряд описывают физические свойства локации.
   // live data: AI=4.0 vs HUMAN=1.2 (ratio 3.3x) — сильнейший AI-маркер.
@@ -355,7 +461,7 @@ export function aiTellScore(text: string): AiTellScore {
     Math.min(
       Math.max(0,
         patternComponent + interfaceComponent + rhythmComponent + openerComponent
-        + inventoryComponent
+        + inventoryComponent + openerClassComponent + speechMarkingComponent
       ),
       100,
     ),
@@ -369,6 +475,9 @@ export function aiTellScore(text: string): AiTellScore {
     dialogueShare: sentences.length ? sentences.filter(isDialogueSentence).length / sentences.length : 0,
     shortShare: short.share,
     maxShortChain: short.maxChain,
+    openerClassShare: openerGeneric,
+    speechMarkedShare: speech.markedShare,
+    speechUnmarked: speech.unmarked,
     patternDensity,
     burstiness,
     openerRepetition,

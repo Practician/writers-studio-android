@@ -80,16 +80,18 @@ const secondChapter: Chapter = {
   content: "В глубине тоннеля прозвучал знакомый голос.",
 };
 
-test("DOCX одной главы содержит русское название книги, главы, синопсис и все абзацы", async () => {
+test("DOCX одной главы содержит название главы, все абзацы и не содержит названия книги и синопсиса", async () => {
   const file = await captureDocx(() => exportChapterDocx("Лабиринт", firstChapter));
   const xml = await documentXml(file.blob);
 
   assert.equal(file.filename, "Лабиринт - Глава 1. Тёмная станция.docx");
-  assert.equal(xml.includes("Лабиринт"), true);
-  assert.equal(xml.includes("Глава: Глава 1. Тёмная станция"), true);
-  assert.equal(xml.includes("Синопсис: Лера получает ключ от закрытого перехода."), true);
+  assert.equal(xml.includes("Глава 1. Тёмная станция"), true);
   assert.equal(xml.includes("Над перроном дрожал жёлтый свет. Поезда не было."), true);
   assert.equal(xml.includes("Лера сжала ключ в ладони и пошла к тоннелю."), true);
+  // Служебная шапка в текст главы не попадает: она уходила в детектор первым сегментом.
+  assert.equal(xml.includes("Лабиринт"), false);
+  assert.equal(xml.includes("Синопсис"), false);
+  assert.equal(xml.includes("Лера получает ключ от закрытого перехода."), false);
 });
 
 test("DOCX всей книги сохраняет порядок всех глав, включая пустой слот, персонажей и правила мира", async () => {

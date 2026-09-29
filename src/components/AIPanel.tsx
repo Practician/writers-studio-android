@@ -1114,6 +1114,8 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
                     {humanizeReport.depth ? `режим: ${humanizeReport.depth}` : ""}
                     {humanizeReport.burstiness != null ? ` · ритм ${humanizeReport.burstiness.toFixed(2)}` : ""}
                     {humanizeReport.passesRun ? ` · проходов: ${humanizeReport.passesRun}` : ""}
+                    {humanizeReport.speechUnmarked ? ` · неразмеченных реплик: ${humanizeReport.speechUnmarked}` : ""}
+                    {humanizeReport.openerClassShare != null ? ` · зачины «он/имя»: ${(humanizeReport.openerClassShare * 100).toFixed(0)}%` : ""}
                     {humanizeReport.sepiaRoute || humanizeReport.reviewPasses != null || humanizeReport.recreatePasses != null ? (
                       <>
                         {humanizeReport.sepiaRoute ? ` · маршрут: ${humanizeReport.sepiaRoute}` : ""}
@@ -1125,6 +1127,17 @@ export default function AIPanel({ story, currentDraft, selectedText, textSelecti
                         {humanizeReport.replanTriggered ? " · replan: да" : ""}
                       </>
                     ) : ""}
+                  </p>
+                )}
+                {(humanizeReport.architectureFindings?.length ?? 0) > 0 && (
+                  <p className="text-[10px] text-amber-400 mt-1">
+                    Архитектура {humanizeReport.architectureScore}/100:{" "}
+                    {humanizeReport.architectureFindings!.slice(0, 3).map((finding) => finding.label).join("; ")}.
+                  </p>
+                )}
+                {humanizeReport.detectorHypothesised && (
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Балл локальный — внешний нейродетектор не запускался, это гипотеза, а не вердикт.
                   </p>
                 )}
                 {((humanizeReport.unresolvedLabels?.length ?? 0) > 0 || (humanizeReport.architectureChecksApplied?.length ?? 0) > 0) && (

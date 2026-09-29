@@ -15,6 +15,7 @@
  */
 
 import type { AiTellPattern, AiTellCategory } from "./humanStyle";
+import { architectureDiagnostics } from "./architectureAudit";
 import { computeStyleStats } from "../src/lib/authorAudit";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -49,18 +50,18 @@ export const AI_TELL_CATALOG_EXTENDED: AiTellPattern[] = [
   { id: "nogi-sami-poshli",        category: "sensational",  pattern: /ноги (?:сами (?:понесли|пошли|двинулись)|отказывали)/iu,          label: "«ноги сами понесли»",           weight: 2 },
 
   // ── transition clichés ────────────────────────────────────────────────────
-  { id: "mezhdu-tem",              category: "bureaucratic", pattern: /(?:^|[.!?]\s+)Между тем\b/u,                                     label: "нарративный «Между тем»",       weight: 2 },
-  { id: "tem-vremenem",            category: "bureaucratic", pattern: /(?:^|[.!?]\s+)Тем временем\b/u,                                  label: "нарративный «Тем временем»",    weight: 2 },
-  { id: "vmeste-s-tem",            category: "bureaucratic", pattern: /вместе с тем\b/iu,                                               label: "«вместе с тем»",                weight: 2 },
+  { id: "mezhdu-tem",              category: "bureaucratic", pattern: /(?:^|[.!?]\s+)Между тем(?![а-яёa-z])/u,                                     label: "нарративный «Между тем»",       weight: 2 },
+  { id: "tem-vremenem",            category: "bureaucratic", pattern: /(?:^|[.!?]\s+)Тем временем(?![а-яёa-z])/u,                                  label: "нарративный «Тем временем»",    weight: 2 },
+  { id: "vmeste-s-tem",            category: "bureaucratic", pattern: /вместе с тем(?![а-яёa-z])/iu,                                               label: "«вместе с тем»",                weight: 2 },
   { id: "v-to-zhe-mgnovenie",      category: "structural",   pattern: /в то (?:самое |же )?мгновение/iu,                                label: "«в то же мгновение»",           weight: 2 },
-  { id: "ne-daleko-ot",            category: "structural",   pattern: /(?:^|[.!?…]\s+)Неподалёку\b|неподалеку от/iu,                   label: "нарративный «Неподалёку»",      weight: 1 },
+  { id: "ne-daleko-ot",            category: "structural",   pattern: /(?:^|[.!?…]\s+)Неподалёку(?![а-яёa-z])|неподалеку от/iu,                   label: "нарративный «Неподалёку»",      weight: 1 },
 
   // ── LLM hedging (самоограничение ИИ в тексте) ────────────────────────────
   { id: "mozhno-predpolozhit",     category: "rlhf",         pattern: /можно (?:с уверенностью )?предположить/iu,                       label: "«можно предположить»",          weight: 2 },
   { id: "veroyatno-stoit",         category: "rlhf",         pattern: /вероятно(?:,)? стоит отметить/iu,                               label: "«вероятно стоит отметить»",     weight: 3 },
   { id: "lyubopytnyy-fakt",        category: "rlhf",         pattern: /любопытн(?:ый|ый факт)/iu,                                      label: "«любопытный факт»",             weight: 2 },
   { id: "nesmotria-na-eto",        category: "rlhf",         pattern: /(?:^|[.!?]\s+)Несмотря на (?:это|всё|всё это)/u,                label: "зачин «Несмотря на это»",       weight: 2 },
-  { id: "chto-kasaetsya",          category: "rlhf",         pattern: /что касается\b/iu,                                              label: "«что касается»",                weight: 1 },
+  { id: "chto-kasaetsya",          category: "rlhf",         pattern: /что касается(?![а-яёa-z])/iu,                                              label: "«что касается»",                weight: 1 },
 
   // ── English leaks в русском тексте ────────────────────────────────────────
   { id: "english-the-leak",        category: "interface",    pattern: /(?<!\w)the\s+[a-zA-Z]/u,                                        label: "английский артикль the в русском тексте", weight: 2 },
@@ -69,7 +70,7 @@ export const AI_TELL_CATALOG_EXTENDED: AiTellPattern[] = [
 
   // ── repetition chains (анафора-клише) ────────────────────────────────────
   { id: "on-on-on-chain",          category: "structural",
-    pattern: /(?:^|[.!?…]\s+)(?:Он|Она|Они|Оно) [^.!?]{3,80}[.!?]\s+(?:Он|Она|Они|Оно) [^.!?]{3,80}[.!?]\s+(?:Он|Она|Они|Оно)\b/u,
+    pattern: /(?:^|[.!?…]\s+)(?:Он|Она|Они|Оно) [^.!?]{3,80}[.!?]\s+(?:Он|Она|Они|Оно) [^.!?]{3,80}[.!?]\s+(?:Он|Она|Они|Оно)(?![а-яёa-z])/u,
     label: "три предложения подряд с одним подлежащим «Он/Она»", weight: 3 },
   { id: "ya-ya-ya-chain",          category: "structural",
     pattern: /(?:^|[.!?…]\s+)Я [^.!?]{3,80}[.!?]\s+Я [^.!?]{3,80}[.!?]\s+Я\b/u,
@@ -78,8 +79,8 @@ export const AI_TELL_CATALOG_EXTENDED: AiTellPattern[] = [
   // ── false profundity (псевдофилософия) ────────────────────────────────────
   { id: "v-glubine-dushi",         category: "lexical",      pattern: /в глубине (?:души|сердца|себя) (?:знал|знала|понимал|чувствовал)/iu, label: "«в глубине души знал»",    weight: 3 },
   { id: "na-samom-dele",           category: "structural",   pattern: /(?:но )?на самом деле всё (?:было |оказалось )?иначе/iu,          label: "«на самом деле всё иначе»", weight: 3 },
-  { id: "pravda-byla-prosta",      category: "structural",   pattern: /правда (?:же )?была проста\b/iu,                                  label: "«правда была проста»",       weight: 3 },
-  { id: "vo-vsyom-vinom",          category: "rlhf",         pattern: /во всём (?:был |была )?виноват[а]?\b/iu,                         label: "«во всём виноват»",          weight: 2 },
+  { id: "pravda-byla-prosta",      category: "structural",   pattern: /правда (?:же )?была проста(?![а-яёa-z])/iu,                                  label: "«правда была проста»",       weight: 3 },
+  { id: "vo-vsyom-vinom",          category: "rlhf",         pattern: /во всём (?:был |была )?виноват[а]?(?![а-яёa-z])/iu,                         label: "«во всём виноват»",          weight: 2 },
   { id: "odin-v-etom-mire",        category: "rlhf",         pattern: /один(?:а)? (?:во всём мире|в этом мире|среди всех)/iu,            label: "«один в этом мире»",         weight: 2 },
 
   // ── sensory inventory (инвентарь локации) ─────────────────────────────────
@@ -96,13 +97,13 @@ export const AI_TELL_CATALOG_EXTENDED: AiTellPattern[] = [
   // ── connector logic (из OpenRouter ox-alpha literary profile research) ─────
   // Ox Alpha / stealth-модели избегают конструкций, которые детекторы ловят через bigrams
   { id: "chego-stoit-ozhidat",     category: "rlhf",         pattern: /чего стоит (?:ожидать|ждать) от/iu,                              label: "лекторское «чего стоит ожидать»", weight: 2 },
-  { id: "stalo-ochevidno",         category: "rlhf",         pattern: /(?:стало|было) (?:очевидно|ясно|понятно),? что\b/iu,             label: "«стало очевидно, что»",       weight: 2 },
+  { id: "stalo-ochevidno",         category: "rlhf",         pattern: /(?:стало|было) (?:очевидно|ясно|понятно),? что(?![а-яёa-z])/iu,             label: "«стало очевидно, что»",       weight: 2 },
   { id: "nichego-ne-ostalos",      category: "structural",   pattern: /не осталось (?:ничего|выбора|пути|надежды|шанса)/iu,              label: "«не осталось выбора»",        weight: 2 },
 
   // ── DeepSeek V3/V4 prose tells (из OpenRouter research 2026-08) ─────────
   { id: "nachalo-novoy-ery",       category: "bureaucratic", pattern: /начало новой эр[ыа]|новая глава (?:в|истории)/iu,                label: "«начало новой эры»",          weight: 3 },
   { id: "nevozmozhnoe-vozmozhno",  category: "structural",   pattern: /(?:невозможное|невозможно) (?:стало|оказалось) (?:возможным|реальным)/iu, label: "«невозможное стало возможным»", weight: 3 },
-  { id: "sila-voli",               category: "sensational",  pattern: /(?:силой|усилием) воли\b/iu,                                    label: "«силой воли»",                weight: 2 },
+  { id: "sila-voli",               category: "sensational",  pattern: /(?:силой|усилием) воли(?![а-яёa-z])/iu,                                    label: "«силой воли»",                weight: 2 },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -233,10 +234,19 @@ export function aiTellScoreEnhanced(
  * Коэффициент вариации длин абзацев (paragraphLengthCV).
  * AI генерирует абзацы равной длины — CV будет близко к 0.
  * Человек — CV > 0.5.
+ *
+ * Раньше при менее чем трёх абзацах возвращалось 1 («не штрафуем»), и это делало
+ * метрику слепой к самому заметному дефекту формата: текст без единого перевода
+ * строки получал лучший балл, чем текст с настоящими абзацами. В главе 4 детектора
+ * переносов строк не было вовсе — 23 тысячи знаков одним куском. Теперь отсутствие
+ * абзацев даёт 0, но только когда текст достаточно велик, чтобы это было правдой:
+ * на коротком фрагменте в два абзаца вердикт был бы шумом.
  */
 export function paragraphLengthCV(text: string): number {
   const paragraphs = text.split(/\n{2,}/u).map(p => p.trim()).filter(Boolean);
-  if (paragraphs.length < 3) return 1; // мало данных — не штрафуем
+  const words = (text.match(/[\p{L}\p{N}]+/gu) || []).length;
+  if (paragraphs.length === 0) return words > 200 ? 0 : 1;
+  if (paragraphs.length < 3) return words > 200 ? 0 : 1;
   const lengths = paragraphs.map(p => p.split(/\s+/u).filter(Boolean).length);
   const mean = lengths.reduce((s, l) => s + l, 0) / lengths.length;
   if (mean === 0) return 0;
@@ -652,6 +662,10 @@ export interface GateResult {
   passiveShare: number;
   ttr200: number;
   connectorDiv: number;
+  /** Архитектурный балл StoryScope: 0 — чисто, выше 35 — машинная архитектура. */
+  architectureScore: number;
+  /** Найденные архитектурные признаки с подсказкой, что именно править. */
+  architectureFindings: Array<{ id: string; label: string; advice: string }>;
   details: string[];
 }
 
@@ -672,6 +686,7 @@ export function runMultiDetectorGate(
     maxPassiveShare?: number;
     minTTR200?: number;
     minConnectorDiv?: number;
+    maxArchitectureScore?: number;
   } = {},
 ): GateResult {
   const {
@@ -680,6 +695,7 @@ export function runMultiDetectorGate(
     maxPassiveShare   = 0.15,
     minTTR200         = 0.52,
     minConnectorDiv   = 0.45,
+    maxArchitectureScore = 35,
   } = config;
 
   const tellScore   = aiTellScoreEnhanced(text, allPatterns, genre);
@@ -696,6 +712,18 @@ export function runMultiDetectorGate(
   if (ttr200 < minTTR200)           failures.push(`TTR-200 ${ttr200.toFixed(2)} < ${minTTR200} (бедный словарь)`);
   if (connDiv < minConnectorDiv)    failures.push(`Diversity коннекторов ${connDiv.toFixed(2)} < ${minConnectorDiv} (монотонные связки)`);
 
+  // Архитектурный слой StoryScope. Пять приведённых выше проверок смотрят на
+  // поверхность, а в замере StoryScope правка поверхности сдвигает детектор лишь с
+  // 95,5 % до 93,9 % — сценарий ловится по структуре. Поэтому слой входит в тот же
+  // вердикт, а не остаётся чек-листом в промпте.
+  const architecture = architectureDiagnostics(text);
+  if (architecture.score > maxArchitectureScore) {
+    failures.push(
+      `Архитектура ${architecture.score} > порога ${maxArchitectureScore}`
+      + (architecture.findings[0] ? ` (${architecture.findings[0].label})` : ""),
+    );
+  }
+
   let verdict: GateVerdict;
   if (failures.length === 0)      verdict = "PASS";
   else if (failures.length <= 2)  verdict = "REVIEW";
@@ -708,6 +736,12 @@ export function runMultiDetectorGate(
     passiveShare,
     ttr200,
     connectorDiv:  connDiv,
+    architectureScore: architecture.score,
+    architectureFindings: architecture.findings.map((finding) => ({
+      id: finding.id,
+      label: finding.label,
+      advice: finding.advice,
+    })),
     details:       failures,
   };
 }
@@ -791,11 +825,31 @@ export function modelFingerprintGuidance(provider?: string, model?: string): str
 - Пусть рассказчик иногда отступает и не подсказывает происходящее объяснением.`;
   }
   if (provider === "gemini" || m.includes("gemini")) {
-    return `\n\nОсобенности именно этой модели (Gemini), которые стоит сознательно нарушить:
+    // Lite-версии тяготеют к коротким равномерным кускам и к декорациям по умолчанию:
+    // в живой приёмке 29.09.2026 глава, написанная gemini-3.1-flash-lite, состояла из
+    // 22 сегментов по 146–182 слова и шла сплошной цепочкой «увидел → пошёл → увидел».
+    const lite = /lite|flash-lite/u.test(m);
+    const liteBlock = lite
+      ? `- Твои куски выходят одинаковой длины и подряд идут в одном ключе: сделай один кусок вдвое короче соседнего, а один разорви репликой.
+- Описывай место одним-двумя деталями, а не полным набором ощущений подряд.
+- Не держи одну интонацию на всей главе: после плотной сцены дай короткую и быструю.`
+      : "";
+    return `\n\nОсобенности именно этой модели (Gemini${lite ? " Lite" : ""}), которые стоит сознательно нарушить:
 - Не закрывай в развязке все счета — оставь что-то слегка незавершённым.
 - Не делай декорации мрачными по умолчанию — часть сцен может быть нейтральной или тёплой даже при плохих событиях.
 - Не расширяй автоматически круг общения героя — дай ему остаться при своих или потерять кого-то.
-- Разбавляй прямую речь пересказанной или косвенной, не только диалогом в кавычках.`;
+- Разбавляй прямую речь пересказанной или косвенной, не только диалогом в кавычках.
+- Называй чувство словом или поступком, а не только телесной реакцией: у тебя она идёт по умолчанию.${liteBlock}`;
+  }
+  if (provider === "openrouter" || m.includes("openrouter")) {
+    // openrouter/free — маршрут без фиксированной модели: за журналом известен ответ
+    // на 95 413 символов с finishReason=length за 12 минут, то есть это худший
+    // исполнитель для длинной правки. Ограничения ниже — то, что такая маршрутизация
+    // добавляет к главе помимо своей нестабильности.
+    return `\n\nМаршрут openrouter (модель подставляется автоматически) — держи ответ локальным:
+- Одна реплика персонажа за раз, без пересказа подряд, без длинных перечислений.
+- Не добавляй того, чего не было в исходном куске: ни фактов, ни имён, ни сцен.
+- Заканчивай так же, как начал, — правка, а не переписывание.`;
   }
   return "";
 }

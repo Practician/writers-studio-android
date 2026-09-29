@@ -1,5 +1,6 @@
 import { Type } from "@google/genai";
 import { humanProfileScore } from "./humanStyleEnhanced";
+import { architectureDiagnostics, architectureFixBlock, type ArchitectureDiagnostics } from "./architectureAudit";
 import {
   reassembleText,
   rewriteSchema,
@@ -35,6 +36,7 @@ import {
   rhythmIssues,
   runMultiDetectorGate,
   sentenceBurstiness,
+  speechFormattingStats,
   type AiTellScore,
   type GenreContext,
   type HumanizeDepth,
@@ -48,7 +50,7 @@ import {
   modelFingerprintGuidance,
 } from "./humanStyle";
 import { sanitizeGeneratedText, type TextHygieneReport } from "./textHygiene";
-import { revertUnearnedEdits } from "./editRevert";
+import { meaningLossIssues, revertUnearnedEdits } from "./editRevert";
 import { filterByPairJudge, stripEditorNoise, type PairJudgeConfig, type PairJudgeStats } from "./pairJudge";
 import { computeStyleStats } from "../src/lib/authorAudit";
 
@@ -93,6 +95,11 @@ export interface HumanizePipelineReport {
   dialogueShare?: number;
   shortShare?: number;
   maxShortChain?: number;
+  /** Доля зачинов «он / имя героя / это» — однородность повествования. */
+  openerClassShare?: number;
+  /** Прямая речь: доля размеченных реплик (1 — все размечены) и число немаркированных. */
+  speechMarkedShare?: number;
+  speechUnmarked?: number;
   gatePassed: boolean;
   passesRun: number;
   /** Доборные сцены сверх плана битов (план кончился, а глава не дотянула до цели). */
@@ -116,6 +123,11 @@ export interface HumanizePipelineReport {
   replanTriggered?: boolean;
   extendedAiTellScore?: number;
   extendedGateVerdict?: "PASS" | "REVIEW" | "FAIL";
+  /** Архитектурный балл StoryScope и найденные признаки с подсказкой правки. */
+  architectureScore?: number;
+  architectureFindings?: Array<{ id: string; label: string; advice: string }>;
+  /** Честная оговорка: внешний детектор не запускался, балл — локальная гипотеза. */
+  detectorHypothesised?: boolean;
   extendedMetrics?: {
     paragraphLengthCV: number;
     passiveVoiceShare: number;
@@ -240,7 +252,7 @@ function applyProseFallback(candidates: Array<string | null>, raw: string): void
     .replace(/^```[a-z]*\s*/i, "")
     .replace(/```\s*$/i, "")
     .split("\n")
-    .filter((line) => !/^\s*(вот|готово|переработанн|ниже|результат)\b/i.test(line))
+    .filter((line) => !/^\s*(вот|готово|переработанн|ниже|результат)(?![а-яёa-z])/i.test(line))
     .join("\n")
     .trim();
   if (!cleaned || /[{}]/.test(cleaned)) return;
@@ -401,6 +413,19 @@ export function russianLanguageIssues(text: string): string[] {
   return issues;
 }
 
+/**
+ * Прямая речь размечена. В главе 4 речевых тегов было 18, а тире и ёлочек — три пары
+ * на 23 тысячи знаков: реплики шли голым текстом («Ну, приплыли, буркнул Илья»).
+ * Из-за этого же искажался весь аудит: isDialogueSentence узнаёт только предложения,
+ * начинающиеся с тире или ёлочки, поэтому диалог в тексте не виден вовсе.
+ * В сцене достаточно двух неразмеченных реплик подряд — это не стилистика, а печать.
+ */
+export function speechFormattingIssue(text: string): string {
+  const stats = speechFormattingStats(text);
+  if (stats.tagged < 2 || stats.unmarked < 2) return "";
+  return `прямая речь не размечена тире и кавычками (${stats.unmarked} из ${stats.tagged} реплик, например «${stats.samples[0]?.slice(0, 60)}»)`;
+}
+
 /** Единственный счётчик слов конвейера: и цикл добора, и отчёт автору, и проверка
  *  «фрагмент короче 250 слов» считают одним способом. Раньше цикл считал по пробелам
  *  (тире тоже попадало в счёт), а отчёт — по словоподобным токенам: глава считалась
@@ -421,6 +446,8 @@ interface ExtendedCandidateScore {
   extendedAiTellScore: number;
   extendedGateVerdict: "PASS" | "REVIEW" | "FAIL";
   extendedMetrics: HumanizePipelineReport["extendedMetrics"];
+  /** Архитектурный балл StoryScope: чем ниже, тем лучше. */
+  architectureScore: number;
   architectureChecksApplied: string[];
 }
 
@@ -432,6 +459,8 @@ interface EnhancedPipelineResult {
   extendedAiTellScore: number;
   extendedGateVerdict: "PASS" | "REVIEW" | "FAIL";
   extendedMetrics: NonNullable<HumanizePipelineReport["extendedMetrics"]>;
+  architectureScore: number;
+  architectureFindings: Array<{ id: string; label: string; advice: string }>;
   architectureChecksApplied: string[];
   note?: string;
 }
@@ -454,7 +483,6 @@ function structuralPatternDiagnostics(text: string): StructuralDiagnostics {
     .filter(Boolean);
   const checks: string[] = [];
   let penalty = 0;
-
   const openerCounts = new Map<string, number>();
   for (const paragraph of paragraphs) {
     const opener = paragraph
@@ -479,7 +507,7 @@ function structuralPatternDiagnostics(text: string): StructuralDiagnostics {
     checks.push("повтор типа реакции на новое");
   }
 
-  const sensoryOpeners = paragraphs.filter((paragraph) => /^(?:воздух|пахло|запах|свет|тишина|темнота)\b/iu.test(paragraph)).length;
+  const sensoryOpeners = paragraphs.filter((paragraph) => /^(?:воздух|пахло|запах|свет|тишина|темнота)(?![а-яёa-z])/iu.test(paragraph)).length;
   if (sensoryOpeners >= 2) {
     penalty += Math.min((sensoryOpeners - 1) * 2, 6);
     checks.push("повтор сенсорного входа в сцену");
@@ -489,6 +517,44 @@ function structuralPatternDiagnostics(text: string): StructuralDiagnostics {
   if (repeatedEndings >= 2) {
     penalty += Math.min((repeatedEndings - 1) * 2.5, 7);
     checks.push("повтор концовки сцены");
+  }
+
+  // Однородность формы сцен. Отчёт детектора по главе 4 разбивал текст на 22
+  // сегмента по 146–182 слова: каждая сцена была одного и того же размера, и ни одна
+  // проверка этого не замечала — все прежние смотрели на повторы внутри фразы.
+  if (paragraphs.length >= 4) {
+    const lengths = paragraphs.map((paragraph) => paragraph.split(/\s+/u).filter(Boolean).length);
+    const mean = lengths.reduce((sum, value) => sum + value, 0) / lengths.length;
+    const cv = mean > 0
+      ? Math.sqrt(lengths.reduce((sum, value) => sum + (value - mean) ** 2, 0) / lengths.length) / mean
+      : 0;
+    if (cv < 0.25) {
+      penalty += Math.min((0.25 - cv) * 40, 6);
+      checks.push(`сцены одного размера (CV=${cv.toFixed(2)})`);
+    }
+  }
+
+  // Сенсорная монокультура: весь мир описан одним каналом. В главе 4 «озон»
+  // встречался 8 раз, «свет» 31, «холод» 12 — глава звучала одним инструментом.
+  const channels: [string, RegExp][] = [
+    ["свет", /свет\w*|освещ\w*|сия\w*|блеск\w*|свечени\w*/iu],
+    ["темнота", /темнот\w*|мрак|тьм\w*/iu],
+    ["холод", /холод\w*|мороз\w*|ледян\w*/iu],
+    ["запах", /пахл\w*|запах\w*|аромат\w*|вонь\w*/iu],
+    ["шум", /шум\w*|гул\w*|звон\w*|скрип\w*|шорох\w*/iu],
+    ["жар", /жар\w*|зной|теплот\w*|нагрел\w*/iu],
+  ];
+  const channelCounts = channels
+    .map(([label, pattern]) => ({ label, count: (text.match(pattern) || []).length }))
+    .filter((entry) => entry.count >= 4)
+    .sort((left, right) => right.count - left.count);
+  const words = countWordsRu(text);
+  if (words > 400 && channelCounts.length) {
+    const top = channelCounts[0].count / words * 1000;
+    if (top > 5) {
+      penalty += Math.min((top - 5) * 1.5, 6);
+      checks.push(`сенсорная монокультура: «${channelCounts[0].label}» ${top.toFixed(1)} на 1000 слов`);
+    }
   }
 
   return { penalty, checks };
@@ -531,12 +597,17 @@ function scoreCandidateWithEnhanced(
     + Math.max(0, extendedAiTellScore - Math.max(depth.scoreGate, 8)) * 0.7
     + extendedMetricsPenalty(extendedMetrics)
     + structural.penalty
-    + gatePenalty;
+    + gatePenalty
+    // Архитектура весит в ранге отдельно от gate-вердикта: вердикт отражает число
+    // нарушений, балл — их выраженность, и глава с одним сильным признаком не
+    // должна выглядеть лучше главы с пятью слабыми.
+    + gate.architectureScore * 0.5;
   return {
     rank: Number(rank.toFixed(2)),
     extendedAiTellScore,
     extendedGateVerdict: gate.verdict,
     extendedMetrics,
+    architectureScore: gate.architectureScore,
     architectureChecksApplied: gate.details.concat(structural.checks),
   };
 }
@@ -556,6 +627,44 @@ function enhancedPhaseMaxTokens(charLength: number): number {
 }
 
 export type PhaseGenerateMap = Partial<Record<SepiaPhaseName, { generate: GenerateFn; model: string }>>;
+
+/** Фазы по всей главе одним запросом. Свыше этого объёма ответ приходит с
+ *  finishReason=length, и фаза теряется целиком: в живом журнале 29.09.2026
+ *  openrouter/free вернул 95 413 символов с «завершение length» за 12 минут.
+ *  Плюс один вызов на 23 тысячи знаков — это одни и те же тики модели на всей главе,
+ *  а блочная правка даёт главе разные отпечатки по кускам. */
+const PHASE_CHUNK_CHARS = 7_000;
+
+/** Ниже этого числа предложений архитектурный вердикт не выносится: на абзаце
+ *  не видно ни формы главы, ни развязки, ни сети отношений. */
+const ARCHITECTURE_MIN_SENTENCES = 20;
+
+/** Разбить текст на блоки по границам абзацев. Разделитель сохраняется: блоки
+ *  склеиваются тем же, что был в тексте. */
+export function splitIntoPhaseChunks(text: string, limit = PHASE_CHUNK_CHARS): string[] {
+  if (text.length <= limit) return [text];
+  const separator = /\n{2,}/u.test(text) ? "\n\n" : "\n";
+  const separatorRe = new RegExp(`${separator.replace(/\n/g, "\\n")}`, "u");
+  // Единица деления — абзац. Разделитель не хранится в единице, а ставится между
+  // единицами при сборке: иначе на стыке блоков два соседних абзаца слипаются в
+  // один — ровно тот дефект формата, ради которого блоки и вводились.
+  const units = text.split(separatorRe).map((unit) => unit).filter((unit) => unit.length > 0);
+  const chunks: string[] = [];
+  let buffer = "";
+  const flush = () => {
+    if (!buffer.trim()) return;
+    chunks.push(buffer);
+    buffer = "";
+  };
+  for (const [index, unit] of units.entries()) {
+    const piece = index === units.length - 1 ? unit : `${unit}${separator}`;
+    if (buffer && buffer.length + piece.length > limit) flush();
+    buffer += piece;
+    if (buffer.length >= limit) flush();
+  }
+  if (buffer.trim()) flush();
+  return chunks.length ? chunks : [text];
+}
 
 export async function runEnhancedSepiaPipeline(
   text: string,
@@ -586,96 +695,219 @@ export async function runEnhancedSepiaPipeline(
   const negativeGuidance = negativeProfile ? negativeVoiceGuidanceBlock(negativeProfile) : "";
   let note: string | undefined;
 
+  const chunks = splitIntoPhaseChunks(current);
+  const separator = /\n{2,}/u.test(current) ? "\n\n" : "\n";
+  // Причина не записывается поверх уже найденной: если фаза была отклонена по
+  // регрессии, вердикт gate не должен стирать объяснение, что именно сломалось.
+  const appendNote = (message: string) => {
+    note = note ? `${note}; ${message}` : message;
+  };
+
   for (const phase of sepiaPhasesForRoute(options.route)) {
     reviewPasses += 1;
-    const beforeDiag = scoreCandidateWithEnhanced(current, aiTellScore(current), options.depth, options.genre);
-    const targetBurst = [Math.max(0.45, options.depth.minBurstiness), Math.min(0.82, Math.max(0.58, options.depth.minBurstiness + 0.18))] as [number, number];
-    const prompt = phase === "rhythm-breaker"
-      ? buildRhythmBreakerPrompt(current, [options.personaBlock, negativeGuidance].filter(Boolean).join("\n\n"), targetBurst)
-      : phase === "lexical-diversifier"
-        ? buildLexicalDiversifierPrompt(
-            current,
-            sample,
-            negativeProfile
-              ? [...negativeProfile.forbiddenConstructions.slice(0, 12), ...negativeProfile.aiNgrams.slice(0, 8)]
-              : [],
-            [...new Set(detectAiTells(current).map((hit) => hit.label))],
-          )
-        : buildMicroImperfectionsPrompt(current, [options.personaBlock, negativeGuidance].filter(Boolean).join("\n\n"));
-    try {
-      const buildRequest = (model: string) => ({
-        model,
-        systemInstruction: [
-          "Ты литературный редактор русской прозы. Верни только готовый текст.",
-          "Сохрани факты, имена, POV, события, канон и длину примерно в тех же пределах.",
-          phase === "micro-imperfections"
-            ? "Это фаза микро-несовершенств: правка точечная, без нового полирования."
-            : "Это одна фаза sepia-пайплайна: правь только то, что прямо указано задачей фазы.",
-          options.personaBlock,
-          negativeGuidance,
-        ].filter(Boolean).join("\n\n"),
-        contents: prompt,
-        temperature: phase === "lexical-diversifier" ? 0.72 : phase === "micro-imperfections" ? 0.66 : 0.68,
-        maxOutputTokens: enhancedPhaseMaxTokens(current.length),
-      });
-      const route = options.phaseGenerate?.[phase];
-      let candidateRaw: string;
-      if (route) {
-        try {
-          candidateRaw = await route.generate(buildRequest(route.model));
-        } catch (routeError) {
-          console.warn(`Enhanced sepia phase ${phase}: маршрут ${route.model} недоступен, повтор основной моделью:`, routeError);
+    let reassembled = "";
+    for (const [chunkIndex, chunk] of chunks.entries()) {
+      const beforeDiag = scoreCandidateWithEnhanced(chunk, aiTellScore(chunk), options.depth, options.genre);
+      const targetBurst = [Math.max(0.45, options.depth.minBurstiness), Math.min(0.82, Math.max(0.58, options.depth.minBurstiness + 0.18))] as [number, number];
+      const prompt = phase === "rhythm-breaker"
+        ? buildRhythmBreakerPrompt(chunk, [options.personaBlock, negativeGuidance].filter(Boolean).join("\n\n"), targetBurst)
+        : phase === "lexical-diversifier"
+          ? buildLexicalDiversifierPrompt(
+              chunk,
+              sample,
+              negativeProfile
+                ? [...negativeProfile.forbiddenConstructions.slice(0, 12), ...negativeProfile.aiNgrams.slice(0, 8)]
+                : [],
+              [...new Set(detectAiTells(chunk).map((hit) => hit.label))],
+            )
+          : buildMicroImperfectionsPrompt(chunk, [options.personaBlock, negativeGuidance].filter(Boolean).join("\n\n"));
+      try {
+        const buildRequest = (model: string) => ({
+          model,
+          systemInstruction: [
+            "Ты литературный редактор русской прозы. Верни только готовый текст.",
+            "Сохрани факты, имена, POV, события, канон и длину примерно в тех же пределах.",
+            phase === "micro-imperfections"
+              ? "Это фаза микро-несовершенств: правка точечная, без нового полирования."
+              : "Это одна фаза sepia-пайплайна: правь только то, что прямо указано задачей фазы.",
+            options.personaBlock,
+            negativeGuidance,
+          ].filter(Boolean).join("\n\n"),
+          contents: prompt,
+          temperature: phase === "lexical-diversifier" ? 0.72 : phase === "micro-imperfections" ? 0.66 : 0.68,
+          maxOutputTokens: enhancedPhaseMaxTokens(chunk.length),
+        });
+        const route = options.phaseGenerate?.[phase];
+        let candidateRaw: string;
+        if (route) {
+          try {
+            candidateRaw = await route.generate(buildRequest(route.model));
+          } catch (routeError) {
+            console.warn(`Enhanced sepia phase ${phase}: маршрут ${route.model} недоступен, повтор основной моделью:`, routeError);
+            candidateRaw = await generate(buildRequest(options.model));
+          }
+        } else {
           candidateRaw = await generate(buildRequest(options.model));
         }
-      } else {
-        candidateRaw = await generate(buildRequest(options.model));
-      }
-      const cleaned = cleanModelText(candidateRaw);
-      // Тесты удаления и возврата (sepia v0.8.0): правки, ничего не заработавшие, откатываем.
-      const candidate = cleaned ? revertUnearnedEdits(current, cleaned).text : "";
-      if (!candidate || candidate === current) continue;
-      const beforeWords = countWordsRu(current);
-      const afterWords = countWordsRu(candidate);
-      const growthCap = phase === "micro-imperfections" ? 1.12 : 1.3;
-      const shrinkFloor = beforeWords >= 80
-        ? options.route === "rewrite_detector_segments"
-          ? Math.max(40, Math.floor(beforeWords * 0.7))
-          : options.route === "generate_full_chapter"
-            ? Math.max(120, Math.floor(beforeWords * 0.8))
-            : Math.max(30, Math.floor(beforeWords * 0.55))
-        : 0;
-      if (afterWords < shrinkFloor) continue;
-      if (afterWords > Math.max(Math.ceil(beforeWords * growthCap), beforeWords + 120)) continue;
-      const afterDiag = scoreCandidateWithEnhanced(candidate, aiTellScore(candidate), options.depth, options.genre);
-      // Профиль — статистика длины фраз: на одной-двух фразах она шум, поэтому
-      // спрашиваем её только там, где есть что измерять (глава, сцена, сегмент).
-      const profileMeasurable = countSentencesForProfile(current) >= PROFILE_MIN_SENTENCES;
-      const profileGain = profileMeasurable ? humanProfileScore(candidate) - humanProfileScore(current) : 0;
-      const accept = profileGain >= 0 && (
-        afterDiag.rank <= beforeDiag.rank
-        || afterDiag.extendedAiTellScore < beforeDiag.extendedAiTellScore
-        || (phase === "rhythm-breaker" && aiTellScore(candidate).burstiness > aiTellScore(current).burstiness + 0.05)
-        || (options.route === "humanize_draft" && beforeWords < 80 && candidate !== current)
-      );
-      if (!accept) {
-        // Сплющенный вариант (короче средняя фраза, меньше разброс) отбрасываем,
-        // даже если локальный аудит им доволен: профиль фразы измерен на отчётах
-        // самого детектора, аудит с ними не совпадает.
-        if (profileGain < 0) {
-          note = `enhanced-фаза ${phase} отклонена: сплющивает фразу (профиль ${profileGain.toFixed(2)})`;
+        const cleaned = cleanModelText(candidateRaw);
+        // Тесты удаления и возврата (sepia v0.8.0): правки, ничего не заработавшие, откатываем.
+        const candidate = cleaned ? revertUnearnedEdits(chunk, cleaned).text : "";
+        // Ответ, обрезанный по длине, принимать нельзя: это половина блока вместо
+        // целого, и склейка даст обрыв в середине главы.
+        if (candidate && candidate.length < chunk.length * 0.67) {
+          appendNote(`enhanced-фаза ${phase}: ответ обрезан по длине (${candidate.length} из ${chunk.length} знаков) — блок оставлен как есть`);
+          reassembled += chunk;
+          continue;
         }
-        continue;
+        if (!candidate || candidate === chunk) {
+          reassembled += chunk;
+          continue;
+        }
+        const beforeWords = countWordsRu(chunk);
+        const afterWords = countWordsRu(candidate);
+        const growthCap = phase === "micro-imperfections" ? 1.12 : 1.3;
+        const shrinkFloor = beforeWords >= 80
+          ? options.route === "rewrite_detector_segments"
+            ? Math.max(40, Math.floor(beforeWords * 0.7))
+            : options.route === "generate_full_chapter"
+              ? Math.max(120, Math.floor(beforeWords * 0.8))
+              : Math.max(30, Math.floor(beforeWords * 0.55))
+          : 0;
+        if (afterWords < shrinkFloor || afterWords > Math.max(Math.ceil(beforeWords * growthCap), beforeWords + 120)) {
+          reassembled += chunk;
+          continue;
+        }
+        const afterDiag = scoreCandidateWithEnhanced(candidate, aiTellScore(candidate), options.depth, options.genre);
+        // Профиль — статистика длины фраз: на одной-двух фразах она шум, поэтому
+        // спрашиваем его только там, где есть что измерять (глава, сцена, сегмент).
+        const profileMeasurable = countSentencesForProfile(chunk) >= PROFILE_MIN_SENTENCES;
+        const profileGain = profileMeasurable ? humanProfileScore(candidate) - humanProfileScore(chunk) : 0;
+        const accept = profileGain >= 0 && (
+          afterDiag.rank <= beforeDiag.rank
+          || afterDiag.extendedAiTellScore < beforeDiag.extendedAiTellScore
+          || (phase === "rhythm-breaker" && aiTellScore(candidate).burstiness > aiTellScore(chunk).burstiness + 0.05)
+          || (options.route === "humanize_draft" && beforeWords < 80 && candidate !== chunk)
+        );
+        if (!accept) {
+          // Сплющенный вариант (короче средняя фраза, меньше разброс) отбрасываем,
+          // даже если локальный аудит им доволен: профиль фразы измерен на отчётах
+          // самого детектора, аудит с ними не совпадает.
+          if (profileGain < 0) {
+            appendNote(`enhanced-фаза ${phase} отклонена: сплющивает фразу (профиль ${profileGain.toFixed(2)})`);
+          }
+          reassembled += chunk;
+          continue;
+        }
+        // Тест сохранения смысла: числа и имена, которые читатель запомнил, обязаны
+        // выжить. Правка, выбросившая «Бирюсу» вместе с запахом, улучшает счёт по
+        // штампам и при этом врёт.
+        const lost = meaningLossIssues(chunk, candidate);
+        if (lost.length) {
+          appendNote(`enhanced-фаза ${phase} отклонена: ${lost.join("; ")}`);
+          reassembled += chunk;
+          continue;
+        }
+        const regressions = rewriteRegressionIssues(chunk, candidate, options.lockedNarrationPerson ?? "unknown");
+        if (regressions.length) {
+          appendNote(`enhanced-фаза ${phase} отклонена: ${regressions.join("; ")}`);
+          reassembled += chunk;
+          continue;
+        }
+        reassembled += candidate;
+        if (!phasesExecuted.includes(phase)) phasesExecuted.push(phase);
+      } catch (error) {
+        console.warn(`Enhanced sepia phase failed (${phase}, chunk ${chunkIndex + 1}):`, error);
+        reassembled += chunk;
       }
-      const regressions = rewriteRegressionIssues(current, candidate, options.lockedNarrationPerson ?? "unknown");
-      if (regressions.length) {
-        note = `enhanced-фаза отклонена: ${regressions.join("; ")}`;
-        continue;
-      }
-      current = candidate;
-      phasesExecuted.push(phase);
-    } catch (error) {
-      console.warn(`Enhanced sepia phase failed (${phase}):`, error);
     }
+    // Блоки уже несут разделители между абзацами: склейка восстанавливает исходные
+    // границы, ничего дописывать не нужно.
+    if (reassembled) current = reassembled;
+  }
+
+  // Цикл приёмки по вердикту gate. До этого вердикт влиял только на ранг кандидата
+  // (−4/+4/+10) и ни на что больше: REVIEW и FAIL проходили дальше как есть.
+  // Теперь REVIEW на последней итерации и FAIL запускают адресную правку по названным
+  // вердиктом признакам, и её результат уже идёт в конвейер.
+  const maxIterations = 3;
+  let architectureRepairs = 0;
+  let architectureFindings: ArchitectureDiagnostics["findings"] = [];
+  // Архитектура измеряется на главе, а не на абзаце: на коротком куске развязки,
+  // сети отношений и заземления просто нет, и любой вердикт там — шум. На фрагментах
+  // меньше порога цикл не крутится вовсе, иначе конвейер платил бы за вызовы модели,
+  // чтобы измерить то, чего в куске нет.
+  const architectureMeasurable = countSentencesForProfile(current) >= ARCHITECTURE_MIN_SENTENCES;
+  for (let iteration = 1; architectureMeasurable && iteration <= maxIterations; iteration += 1) {
+    const gate = runMultiDetectorGate(current, COMBINED_AI_TELL_CATALOG, mapGenreContext(options.genre), {
+      maxAiTellScore: Math.max(options.depth.scoreGate + 6, 18),
+      minParagraphCV: 0.32,
+      maxPassiveShare: 0.18,
+      minTTR200: 0.5,
+      minConnectorDiv: 0.42,
+    });
+    const architecture = architectureDiagnostics(current);
+    architectureFindings = architecture.findings;
+    if (gate.verdict === "PASS") break;
+    const isLast = iteration === maxIterations;
+    // REVIEW на последней итерации улучшать уже незачем: фиксируем вердикт честно.
+    if (isLast && gate.verdict === "REVIEW") {
+      appendNote(`gate: REVIEW на последней итерации — ${gate.details.join("; ")}`);
+      break;
+    }
+    const guidance = architectureFixBlock(architecture);
+    if (!guidance) {
+      appendNote(`gate: ${gate.verdict} — ${gate.details.join("; ")}; архитектурных правок не потребовалось`);
+      break;
+    }
+    reviewPasses += 1;
+    let repaired = "";
+    let acceptedAny = false;
+    for (const chunk of chunks) {
+      try {
+        const raw = await generate({
+          model: options.model,
+          systemInstruction: [
+            "Ты литературный редактор русской прозы. Верни только готовый текст.",
+            "Правь названную архитектурную проблему. События, факты, имена и POV не меняй.",
+            options.personaBlock,
+            negativeGuidance,
+          ].filter(Boolean).join("\n\n"),
+          contents: `${guidance}\n\nТЕКСТ:\n${chunk}`,
+          temperature: 0.7,
+          maxOutputTokens: enhancedPhaseMaxTokens(chunk.length),
+        });
+        const cleaned = cleanModelText(raw);
+        // Архитектурная правка вправе менять длину сильнее стилистической фазы,
+        // но не выбрасывать половину блока.
+        if (!cleaned || cleaned.length < chunk.length * 0.67 || cleaned.length > chunk.length * 1.5) {
+          repaired += chunk;
+          continue;
+        }
+        const before = scoreCandidateWithEnhanced(chunk, aiTellScore(chunk), options.depth, options.genre);
+        const after = scoreCandidateWithEnhanced(cleaned, aiTellScore(cleaned), options.depth, options.genre);
+        if (after.architectureScore < before.architectureScore || after.rank < before.rank) {
+          repaired += cleaned;
+          acceptedAny = true;
+        } else {
+          repaired += chunk;
+        }
+      } catch (error) {
+        console.warn("Architecture repair failed:", error);
+        repaired += chunk;
+      }
+    }
+    if (!acceptedAny) {
+      appendNote(`gate: ${gate.verdict} — архитектурная правка не дала улучшения, ${gate.details.join("; ")}`);
+      break;
+    }
+    current = repaired;
+    architectureRepairs += 1;
+    if (architectureRepairs >= 2) break;
+  }
+  if (architectureRepairs) phasesExecuted.push("micro-imperfections");
+
+  if (!phasesExecuted.length && !note) {
+    note = "enhanced-фазы не дали принятой правки — остался базовый touchup";
   }
 
   if (!phasesExecuted.length && !note) {
@@ -690,6 +922,12 @@ export async function runEnhancedSepiaPipeline(
     extendedAiTellScore: finalDiag.extendedAiTellScore,
     extendedGateVerdict: finalDiag.extendedGateVerdict,
     extendedMetrics: finalDiag.extendedMetrics!,
+    architectureScore: finalDiag.architectureScore,
+    architectureFindings: architectureFindings.map((finding) => ({
+      id: finding.id,
+      label: finding.label,
+      advice: finding.advice,
+    })),
     architectureChecksApplied: [...new Set(finalDiag.architectureChecksApplied)],
     ...(note ? { note } : {}),
   };
@@ -1011,6 +1249,7 @@ export function buildScenePrompt(
 - ЗАПРЕЩЕНЫ английские слова, латиница, транслит вроде «level», «ok», «phone», «wall», «corridor».
 - Цифры и «%» допустимы. Имена из канона — по-русски.
 - Не смешивай алфавиты в одном предложении.
+- ПРЯМАЯ РЕЧЬ РАЗМЕЧЕНА: каждая реплика — в ёлочках «…» или с тире (— Слышал?). Реплика без кавычек и без тире — брак, кусок будет перезапрошен. Слова автора внутри реплики — тоже в ёлочках: — Сруби свет, — сказал он.
 ${povDirective ? `\n${povDirective}\n` : ""}
 ${characterNotes ? `\n${characterNotes}\n` : ""}
 Бит:
@@ -1045,12 +1284,42 @@ ${SCENE_SEPIA_MOVES}
 1. Только текст прозы на русском, без заголовка бита, без Markdown, без комментариев, без английского.
 2. Сохрани POV и факты канона. Не вводи новые сущности. Не откатывай заряд/сытость/уровень из стыка.
 3. Не используй генеративные штампы и «голос ассистента».
-4. Закончи на действии/состоянии из endsWith, без морали и резюме: последняя фраза НЕ объясняет, что всё это значило, и не подводит итог.
+4. ${endingDirective(beatIndex, beatCount)}
 5. Продвинь сюжет: новое действие/поворот, а не повтор «шёл, считал, смотрел на заряд» и не переигровка колец гл.6.
   6. Чередуй длину фраз без метронома: рядом могут стоять и короткая, и средняя, и длинная реплика, если это звучит живо. Не строй сцену из сплошных сверхкоротких фраз и не выравнивай предложения под одну длину.
 
 7. Объём этого фрагмента: ${scenePlan.minWords}–${scenePlan.maxWords} слов — одна цельная сцена, оборванная там, где кончается её событие.
 8. Сравнений («словно», «будто», «как будто», «похоже на») — не больше двух на сцену.`;
+}
+
+/**
+ * Как заканчивать сцену — по позиции, а не одним правилом на все.
+ *
+ * Раньше требование 4 («закончи на действии, без морали и резюме») стояло в каждой
+ * сцене. Правило, применённое к главе целиком, само становится шаблоном: в отчёте
+ * детектора по главе 4 девятнадцать сцен из двадцати двух закрывались фигурой
+ * «герой сделал X, и Y» — ровно тем, чего правило требовало. Теперь крючок назначается
+ * детерминированно: второй бит и предпоследний, а остальные закрываются иначе, и
+ * модель каждый раз получает конкретную инструкцию, а не общее «не подводи итог».
+ */
+export function endingDirective(beatIndex: number, beatCount: number): string {
+  const isSecond = beatIndex === 1;
+  const isPenultimate = beatCount > 2 && beatIndex === beatCount - 2;
+  if (isSecond || isPenultimate) {
+    const where = isSecond ? "второй" : "предпоследний";
+    return `${where} бит главы — оставь крючок: закончи на действии или на том, что герой заметил. Ни морали, ни резюме, ни „это значило, что…“.`;
+  }
+  if (beatIndex === 0) {
+    return "Первый бит главы закрой на реплике или на предмете в руках — не на итоге и не на обобщении.";
+  }
+  return [
+    "Этот бит закрой НЕ крючком и не итогом. Варианты, выбери один по ситуации:",
+    "— оборвать на действии, которое читатель не успел додумать;",
+    "— оставить героя с недосказанной репликой;",
+    "— закрыть на предмете или детали мира, которую он заметил;",
+    "— закончить сцену в середине жеста, без объяснения.",
+    "Мораль, обобщение и фраза «это значило, что…» запрещены в любом случае.",
+  ].join("\n");
 }
 
 /** Краткие заметки anti-repeat по уже написанным сценам. */
@@ -2151,6 +2420,14 @@ export async function generateScenesDraft(
         console.warn(`Scene ${index + 1} cand ${candidateIndex + 1}: narration person switched, retry…`);
         continue;
       }
+      // Неразмеченная прямая речь — не стилистическая придирка, а поломка формата:
+      // сцена без кавычек и тире выпадает из диалога целиком, и дальше по ней
+      // неверно считаются ритм, стаккато и доля реплик. Такой кусок перезапрашиваем.
+      const speechUnmarked = speechFormattingIssue(cleaned);
+      if (speechUnmarked) {
+        console.warn(`Scene ${index + 1} cand ${candidateIndex + 1}: speech not marked, retry…`);
+        continue;
+      }
       // Мягкие проверки. За них сцену не выбрасываем — глава оборвалась бы на полпути,
       // но две первые попытки перезапрашиваем с названным нарушением.
       // «hard» переименован в quota: всё, что сюда попадает, — это потолки реакций
@@ -2422,6 +2699,9 @@ export async function generateHumanizedChapter(
       dialogueShare: after.dialogueShare,
       shortShare: after.shortShare,
       maxShortChain: after.maxShortChain,
+      openerClassShare: after.openerClassShare,
+      speechMarkedShare: after.speechMarkedShare,
+      speechUnmarked: after.speechUnmarked,
       gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
       passesRun: enhanced.reviewPasses + touchup.passesRun,
       sepiaRoute: "generate_full_chapter",
@@ -2430,6 +2710,16 @@ export async function generateHumanizedChapter(
       enhancedScoreUsed: true,
       phasesExecuted: enhanced.phasesExecuted,
       negativeProfileUsed: enhanced.negativeProfileUsed,
+      // Балл выше — локальная гипотеза, а не результат внешнего детектора. В отчёте
+      // по главе 4 локальный аудит давал 13/100 при вердикте 22 сегмента из 22 «AI»,
+      // поэтому утверждать «очеловечено» без прогона внешнего детектора нельзя.
+      detectorHypothesised: true,
+      architectureScore: finalDiagnostics.architectureScore,
+      architectureFindings: architectureDiagnostics(finalHygiene.text).findings.map((finding) => ({
+        id: finding.id,
+        label: finding.label,
+        advice: finding.advice,
+      })),
       architectureChecksApplied: finalDiagnostics.architectureChecksApplied,
       replanTriggered,
       extendedAiTellScore: finalDiagnostics.extendedAiTellScore,
@@ -2518,6 +2808,8 @@ export async function rewriteDetectorAiSegments(
         enhancedScoreUsed: true,
         phasesExecuted: [],
         negativeProfileUsed: false,
+        architectureScore: 0,
+        architectureFindings: [],
         architectureChecksApplied: [],
         replanTriggered: false,
         extendedAiTellScore: scoreCandidateWithEnhanced(hygiene.text, after, depth, undefined).extendedAiTellScore,
@@ -2641,6 +2933,16 @@ export async function rewriteDetectorAiSegments(
       enhancedScoreUsed: true,
       phasesExecuted: [],
       negativeProfileUsed: false,
+      // Балл выше — локальная гипотеза, а не результат внешнего детектора. В отчёте
+      // по главе 4 локальный аудит давал 13/100 при вердикте 22 сегмента из 22 «AI»,
+      // поэтому утверждать «очеловечено» без прогона внешнего детектора нельзя.
+      detectorHypothesised: true,
+      architectureScore: finalDiagnostics.architectureScore,
+      architectureFindings: architectureDiagnostics(finalText).findings.map((finding) => ({
+        id: finding.id,
+        label: finding.label,
+        advice: finding.advice,
+      })),
       architectureChecksApplied: finalDiagnostics.architectureChecksApplied,
       replanTriggered: false,
       extendedAiTellScore: finalDiagnostics.extendedAiTellScore,
@@ -2708,6 +3010,16 @@ export async function rewriteDetectorAiSegments(
       enhancedScoreUsed: true,
       phasesExecuted: enhanced.phasesExecuted,
       negativeProfileUsed: enhanced.negativeProfileUsed,
+      // Балл выше — локальная гипотеза, а не результат внешнего детектора. В отчёте
+      // по главе 4 локальный аудит давал 13/100 при вердикте 22 сегмента из 22 «AI»,
+      // поэтому утверждать «очеловечено» без прогона внешнего детектора нельзя.
+      detectorHypothesised: true,
+      architectureScore: finalDiagnostics.architectureScore,
+      architectureFindings: architectureDiagnostics(finalHygiene.text).findings.map((finding) => ({
+        id: finding.id,
+        label: finding.label,
+        advice: finding.advice,
+      })),
       architectureChecksApplied: finalDiagnostics.architectureChecksApplied,
       replanTriggered: false,
       extendedAiTellScore: finalDiagnostics.extendedAiTellScore,
@@ -2784,6 +3096,16 @@ export async function humanizeProseDraft(
       enhancedScoreUsed: true,
       phasesExecuted: enhanced.phasesExecuted,
       negativeProfileUsed: enhanced.negativeProfileUsed,
+      // Балл выше — локальная гипотеза, а не результат внешнего детектора. В отчёте
+      // по главе 4 локальный аудит давал 13/100 при вердикте 22 сегмента из 22 «AI»,
+      // поэтому утверждать «очеловечено» без прогона внешнего детектора нельзя.
+      detectorHypothesised: true,
+      architectureScore: finalDiagnostics.architectureScore,
+      architectureFindings: architectureDiagnostics(finalHygiene.text).findings.map((finding) => ({
+        id: finding.id,
+        label: finding.label,
+        advice: finding.advice,
+      })),
       architectureChecksApplied: finalDiagnostics.architectureChecksApplied,
       replanTriggered: false,
       extendedAiTellScore: finalDiagnostics.extendedAiTellScore,

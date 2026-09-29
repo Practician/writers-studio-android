@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  AI_TELL_CATALOG,
+  AI_TELL_CATALOG_V2_EXTRA,
   aiTellScore,
   blockQualityIssues,
   changedBlockShare,
@@ -15,6 +17,8 @@ import {
   quantitativeVoiceBlock,
   repeatedNgramShare,
   repeatedOpenerShare,
+  openerClassShare,
+  speechFormattingStats,
   resolveHumanizeDepth,
   rhythmIssues,
   sentenceBurstiness,
@@ -128,8 +132,71 @@ test("repeated sentence openers are measured", () => {
   assert.equal(repeatedOpenerShare(varied), 0);
 });
 
-test("ai-tell score is bounded and orders texts sensibly", () => {
-  const robotic = "Это был не просто дом. Волна страха накрыла её с пугающей скоростью. Время словно остановилось в тот самый момент. Повисла гробовая тишина перед лицом опасности.";
+test("opener class share sees pronoun and name openers even without adjacent repeats", () => {
+  // Так выглядела глава 4: «он / Илья / Васька» в трети предложений, но не подряд —
+  // соседних повторов здесь почти нет, и прежняя метрика давала 1 %.
+  const machine = [
+    "Он поднялся и пошёл к стене, где Илья уже ждал с ножом.",
+    "Илья увидел ровный шов и остановился, а Васька подался вперёд.",
+    "Васька присел, прислушался и замер, пока Илья смотрел в темноту.",
+    "Он достал нож из ножен и передал его Ваське.",
+    "Илья обернулся к брату, но тот уже ушёл к спуску.",
+    "Васька отшатнулся и вытер руки о штаны.",
+    "Он снова приложил ухо к камню, и Илья не стал его одёргивать.",
+    "Илья потянулся к плите, на ходу соображая, куда ведёт щель.",
+    "Васька вытер нож о штанину, а Илья уже спускался по ступеням.",
+  ].join(" ");
+  assert.ok(repeatedOpenerShare(machine) < 0.2, "соседних повторов почти нет");
+  assert.ok(openerClassShare(machine) > 0.6, `класс зачинов должен быть высоким, получено ${openerClassShare(machine)}`);
+
+  const varied = [
+    "Марта пнула калитку.",
+    "Заскрипело, и из сеней потянуло сыростью.",
+    "Кто-то откашлялся за забором.",
+    "До вечера оставалось часа четыре.",
+    "Табуретка поехала с пола.",
+    "В огороде бухнуло ведро.",
+    "Скрипнул забор, и лёгкий ветер обогнул крыльцо.",
+  ].join(" ");
+  assert.ok(openerClassShare(varied) <= 0.25);
+
+  const machineScore = aiTellScore(machine).score;
+  const variedScore = aiTellScore(varied).score;
+  assert.ok(machineScore > variedScore, "однородные зачины должны понижать оценку текста");
+});
+
+test("прямая речь без кавычек и тире считается браком", () => {
+  // Случай главы 4: 18 речевых тегов, 17 реплик без разметки.
+  const unmarked = [
+    "Ну, теперь хотя бы с голоду не помрем, буркнул Илья, выуживая нож.",
+    "Слышал, шепотом спросил он, глядя в темноту.",
+    "Не природа, тут ты прав, пробормотал Илья, потирая затылок.",
+    "Иль, тут покрытие, прошептал Васька, ведя лучом по стене.",
+    "Ну, приплыли, буркнул Илья, не опуская ножа.",
+  ].join(" ");
+  const stats = speechFormattingStats(unmarked);
+  assert.equal(stats.tagged, 5);
+  assert.equal(stats.unmarked, 5);
+  assert.equal(stats.markedShare, 0);
+
+  const marked = [
+    "— Слышал? — шепотом спросил он, глядя в темноту.",
+    "«Не природа, — пробормотал Илья, — тут ты прав».",
+    "— Ну, приплыли, — буркнул Илья, не опуская ножа.",
+    "— Иль, тут покрытие, — прошептал Васька.",
+  ].join(" ");
+  const markedStats = speechFormattingStats(marked);
+  assert.equal(markedStats.unmarked, 0);
+  assert.equal(markedStats.markedShare, 1);
+
+  // Нарратив без речи проверку не трогает — иначе штраф был бы всюду.
+  const narration = "Пещера встретила их сырым запахом камня. Илья сбросил вязанку дров.";
+  assert.equal(speechFormattingStats(narration).tagged, 0);
+
+  assert.ok(aiTellScore(unmarked).score > aiTellScore(marked).score);
+});
+
+test("ai-tell score is bounded and orders texts sensibly", () => {  const robotic = "Это был не просто дом. Волна страха накрыла её с пугающей скоростью. Время словно остановилось в тот самый момент. Повисла гробовая тишина перед лицом опасности.";
   const human = "Дом стоял косо, как забытая на веранде табуретка. Марта пнула калитку. Заскрипело. Где-то внизу, под террасой, завозилась соседская такса, и ей вдруг стало смешно от собственного страха.";
   const roboticScore = aiTellScore(robotic);
   const humanScore = aiTellScore(human);
@@ -336,4 +403,44 @@ test("chapter prompt builders include canon and beat focus", () => {
   const full = buildSingleChapterPrompt(input, "few-shot");
   assert.ok(full.includes("few-shot"));
   assert.ok(full.includes("Правило левой руки"));
+});
+
+test("ни один штамп каталога не содержит мёртвого якоря \\b после кириллицы", () => {
+  // `\b` опирается на `\w`, а `\w` в JS — только ASCII. Якорь вплотную к русскому
+  // слову не срабатывает НИКОГДА: запись видна в UI, но не приносит попаданий.
+  // В каталоге так были 24 записи из 186: «Между тем», «вдруг», «правда была
+  // проста», «силой воли», «считал шаги» и другие. Границы слова задаются
+  // явным lookahead (?![а-яёa-z]).
+  const dead = [...AI_TELL_CATALOG, ...AI_TELL_CATALOG_V2_EXTRA].filter((entry) => {
+    const source = entry.pattern.source;
+    return /[а-яё][а-яё]{2,}\)?\\b/iu.test(source) || (/\\b/u.test(source) && /[а-яё]\]/u.test(source));
+  });
+  assert.deepEqual(dead.map((entry) => entry.id), []);
+});
+
+test("починенные штампы действительно ловят свой текст", () => {
+  // Регрессия на конкретные записи: якорь починен, но сама альтернатива могла
+  // при этом отвалиться — проверяем попадание, а не только source.
+  const probes: Array<[string, string]> = [
+    ["mezhdu-tem", "Между тем он молчал."],
+    ["tem-vremenem", "Тем временем свет погас."],
+    ["vmeste-s-tem", "Он вместе с тем ушёл."],
+    ["ne-daleko-ot", "Неподалёку показалась стена."],
+    ["chto-kasaetsya", "Это, что касается его, не помогло."],
+    ["pravda-byla-prosta", "Правда была проста."],
+    ["stalo-ochevidno", "Стало очевидно, что он прав."],
+    ["sila-voli", "Силой воли он поднялся."],
+    ["vo-vsyom-vinom", "Во всём виноват был он."],
+    ["on-on-on-chain", "Он молчал. Он кивнул. Он вышел."],
+    ["vdrug-vnezapno", "Вдруг он оглянулся."],
+    ["counting-steps", "Он шёл, шаг считал на автомате."],
+    ["eto-bylo-ne", "Это было не просто письмо. Это был вызов."],
+  ];
+  const all = [...AI_TELL_CATALOG, ...AI_TELL_CATALOG_V2_EXTRA];
+  for (const [id, text] of probes) {
+    const entry = all.find((item) => item.id === id);
+    assert.ok(entry, `запись ${id} должна существовать в каталоге`);
+    const live = new RegExp(entry!.pattern.source, entry!.pattern.flags.includes("g") ? entry!.pattern.flags : `${entry!.pattern.flags}g`);
+    assert.ok(live.test(text), `«${id}» должен ловить: ${text}`);
+  }
 });

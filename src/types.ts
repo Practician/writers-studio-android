@@ -125,6 +125,10 @@ export interface HumanizeReport {
   sepiaRoute?: string;
   reviewPasses?: number;
   recreatePasses?: number;
+  /** Доля зачинов «он / имя героя / это» и разметка прямой речи в финальном тексте. */
+  openerClassShare?: number;
+  speechMarkedShare?: number;
+  speechUnmarked?: number;
   enhancedScoreUsed?: boolean;
   phasesExecuted?: string[];
   negativeProfileUsed?: boolean;
@@ -132,6 +136,11 @@ export interface HumanizeReport {
   replanTriggered?: boolean;
   extendedAiTellScore?: number;
   extendedGateVerdict?: "PASS" | "REVIEW" | "FAIL";
+  /** Архитектурный балл StoryScope и признаки с подсказкой правки. */
+  architectureScore?: number;
+  architectureFindings?: Array<{ id: string; label: string; advice: string }>;
+  /** Балл локальный: внешний детектор не запускался. */
+  detectorHypothesised?: boolean;
   extendedMetrics?: {
     paragraphLengthCV: number;
     passiveVoiceShare: number;

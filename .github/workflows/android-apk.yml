@@ -3,14 +3,52 @@ name: Android APK
 on:
   push:
     branches: [master, main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# Новый пуш отменяет незавершённый прогон той же ветки: иначе при серии коммитов
+# в Releases попадают несколько сборок, и последняя из них не обязана быть свежей.
+concurrency:
+  group: apk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  check:
+    name: Проверки
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@v4
+
+      - name: Настроить Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Установить зависимости
+        run: npm ci
+
+      # Линт здесь именно `tsc --noEmit` (npm run lint). Проверка типов ловит
+      # ошибки конвейера очеловечивания раньше, чем они дойдут до сборки APK:
+      # в этом же прогоне падали несовместимые сигнатуры в server/chapterGenerate.ts.
+      - name: Проверить TypeScript
+        run: npm run lint
+
+      - name: Запустить тесты
+        run: npm test
+
   build-apk:
-    name: Проверка и APK
+    name: APK
+    needs: check
+    # На pull_request собираем, но не публикуем: подпись и релиз имеют смысл
+    # только для кода, уже попавшего в основную ветку.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -33,12 +71,6 @@ jobs:
 
       - name: Установить зависимости
         run: npm ci
-
-      - name: Проверить TypeScript
-        run: npm run lint
-
-      - name: Запустить тесты
-        run: npm test
 
       - name: Собрать web bundle внутри APK
         run: npm run build
@@ -93,7 +125,7 @@ jobs:
             KIND="подписанная release-сборка (постоянный ключ)"
           else
             cp android/app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
-            KIND="debug-сборка"
+            KIND="debug-сборка (ключ подписи не задан в secrets)"
           fi
           echo "name=$APK_NAME" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
@@ -108,7 +140,6 @@ jobs:
           retention-days: 14
 
       - name: Опубликовать APK в GitHub Releases
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: v${{ steps.apk.outputs.version }}-build-${{ github.run_number }}
