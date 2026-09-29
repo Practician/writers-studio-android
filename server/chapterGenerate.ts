@@ -48,6 +48,7 @@ import {
   modelFingerprintGuidance,
 } from "./humanStyle";
 import { sanitizeGeneratedText, type TextHygieneReport } from "./textHygiene";
+import { revertUnearnedEdits } from "./editRevert";
 import { filterByPairJudge, stripEditorNoise, type PairJudgeConfig, type PairJudgeStats } from "./pairJudge";
 import { computeStyleStats } from "../src/lib/authorAudit";
 
@@ -554,6 +555,8 @@ function enhancedPhaseMaxTokens(charLength: number): number {
   return Math.max(6_144, Math.min(16_000, Math.ceil(charLength / 2) + 1_024));
 }
 
+export type PhaseGenerateMap = Partial<Record<SepiaPhaseName, { generate: GenerateFn; model: string }>>;
+
 export async function runEnhancedSepiaPipeline(
   text: string,
   generate: GenerateFn,
@@ -565,6 +568,9 @@ export async function runEnhancedSepiaPipeline(
     depth: HumanizeDepthConfig;
     authorSample?: string;
     lockedNarrationPerson?: NarrationPerson;
+    /** Отдельный генератор и модель для фазы (например, другой провайдер для лексической фазы).
+     *  Если вызов по такому маршруту падает, фаза один раз повторяется обычным генератором. */
+    phaseGenerate?: PhaseGenerateMap;
   },
 ): Promise<EnhancedPipelineResult> {
   let current = text.trim();
@@ -597,8 +603,8 @@ export async function runEnhancedSepiaPipeline(
           )
         : buildMicroImperfectionsPrompt(current, [options.personaBlock, negativeGuidance].filter(Boolean).join("\n\n"));
     try {
-      const candidateRaw = await generate({
-        model: options.model,
+      const buildRequest = (model: string) => ({
+        model,
         systemInstruction: [
           "Ты литературный редактор русской прозы. Верни только готовый текст.",
           "Сохрани факты, имена, POV, события, канон и длину примерно в тех же пределах.",
@@ -612,7 +618,21 @@ export async function runEnhancedSepiaPipeline(
         temperature: phase === "lexical-diversifier" ? 0.72 : phase === "micro-imperfections" ? 0.66 : 0.68,
         maxOutputTokens: enhancedPhaseMaxTokens(current.length),
       });
-      const candidate = cleanModelText(candidateRaw);
+      const route = options.phaseGenerate?.[phase];
+      let candidateRaw: string;
+      if (route) {
+        try {
+          candidateRaw = await route.generate(buildRequest(route.model));
+        } catch (routeError) {
+          console.warn(`Enhanced sepia phase ${phase}: маршрут ${route.model} недоступен, повтор основной моделью:`, routeError);
+          candidateRaw = await generate(buildRequest(options.model));
+        }
+      } else {
+        candidateRaw = await generate(buildRequest(options.model));
+      }
+      const cleaned = cleanModelText(candidateRaw);
+      // Тесты удаления и возврата (sepia v0.8.0): правки, ничего не заработавшие, откатываем.
+      const candidate = cleaned ? revertUnearnedEdits(current, cleaned).text : "";
       if (!candidate || candidate === current) continue;
       const beforeWords = countWordsRu(current);
       const afterWords = countWordsRu(candidate);
@@ -2215,6 +2235,7 @@ export async function generateScenesDraft(
 export async function generateHumanizedChapter(
   input: ChapterGenerateInput,
   generate: GenerateFn,
+  extra: { phaseGenerate?: PhaseGenerateMap } = {},
 ): Promise<ChapterGenerateResult> {
   const depth = resolveHumanizeDepth(input.humanizeDepth);
   const sample = typeof input.authorSample === "string" ? input.authorSample.trim() : "";
@@ -2348,6 +2369,7 @@ export async function generateHumanizedChapter(
     depth,
     authorSample: sample,
     lockedNarrationPerson: chosenMeta.narrationPerson,
+    phaseGenerate: extra.phaseGenerate,
   });
   noteStep("литературный проход (доводка аудита)");
   const touchup = await runTouchupPipeline(enhanced.text, countedGenerate, {
@@ -2457,6 +2479,7 @@ export async function rewriteDetectorAiSegments(
     /** Строгий режим: HUMAN-сегменты дословно, без глобальных фаз sepia и доводки по всему тексту.
      *  По умолчанию выключен — работает прежний конвейер (sepia + доводка по склейке). */
     strictHuman?: boolean;
+    phaseGenerate?: PhaseGenerateMap;
   },
 ): Promise<{ text: string; blocks: string[]; humanizeReport: HumanizePipelineReport; rewrittenCount: number }> {
   if (!Array.isArray(segments) || !segments.length) {
@@ -2643,6 +2666,7 @@ export async function rewriteDetectorAiSegments(
     personaBlock: options.personaBlock || "",
     depth,
     lockedNarrationPerson,
+    phaseGenerate: options.phaseGenerate,
   });
   // Лёгкий touchup только на склеенном результате — но без раздувания: один round, мало блоков
   const touchup = await runTouchupPipeline(enhanced.text, generate, {
@@ -2710,6 +2734,7 @@ export async function humanizeProseDraft(
     personaBlock: string;
     humanizeDepth?: HumanizeDepth | string;
     pairJudge?: PairJudgeConfig;
+    phaseGenerate?: PhaseGenerateMap;
   },
 ): Promise<{ text: string; humanizeReport: HumanizePipelineReport }> {
   const depth = resolveHumanizeDepth(options.humanizeDepth ?? "fast");
@@ -2721,6 +2746,7 @@ export async function humanizeProseDraft(
     personaBlock: options.personaBlock,
     depth,
     lockedNarrationPerson,
+    phaseGenerate: options.phaseGenerate,
   });
   const touchup = await runTouchupPipeline(enhanced.text, generate, {
     model: options.model,

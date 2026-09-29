@@ -18,6 +18,10 @@ import {
 import type { GenreContext } from "../../server/humanStyleEnhanced";
 import { sanitizeGeneratedText } from "../../server/textHygiene";
 import { createPairJudgeStats, type PairJudgeConfig } from "../../server/pairJudge";
+import type { PhaseGenerateMap } from "../../server/chapterGenerate";
+
+/** Маршрутизация фаз sepia на другого провайдера (см. buildPhaseGenerate). false = всё на основной модели. */
+const PHASE_MODEL_ROUTING = true;
 import {
   countWordsRu,
   generateHumanizedChapter,
@@ -1568,6 +1572,41 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
     return [persona, adaptive].filter(Boolean).join("\n\n");
   })();
 
+  // Лексическая фаза sepia идёт моделью ДРУГОГО провайдера, если у него есть ключ.
+  // Полный текст трижды переписывала одна и та же модель, а по данным журнала 29.09.2026
+  // это была резервная lite-модель Gemini (липкость цепочки к последней удачной). Второй
+  // провайдер и снимает зависимость от квоты Gemini, и размывает отпечаток одной модели.
+  // Выключатель: PHASE_MODEL_ROUTING ниже (в интерфейсе переключателя нет).
+  const buildPhaseGenerate = (): PhaseGenerateMap | undefined => {
+    if (!PHASE_MODEL_ROUTING || body?.phaseModels === false) return undefined;
+    let writer: Exclude<DirectProvider, "auto">;
+    try {
+      writer = selectProvider(credentials.provider, credentials.keys, credentials.model);
+    } catch {
+      return undefined;
+    }
+    const other = pickRewriteProvider(writer, credentials.keys);
+    if (other === "auto" || other === writer) return undefined;
+    const otherModel = defaultModel(other);
+    return {
+      "lexical-diversifier": {
+        model: otherModel,
+        generate: (params) => directGenerate({
+          provider: other,
+          model: otherModel,
+          apiKeys: credentials.keys,
+          signal: init?.signal,
+          system: params.systemInstruction,
+          prompt: params.contents,
+          temperature: params.temperature,
+          maxTokens: params.maxOutputTokens ?? maxTokensForAction(body?.action),
+          json: params.responseMimeType === "application/json",
+          timeoutMs: params.timeoutMs,
+        }),
+      },
+    };
+  };
+
   // Слепой парный судья «какой из двух написал человек» (server/pairJudge.ts).
   // Судить лучше моделью другого провайдера, чем та, что писала правку: собственный
   // токен-профиль автору не виден. Если ключ один — судит тот же провайдер.
@@ -1657,6 +1696,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             humanizeDepth: normalizeHumanizeDepth(body?.humanizeDepth, "maximum"),
             pairJudge: buildPairJudge(),
             strictHuman: body?.strictHuman === true,
+            phaseGenerate: buildPhaseGenerate(),
           },
         );
         return json({
@@ -1692,7 +1732,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           chapterCandidates: typeof body?.chapterCandidates === "number" ? body.chapterCandidates : undefined,
           model: credentials.model || "",
         };
-        const generated = await generateHumanizedChapter(input, pipelineGenerate);
+        const generated = await generateHumanizedChapter(input, pipelineGenerate, { phaseGenerate: buildPhaseGenerate() });
         const words = countGeneratedWords(generated.text);
         const humanizedSegments = generated.humanizeReport.scenesGenerated || 1;
         const topupScenes = generated.humanizeReport.topupScenes || 0;
@@ -1817,6 +1857,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             personaBlock: pipelinePersonaBlock,
             humanizeDepth: depth,
             pairJudge: buildPairJudge(),
+            phaseGenerate: buildPhaseGenerate(),
           });
           const polishedWords = countGeneratedWords(polished.text);
           // Постпроход иногда разгоняет текст (лишние сравнения/описания — обвес,
