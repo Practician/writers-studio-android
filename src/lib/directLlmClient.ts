@@ -1571,9 +1571,10 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
   // Слепой парный судья «какой из двух написал человек» (server/pairJudge.ts).
   // Судить лучше моделью другого провайдера, чем та, что писала правку: собственный
   // токен-профиль автору не виден. Если ключ один — судит тот же провайдер.
-  // Отключается полем pairJudge: false в теле запроса.
+  // Включается полем pairJudge: true в теле запроса (по умолчанию выключен).
   const buildPairJudge = (): PairJudgeConfig | undefined => {
-    if (body?.pairJudge === false) return undefined;
+    // Судья выключен по умолчанию: включается только явным pairJudge: true в теле запроса.
+    if (body?.pairJudge !== true) return undefined;
     let writer: Exclude<DirectProvider, "auto">;
     try {
       writer = selectProvider(credentials.provider, credentials.keys, credentials.model);
@@ -1655,6 +1656,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             personaBlock: pipelinePersonaBlock,
             humanizeDepth: normalizeHumanizeDepth(body?.humanizeDepth, "maximum"),
             pairJudge: buildPairJudge(),
+            strictHuman: body?.strictHuman === true,
           },
         );
         return json({

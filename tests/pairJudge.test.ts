@@ -190,6 +190,7 @@ test("rewriteDetectorAiSegments: HUMAN дословно, полный текст
     model: "mock",
     personaBlock: "",
     humanizeDepth: "maximum",
+    strictHuman: true,
   });
 
   assert.ok(result.rewrittenCount >= 1);
@@ -202,4 +203,28 @@ test("rewriteDetectorAiSegments: HUMAN дословно, полный текст
   assert.ok(!result.text.includes("ПОЛНЫЙ ТЕКСТ"));
   assert.ok(seenPrompts.every((prompt) => prompt.includes('role="ai-segments"')));
   assert.deepEqual(result.humanizeReport.phasesExecuted, []);
+});
+
+test("rewriteDetectorAiSegments: по умолчанию работает прежний конвейер (sepia по склейке), strictHuman выключен", async () => {
+  const segments = [
+    { text: "Человеческий кусок без формул. Я сел и выпил воды, а потом долго смотрел в стену.\n\n", label: "HUMAN" },
+    { text: "Волна ужаса накрыла его, и время словно остановилось перед лицом тьмы.\n\n", label: "AI" },
+  ];
+  let fullTextCalls = 0;
+  const generate = async (params: { contents: string }) => {
+    const match = params.contents.match(/<DATA role="ai-segments">\n([\s\S]*?)\n<\/DATA>/);
+    if (match) {
+      const targets = JSON.parse(match[1]) as Array<{ text: string }>;
+      return JSON.stringify({ blocks: targets.map((t) => t.text.replace(/Волна ужаса накрыла его,?\s*/iu, "")) });
+    }
+    fullTextCalls += 1;
+    return segments.map((s) => s.text).join("");
+  };
+  const result = await rewriteDetectorAiSegments(segments, generate as any, {
+    model: "mock",
+    personaBlock: "",
+    humanizeDepth: "maximum",
+  });
+  assert.ok(fullTextCalls >= 1, "глобальные фазы по склейке должны запускаться");
+  assert.equal(result.humanizeReport.note?.includes("дословно") ?? false, false);
 });

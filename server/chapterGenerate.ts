@@ -2454,6 +2454,9 @@ export async function rewriteDetectorAiSegments(
     humanizeDepth?: HumanizeDepth | string;
     /** Слепой парный судья: правка сегмента принимается, только если она «человечнее» оригинала в обоих порядках. */
     pairJudge?: PairJudgeConfig;
+    /** Строгий режим: HUMAN-сегменты дословно, без глобальных фаз sepia и доводки по всему тексту.
+     *  По умолчанию выключен — работает прежний конвейер (sepia + доводка по склейке). */
+    strictHuman?: boolean;
   },
 ): Promise<{ text: string; blocks: string[]; humanizeReport: HumanizePipelineReport; rewrittenCount: number }> {
   if (!Array.isArray(segments) || !segments.length) {
@@ -2550,7 +2553,7 @@ export async function rewriteDetectorAiSegments(
         const raw = candidates[position];
         if (!raw) return;
         const candidate = keepEdgeWhitespace(segments[segmentIndex].text, raw);
-        if (narrationPersonMismatch(candidate, lockedNarrationPerson)) return;
+        if (options.strictHuman && narrationPersonMismatch(candidate, lockedNarrationPerson)) return;
         if (isAcceptableRewrite(segments[segmentIndex].text, candidate)) {
           passed.push({ key: segmentIndex, original: segments[segmentIndex].text, candidate });
         }
@@ -2566,6 +2569,7 @@ export async function rewriteDetectorAiSegments(
     }
   }
 
+  if (options.strictHuman) {
   // Строгий режим кнопки «переписать только AI-сегменты»: HUMAN и не принятые AI-сегменты
   // остаются в тексте дословно. Раньше склейка целиком шла через глобальные фазы sepia и
   // доводку — это вызовы модели на полном тексте, они вправе переписать любой абзац,
@@ -2627,6 +2631,72 @@ export async function rewriteDetectorAiSegments(
       ...(options.pairJudge ? { pairJudge: { ...options.pairJudge.stats } } : {}),
       foreignWordsReplaced: foreignReplaced,
       textHygiene: hygiene,
+    },
+  };
+  }
+
+  // Прежний конвейер (по умолчанию): глобальные фазы sepia и доводка по всей склейке.
+  const text = revised.join("");
+  const enhanced = await runEnhancedSepiaPipeline(text, generate, {
+    model: options.model,
+    route: "rewrite_detector_segments",
+    personaBlock: options.personaBlock || "",
+    depth,
+    lockedNarrationPerson,
+  });
+  // Лёгкий touchup только на склеенном результате — но без раздувания: один round, мало блоков
+  const touchup = await runTouchupPipeline(enhanced.text, generate, {
+    model: options.model,
+    personaBlock: options.personaBlock || "",
+    depth: {
+      ...depth,
+      maxTouchupBlocks: Math.min(8, depth.maxTouchupBlocks),
+      touchupRounds: 1,
+      bestOfN: 1,
+    },
+    lockedNarrationPerson,
+    pairJudge: options.pairJudge,
+  });
+  const hygiene = await sanitizeGeneratedText(touchup.text);
+  const foreign = await repairForeignWords(hygiene.text, generate, { model: options.model });
+  const finalHygiene = Object.keys(foreign.replaced).length ? sanitizeGeneratedText(foreign.text) : hygiene;
+  const after = aiTellScore(finalHygiene.text);
+  const finalDiagnostics = scoreCandidateWithEnhanced(finalHygiene.text, after, depth);
+
+  return {
+    text: finalHygiene.text,
+    blocks: revised,
+    rewrittenCount,
+    humanizeReport: {
+      scoreBefore: before.score,
+      scoreAfter: after.score,
+      refinedBlocks: touchup.refinedBlocks,
+      flaggedLabels: [...new Set(after.hits.map((hit) => hit.label))].slice(0, 10),
+      unresolvedLabels: touchup.unresolvedLabels,
+      burstiness: after.burstiness,
+      openerRepetition: after.openerRepetition,
+      patternDensity: after.patternDensity,
+      gatePassed: humanizeGatePassed(after, depth.scoreGate, depth.minBurstiness),
+      passesRun: enhanced.reviewPasses + touchup.passesRun + 1,
+      sepiaRoute: "rewrite_detector_segments",
+      reviewPasses: enhanced.reviewPasses + touchup.passesRun + 1,
+      recreatePasses: touchup.refinedBlocks + rewrittenCount + enhanced.phasesExecuted.length,
+      enhancedScoreUsed: true,
+      phasesExecuted: enhanced.phasesExecuted,
+      negativeProfileUsed: enhanced.negativeProfileUsed,
+      architectureChecksApplied: finalDiagnostics.architectureChecksApplied,
+      replanTriggered: false,
+      extendedAiTellScore: finalDiagnostics.extendedAiTellScore,
+      extendedGateVerdict: finalDiagnostics.extendedGateVerdict,
+      extendedMetrics: finalDiagnostics.extendedMetrics,
+      note: [enhanced.note, touchup.cleanNote].filter(Boolean).join("; ") || undefined,
+      scenesGenerated: 0,
+      depth: depth.id,
+      mode: "single",
+      detectorSegmentsRewritten: rewrittenCount,
+      ...(options.pairJudge ? { pairJudge: { ...options.pairJudge.stats } } : {}),
+      foreignWordsReplaced: foreign.replaced,
+      textHygiene: finalHygiene.report,
     },
   };
 }
