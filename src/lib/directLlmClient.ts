@@ -20,8 +20,13 @@ import { sanitizeGeneratedText } from "../../server/textHygiene";
 import { createPairJudgeStats, type PairJudgeConfig } from "../../server/pairJudge";
 import type { PhaseGenerateMap } from "../../server/chapterGenerate";
 
-/** Маршрутизация фаз sepia на другого провайдера (см. buildPhaseGenerate). false = всё на основной модели. */
-const PHASE_MODEL_ROUTING = true;
+/** Маршрутизация фаз sepia на другого провайдера (см. buildPhaseGenerate). false = всё на основной модели.
+ *  Выключено по журналу 29.09.2026: без кредитов OpenRouter модель DeepSeek отвечала 402, каскад
+ *  уходил в openrouter/free и Groq gpt-oss-120b, те отдавали обрезанные блоки (2–6 тыс. знаков из
+ *  7 тыс.), и лексическая фаза целиком (четыре блока, ~15 минут) выбрасывалась защитой по длине.
+ *  Каскад directGenerate сам меняет провайдера и не бросает ошибку, поэтому повтор основной
+ *  моделью в runEnhancedSepiaPipeline не срабатывал. */
+const PHASE_MODEL_ROUTING = false;
 import {
   countWordsRu,
   generateHumanizedChapter,
@@ -136,6 +141,11 @@ const GEMINI_HEALTH_LS = "writers_studio_gemini_health_v1";
  */
 const GEMINI_DEAD_TTL_MS = 6 * 60 * 60 * 1000;
 /** 429 — сначала короткая пауза (минутный лимит), при повторе — длинная (дневная квота). */
+/** Сколько модель, ставшая «последней удачной», удерживает голову цепочки. Без срока запасная
+ *  lite-модель, один раз ответившая при перегрузке, оставалась первой навсегда: рабочая
+ *  основная не пробовалась даже после конца её остывания (журнал 29.09.2026: весь прогон
+ *  на gemini-3.1-flash-lite при трёх ключах). */
+const GEMINI_STICKY_MS = 10 * 60 * 1000;
 const GEMINI_QUOTA_COOLDOWN_MS = 3 * 60 * 1000;
 const GEMINI_QUOTA_COOLDOWN_HARD_MS = 30 * 60 * 1000;
 /** 500/502/503/504 и пустой ответ — перегрузка: пауза на минуту. */
@@ -208,6 +218,8 @@ type GeminiModelMemory = {
   overloadHits: Record<string, number>;
   /** Модель, последней отдавшая текст: с неё начинается следующая дописка главы. */
   lastGood?: string;
+  /** Когда lastGood стала текущей (не обновляется повторными успехами): по нему липкость истекает. */
+  lastGoodSince?: number;
   /** Пауза всего ключа (дневная квота/отказ) — не путать с остыванием модели. */
   keyPauseUntil?: number;
   /** Сколько раз ключ попадался на дневной квоте: решает короткую паузу или длинную. */
@@ -462,7 +474,8 @@ function geminiModelChain(primary: string, key: string): GeminiChainPlan {
   // модель опробовалась заново каждую минуту, хотя рабочая была проверена секунду назад
   // (живой журнал 18.09.2026: 2.5-flash отдала 3841 символ, а следующая дописка снова
   // ушла на 3.7-flash и сожгла на её 503 почти минуту).
-  const preferred = memory.lastGood && available.includes(memory.lastGood) ? memory.lastGood : null;
+  const stickyFresh = Boolean(memory.lastGoodSince) && now - (memory.lastGoodSince as number) < GEMINI_STICKY_MS;
+  const preferred = stickyFresh && memory.lastGood && available.includes(memory.lastGood) ? memory.lastGood : null;
   const availableOrder = preferred ? [preferred, ...available.filter((id) => id !== preferred)] : available;
   return {
     order: exhausted ? [] : [...availableOrder, ...cooling.map((entry) => entry.model)],
@@ -503,6 +516,11 @@ function recordGeminiOutcome(key: string, model: string, status: number, ok: boo
     saveGeminiMemory();
     return;
   }
+  // Пустой ответ из-за фильтра Google (blockReason у запроса, SAFETY и подобное у кандидата) —
+  // свойство ТЕКСТА, а не перегрузки модели: копить по нему «остывание» значит на 15 минут
+  // снять с ключа все лучшие модели (журнал 29.09.2026: пустой ответ на пяти моделях подряд
+  // отправил ключ на lite до конца прогона).
+  if (ok && !hasText && geminiContentBlocked(providerMessage)) return;
   if (status === 500 || status === 502 || status === 503 || status === 504 || (ok && !hasText)) {
     const hits = (memory.overloadHits[model] ?? 0) + 1;
     memory.overloadHits[model] = hits;
@@ -527,6 +545,7 @@ function recordGeminiOutcome(key: string, model: string, status: number, ok: boo
     // Запоминаем модель, которая реально отдала текст: следующая дописка главы идёт
     // прямо на неё, а не на модель, чей минутный откат только что истёк. Без этого
     // каждая дописка начиналась с перегруженной модели и теряла на 503 до минуты.
+    if (memory.lastGood !== model) memory.lastGoodSince = now;
     memory.lastGood = model;
     if (changed) saveGeminiMemory();
   }
@@ -863,6 +882,43 @@ function finishReasonFor(payload: any): string | undefined {
   return typeof reason === "string" && reason.trim() ? reason.trim() : undefined;
 }
 
+/** Причина блокировки ЗАПРОСА фильтром Google (HTTP 200 без кандидатов и без текста). */
+function geminiBlockReason(payload: any): string | undefined {
+  const reason = payload?.promptFeedback?.blockReason;
+  return typeof reason === "string" && reason.trim() ? reason.trim() : undefined;
+}
+
+/** Пустой ответ из-за фильтра: блокировка запроса или кандидат, оборванный фильтром. */
+function geminiContentBlocked(payload: any): boolean {
+  if (geminiBlockReason(payload)) return true;
+  return /SAFETY|PROHIBITED_CONTENT|RECITATION|BLOCKLIST|SPII/i.test(String(finishReasonFor(payload) || ""));
+}
+
+/**
+ * Порядок ключей Gemini: первым идёт ключ, у которого сейчас доступна ЛУЧШАЯ модель цепочки.
+ * Раньше цикл всегда начинался с первого ключа и деградировал по моделям на нём: пока на
+ * ключе 1 отвечала хоть lite-модель, ключи 2 и 3 не трогались вовсе — при трёх ключах в
+ * журнале сплошное «ключ 1/3» и запасная модель вместо основной на свежих ключах.
+ * При равенстве порядок настроек сохраняется, а ключи без доступных моделей уходят в конец.
+ */
+function orderGeminiKeys(keys: string[], model: string): string[] {
+  if (keys.length < 2) return keys;
+  const canonical = [...new Set([model, ...GEMINI_FALLBACK_MODELS])].slice(0, GEMINI_MAX_MODEL_ATTEMPTS);
+  const worst = canonical.length * 2 + 1;
+  const now = Date.now();
+  const scored = keys.map((key, position) => {
+    if (geminiKeyPauseUntil(key) > now) return { key, position, rank: worst };
+    const plan = geminiModelChain(model, key);
+    if (plan.exhausted || !plan.order.length) return { key, position, rank: worst };
+    const head = plan.order[0];
+    const index = canonical.indexOf(head);
+    const headCooling = plan.cooling.some((item) => item.model === head);
+    return { key, position, rank: (index < 0 ? canonical.length - 1 : index) + (headCooling ? canonical.length : 0) };
+  });
+  scored.sort((left, right) => left.rank - right.rank || left.position - right.position);
+  return scored.map((entry) => entry.key);
+}
+
 function hasVisibleResponseText(payload: any): boolean {
   try {
     return responseText(payload).length > 0;
@@ -886,7 +942,9 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
   // Общий потолок поднят с 6 144 до 16 000: очеловечивание целой главы (а не
   // одного фрагмента) кириллицей нуждается в заметно большем бюджете вывода.
   const maxTokens = Math.max(128, Math.min(request.maxTokens ?? 2_048, 16_000));
-  const keyPool = splitApiKeyPool(request.apiKeys?.[provider]);
+  const keyPool = provider === "gemini"
+    ? orderGeminiKeys(splitApiKeyPool(request.apiKeys?.[provider]), model)
+    : splitApiKeyPool(request.apiKeys?.[provider]);
   // Ключи, про которые уже известно, что они на паузе (дневная квота/отказ), не
   // пробуем заново. Снимок делается один раз до цикла: внутри одного запроса
   // порядок ключей не меняется, а следующий запрос начнёт с рабочих ключей.
@@ -967,23 +1025,27 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     }
   }
 
-  for (let index = 0; index < keyPool.length; index += 1) {
-    const key = keyPool[index];
+  // Пропуск снятых ключей объясняем в журнале ОДИН раз в начале запроса: с сортировкой по
+  // лучшей модели такие ключи стоят в конце и до них цикл может не дойти, а автор должен
+  // видеть причину и срок так же, как раньше.
+  keyPool.forEach((key, position) => {
     if (pausedKeys.has(key)) {
       // Ключ отклонён по авторизации: запрос к нему вернёт тот же 401 — пропускаем,
       // объяснив это в журнале.
-      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, 429, `Ключ в паузе до ${timeLabel(geminiKeyPauseUntil(key))} (${geminiMemoryFor(key).pauseReason || "ключ отклонён"}): пропуск.`, { chars: 0 }));
-      continue;
-    }
-    if (modelExhaustedKeys.has(key)) {
+      emitApiTrace(traceFor(provider, model, key, position + 1, keyPool.length, 429, `Ключ в паузе до ${timeLabel(geminiKeyPauseUntil(key))} (${geminiMemoryFor(key).pauseReason || "ключ отклонён"}): пропуск.`, { chars: 0 }));
+    } else if (modelExhaustedKeys.has(key)) {
       // Дневная квота сняла все модели этого ключа: восемь вызовов впустую не нужны,
       // а автор должен видеть причину и срок, а не молчаливый пропуск.
       const plan = geminiModelChain(model, key);
       const example = plan.skipped[0];
       const resumeAt = plan.skipped.reduce((min, item) => Math.min(min, item.until), Number.POSITIVE_INFINITY);
-      emitApiTrace(traceFor(provider, model, key, index + 1, keyPool.length, 429, `Все модели Gemini сняты для этого ключа: ${example.model} — ${example.reason} до ${timeLabel(resumeAt)}. Ключ пропущен.`, { chars: 0 }));
-      continue;
+      emitApiTrace(traceFor(provider, model, key, position + 1, keyPool.length, 429, `Все модели Gemini сняты для этого ключа: ${example.model} — ${example.reason} до ${timeLabel(resumeAt)}. Ключ пропущен.`, { chars: 0 }));
     }
+  });
+
+  for (let index = 0; index < keyPool.length; index += 1) {
+    const key = keyPool[index];
+    if (pausedKeys.has(key) || modelExhaustedKeys.has(key)) continue;
     let effectiveModel = model;
     let response: Response;
     let payload: any;
@@ -1127,7 +1189,8 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       const triedModels = new Set<string>([effectiveModel]);
       const candidates = geminiOrder.slice(1).filter((id) => !triedModels.has(id));
       for (const nextModel of candidates) {
-        const needsRotation = (response.ok && !hasVisibleResponseText(payload))
+        // Блокировка запроса фильтром не зависит от модели: перебор остальных лишь тратит время.
+        const needsRotation = (response.ok && !hasVisibleResponseText(payload) && !geminiBlockReason(payload))
           || (!response.ok && shouldRotateGeminiModel(response.status));
         if (!needsRotation) break;
         triedModels.add(nextModel);
@@ -1294,11 +1357,21 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, undefined, { chars: text.length, finishReason: finishReasonFor(payload) }));
         return text;
       } catch (error: any) {
+        const blockReason = provider === "gemini" ? geminiBlockReason(payload) : undefined;
+        // Пустой ответ на всей цепочке моделей ключа без причины-фильтра: пробуем следующий
+        // ключ, а не сразу другого провайдера. (Раньше при трёх ключах Gemini журнал шёл
+        // прямо к Groq, минуя ключи 2 и 3.) Блокировка запроса от ключа не зависит.
+        if (provider === "gemini" && !blockReason && index + 1 < keyPool.length) {
+          emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `Пустой ответ на всей цепочке моделей этого ключа${finishReasonFor(payload) ? ` (${finishReasonFor(payload)})` : ""}: пробую следующий ключ Gemini.`, { chars: 0, finishReason: finishReasonFor(payload) }));
+          notifyApiKeyRotation(provider, index + 1, index + 2, keyPool.length, response.status);
+          continue;
+        }
         const nextProvider = nextFallbackProvider(triedSoFar, request.apiKeys || {});
         const exhaustedNote = provider === "nvidia" || provider === "gemini" ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
+        const blockNote = blockReason ? ` Запрос заблокирован фильтром Google (blockReason=${blockReason}): смена ключа или модели не поможет.` : "";
         const message = nextProvider
-          ? `${error?.message || `${providerLabel(provider)} не передала текст.`}${exhaustedNote} переход к ${providerLabel(nextProvider)}.`
-          : error?.message || "Успешный ответ без текста.";
+          ? `${error?.message || `${providerLabel(provider)} не передала текст.`}${blockNote}${exhaustedNote} переход к ${providerLabel(nextProvider)}.`
+          : `${error?.message || "Успешный ответ без текста."}${blockNote}`;
         const trace = traceFor(
           provider,
           effectiveModel,
@@ -1388,7 +1461,22 @@ function humanizeDirective(body: any): string {
 - Для каждого абзаца ответь, на какой вопрос он отвечает; если два абзаца подряд отвечают на один и тот же вопрос, второй переделай — противоречием, отступлением или конкретной деталью.
 - Не используй синтаксические шаблоны: перечисление из трёх и более однородных членов дважды в абзаце, причастный/деепричастный оборот после каждой второй запятой, готовые абстрактные пары («надежда и страх», «свет и тень»), двойные сравнения («словно… будто…», «не только… но и…»).
 - Сохраняй канон, факты, имена, точку зрения и события. Не объясняй применённые приёмы.
-- Образец автора и паспорт голоса выше важнее общих шаблонов. ${preset}`;
+- Образец автора и паспорт голоса выше важнее общих шаблонов.${sepiaGuardrailsBlock()}
+${preset}`;
+}
+
+/** Правила sepia, которых не хватало режиму continue/improve: три приёма на весь текст,
+ *  замена вместо вставки, нерегуляризованная прямая речь и whitelist на чистую
+ *  грамматику. Те же правила в сценовом конвейере: server/sepiaMoves.ts (план приёмов
+ *  на главу), server/chapterGenerate.ts (editMixRatios, дельта роста), server/humanStyle.ts
+ *  (20 директив, пункт 9 про чистую грамматику). Без них режим дописывания выдавал
+ *  перекормленный правилами и раздутый по длине текст. */
+function sepiaGuardrailsBlock(): string {
+  return `
+- Приёмы de-AI применяй избирательно: на весь текст 3–5 приёмов, а не по списку на каждый абзац — полный набор правил на каждой части сам по себе читается как шаблон, это новый отпечаток.
+- Правь заменой и удалением, а не добавлением (sepia меряет редакторские правки как 74% замены / 18% удаления / 8% вставок): не раздувай текст и не дописывай того, чего не было в исходнике.
+- Реплики, цитаты и заимствования не выравнивай и не регуляризуй: прямая речь — несущая конструкция, её форма не подчиняется общим шаблонам.
+- Чистая грамматика и ровный регистр — не признак ИИ: чистый абзац не переписывай, а опечатки, просторечие и лишние частицы ради «живости» не вставляй.`;
 }
 
 function needsHumanizePass(action: string, body: any): boolean {

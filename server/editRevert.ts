@@ -113,3 +113,83 @@ export function meaningLossIssues(original: string, candidate: string): string[]
 
   return issues;
 }
+
+/** Токены правки: слова без учёта регистра и пунктуации. */
+function editTokens(text: string): string[] {
+  return text.toLowerCase().match(/[\p{L}\p{N}]+(?:[-'][\p{L}\p{N}]+)*/gu) ?? [];
+}
+
+function lcsLength(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  // Две строки DP: на куске в 7–14 тысяч знаков это сотни тысяч операций, а память
+  // остаётся линейной. Полная таблица на такие куски — лишние мегабайты.
+  const width = b.length + 1;
+  let previous = new Uint32Array(width);
+  let current = new Uint32Array(width);
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j < width; j += 1) {
+      current[j] = a[i - 1] === b[j - 1] ? previous[j - 1] + 1 : Math.max(previous[j], current[j - 1]);
+    }
+    const swap = previous;
+    previous = current;
+    current = swap;
+  }
+  return previous[b.length];
+}
+
+export interface EditMix {
+  /** Доли операций среди ВСЕХ правок: replace + delete + insert = 1. */
+  replace: number;
+  delete: number;
+  insert: number;
+  /** Число правок относительно длины оригинала: 0 — правки нет. */
+  intensity: number;
+}
+
+/**
+ * Доли операций правки — локальный замер правила sepia «Deletion beats addition»:
+ * измеренное соотношение редакторских правок 74% замены / 18% удаления / 8% вставки.
+ * Текст, который модель не переписала, а дописала, набирает вставки и выдаёт себя:
+ * рост — это не ремонт (repair is not growth).
+ *
+ * Считается по LCS слов: общая префиксно-суффиксная часть вычитается сразу, дальше
+ * динамика только по изменившейся середине.
+ */
+export function editMixRatios(original: string, candidate: string): EditMix {
+  const a = editTokens(original);
+  const b = editTokens(candidate);
+  if (!a.length || !b.length) {
+    // Один из текстов без слов: правка либо целиком вставка, либо целиком удаление.
+    return {
+      replace: 0,
+      delete: a.length ? 1 : 0,
+      insert: b.length ? 1 : 0,
+      intensity: (a.length + b.length) / Math.max(1, a.length),
+    };
+  }
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+    endA -= 1;
+    endB -= 1;
+  }
+  const midA = a.slice(start, endA);
+  const midB = b.slice(start, endB);
+  const removed = midA.length;
+  const added = midB.length;
+  if (!removed && !added) return { replace: 1, delete: 0, insert: 0, intensity: 0 };
+  const common = lcsLength(midA, midB);
+  const deleted = removed - common;
+  const inserted = added - common;
+  const replaced = Math.min(deleted, inserted);
+  const totalOps = replaced + (deleted - replaced) + (inserted - replaced);
+  if (!totalOps) return { replace: 1, delete: 0, insert: 0, intensity: 0 };
+  return {
+    replace: replaced / totalOps,
+    delete: (deleted - replaced) / totalOps,
+    insert: (inserted - replaced) / totalOps,
+    intensity: totalOps / Math.max(1, a.length),
+  };
+}

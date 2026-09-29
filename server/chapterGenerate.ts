@@ -49,8 +49,25 @@ import {
   NARRATIVE_ARCHITECTURE_CHECKLIST,
   modelFingerprintGuidance,
 } from "./humanStyle";
+import {
+  ARCHITECTURE_MOVE_CATALOG,
+  SCENE_MOVE_CATALOG,
+  architectureMovesBlock,
+  buildChapterMovePlan,
+  moveCatalogPrompt,
+  movePlanSummary,
+  requestedMovesFromPlan,
+  sceneMoveBlock,
+  type ChapterMovePlan,
+} from "./sepiaMoves";
+import {
+  rubricDefectBlock,
+  rubricSummary,
+  runSepiaRubric,
+  type RubricReport,
+} from "./sepiaRubric";
 import { sanitizeGeneratedText, type TextHygieneReport } from "./textHygiene";
-import { meaningLossIssues, revertUnearnedEdits } from "./editRevert";
+import { editMixRatios, meaningLossIssues, revertUnearnedEdits } from "./editRevert";
 import { filterByPairJudge, stripEditorNoise, type PairJudgeConfig, type PairJudgeStats } from "./pairJudge";
 import { computeStyleStats } from "../src/lib/authorAudit";
 
@@ -117,7 +134,9 @@ export interface HumanizePipelineReport {
   recreatePasses?: number;
   /** Включён ли расширенный scoring/gate и какие фазы реально исполнились. */
   enhancedScoreUsed?: boolean;
-  phasesExecuted?: Array<"rhythm-breaker" | "lexical-diversifier" | "micro-imperfections">;
+  phasesExecuted?: SepiaPhaseName[];
+  /** Рубрика sepia: пять групп по отдельным проходам, дефекты с обязательной цитатой. */
+  rubric?: { passes: number; defects: number; overCorrections: number; failedGroups: string[] };
   negativeProfileUsed?: boolean;
   architectureChecksApplied?: string[];
   replanTriggered?: boolean;
@@ -432,7 +451,9 @@ export function speechFormattingIssue(text: string): string {
  *  добранной по одному счётчику и недобранной по другому (живой прогон 20.09.2026 —
  *  цикл встал на 8 сценах, отчёт показал 3152/3300 слов). */
 type SepiaRoute = "generate_full_chapter" | "rewrite_detector_segments" | "humanize_draft";
-type SepiaPhaseName = "rhythm-breaker" | "lexical-diversifier" | "micro-imperfections";
+/** architecture-repair — проход по дефект-листу рубрики (самый глубокий слой, он же
+ *  первый по sepia). Его нет в sepiaPhasesForRoute: фазы идут ПОСЛЕ архитектуры. */
+type SepiaPhaseName = "architecture-repair" | "rhythm-breaker" | "lexical-diversifier" | "micro-imperfections";
 
 const COMBINED_AI_TELL_CATALOG = [...AI_TELL_CATALOG, ...AI_TELL_CATALOG_V2_EXTRA];
 
@@ -462,6 +483,8 @@ interface EnhancedPipelineResult {
   architectureScore: number;
   architectureFindings: Array<{ id: string; label: string; advice: string }>;
   architectureChecksApplied: string[];
+  /** Рубрика sepia: сколько групп прочитано, сколько дефектов ушло в архитектурный проход. */
+  rubric?: { passes: number; defects: number; overCorrections: number; failedGroups: string[] };
   note?: string;
 }
 
@@ -666,6 +689,84 @@ export function splitIntoPhaseChunks(text: string, limit = PHASE_CHUNK_CHARS): s
   return chunks.length ? chunks : [text];
 }
 
+/** Архитектурная правка идёт кусками в 2–3 раза длиннее стилистических: архитектура —
+ *  свойство сцены и главы, а не абзаца. Править главу кусками по 7 тысяч знаков (как
+ *  делали фазы) значит чинить форму там, где её не видно, и оставлять разные отпечатки
+ *  по кускам — это признано в комментарии к PHASE_CHUNK_CHARS. */
+const ARCHITECTURE_PHASE_CHUNK_CHARS = 14_000;
+
+/** Этап 2 протокола refactor sepia: правим по списку дефектов из рубрики и с самого
+ *  глубокого слоя. Без этого списка, как прямо предупреждает SKILL.md, paraphrasing
+ *  делает отпечатки модели заметнее, а не мягче. */
+async function runArchitectureRepair(
+  source: string,
+  report: RubricReport,
+  generate: GenerateFn,
+  options: {
+    model: string;
+    depth: HumanizeDepthConfig;
+    genre?: string;
+    personaBlock: string;
+    lockedNarrationPerson?: NarrationPerson;
+  },
+): Promise<{ text: string; accepted: boolean }> {
+  const guidance = rubricDefectBlock(report);
+  if (!guidance) return { text: source, accepted: false };
+  const chunks = splitIntoPhaseChunks(source, ARCHITECTURE_PHASE_CHUNK_CHARS);
+  let reassembled = "";
+  let acceptedAny = false;
+  for (const chunk of chunks) {
+    try {
+      const raw = await generate({
+        model: options.model,
+        systemInstruction: [
+          "Ты литературный редактор русской прозы. Верни только готовый текст.",
+          "Правь ТОЛЬКО дефекты, названные в диагностике, и только на указанном слое. События, факты, имена, POV и канон не меняй.",
+          "Правка не растягивает текст: не длиннее исходного более чем на 10%, без новых сцен и новых людей.",
+          options.personaBlock,
+        ].filter(Boolean).join("\n\n"),
+        contents: `${guidance}\n\nТЕКСТ:\n${chunk}`,
+        temperature: 0.7,
+        maxOutputTokens: enhancedPhaseMaxTokens(chunk.length),
+      });
+      const cleaned = cleanModelText(raw);
+      if (!cleaned || cleaned.length < chunk.length * 0.7 || cleaned.length > chunk.length * 1.1) {
+        reassembled += chunk;
+        continue;
+      }
+      // Дописывать вместо замены нельзя и на архитектурном слое: ремонт не растит текст.
+      if (editMixRatios(chunk, cleaned).insert > 0.3) {
+        reassembled += chunk;
+        continue;
+      }
+      // Тесты удаления и возврата: правка, ничего не заработавшая, откатывается.
+      const candidate = revertUnearnedEdits(chunk, cleaned).text;
+      const lost = meaningLossIssues(chunk, candidate);
+      if (lost.length) {
+        reassembled += chunk;
+        continue;
+      }
+      const regressions = rewriteRegressionIssues(chunk, candidate, options.lockedNarrationPerson ?? "unknown");
+      if (regressions.length) {
+        reassembled += chunk;
+        continue;
+      }
+      const before = scoreCandidateWithEnhanced(chunk, aiTellScore(chunk), options.depth, options.genre);
+      const after = scoreCandidateWithEnhanced(candidate, aiTellScore(candidate), options.depth, options.genre);
+      if (after.architectureScore < before.architectureScore || after.rank < before.rank) {
+        reassembled += candidate;
+        acceptedAny = true;
+      } else {
+        reassembled += chunk;
+      }
+    } catch (error) {
+      console.warn("Sepia architecture repair failed:", error);
+      reassembled += chunk;
+    }
+  }
+  return { text: reassembled, accepted: acceptedAny };
+}
+
 export async function runEnhancedSepiaPipeline(
   text: string,
   generate: GenerateFn,
@@ -695,13 +796,49 @@ export async function runEnhancedSepiaPipeline(
   const negativeGuidance = negativeProfile ? negativeVoiceGuidanceBlock(negativeProfile) : "";
   let note: string | undefined;
 
-  const chunks = splitIntoPhaseChunks(current);
-  const separator = /\n{2,}/u.test(current) ? "\n\n" : "\n";
   // Причина не записывается поверх уже найденной: если фаза была отклонена по
   // регрессии, вердикт gate не должен стирать объяснение, что именно сломалось.
   const appendNote = (message: string) => {
     note = note ? `${note}; ${message}` : message;
   };
+
+  // ── Этап 1: диагностика рубрикой (пять групп, каждая отдельным проходом) ────
+  // Без списка дефектов правка — это paraphrasing, который по замеру sepia делает
+  // отпечатки модели заметнее. Раньше фазы шли вслепую: стиль правился, а архитектура
+  // только мерилась (architectureAudit) и не менялась.
+  const rubricMeasurable = options.route === "generate_full_chapter"
+    && countSentencesForProfile(current) >= ARCHITECTURE_MIN_SENTENCES;
+  let rubricReport: RubricReport | null = null;
+  if (rubricMeasurable) {
+    try {
+      rubricReport = await runSepiaRubric(current, generate, { model: options.model });
+      appendNote(rubricSummary(rubricReport));
+    } catch (error) {
+      console.warn("Sepia rubric failed:", error);
+      appendNote("рубрика sepia не отработала — дальше правка без списка дефектов");
+    }
+    // ── Этап 2: архитектура первой. Самый глубокий слой чинится до поверхности. ──
+    if (rubricReport && rubricReport.defects.length) {
+      reviewPasses += 1;
+      const repaired = await runArchitectureRepair(current, rubricReport, generate, {
+        model: options.model,
+        depth: options.depth,
+        genre: options.genre,
+        personaBlock: options.personaBlock,
+        lockedNarrationPerson: options.lockedNarrationPerson,
+      });
+      if (repaired.accepted && repaired.text !== current) {
+        current = repaired.text;
+        phasesExecuted.push("architecture-repair");
+        appendNote(`архитектурная правка по рубрике: дефектов ${rubricReport.defects.length}`);
+      } else {
+        appendNote("архитектурная правка по рубрике не дала улучшения — блоки оставлены как есть");
+      }
+    }
+  }
+
+  const chunks = splitIntoPhaseChunks(current);
+  const separator = /\n{2,}/u.test(current) ? "\n\n" : "\n";
 
   for (const phase of sepiaPhasesForRoute(options.route)) {
     reviewPasses += 1;
@@ -765,7 +902,20 @@ export async function runEnhancedSepiaPipeline(
         }
         const beforeWords = countWordsRu(chunk);
         const afterWords = countWordsRu(candidate);
-        const growthCap = phase === "micro-imperfections" ? 1.12 : 1.3;
+        // sepia, Hard guardrails: «Deletion beats addition» — измеренные редакторские
+        // правки это 74% замены / 18% удаления / 8% вставок. Прежний допуск «плюс
+        // 120 слов» разрешал правке просто обвешаться: рост — не ремонт, и дописанный
+        // абзац выдаёт себя так же, как штамп.
+        const mix = editMixRatios(chunk, candidate);
+        if (mix.insert > 0.25) {
+          appendNote(
+            `enhanced-фаза ${phase} отклонена: правка дописывает вместо замены `
+            + `(вставки ${(mix.insert * 100).toFixed(0)}%, по sepia замена/удаление/вставка = 74/18/8)`,
+          );
+          reassembled += chunk;
+          continue;
+        }
+        const growthCap = phase === "micro-imperfections" ? 1.06 : 1.08;
         const shrinkFloor = beforeWords >= 80
           ? options.route === "rewrite_detector_segments"
             ? Math.max(40, Math.floor(beforeWords * 0.7))
@@ -773,7 +923,7 @@ export async function runEnhancedSepiaPipeline(
               ? Math.max(120, Math.floor(beforeWords * 0.8))
               : Math.max(30, Math.floor(beforeWords * 0.55))
           : 0;
-        if (afterWords < shrinkFloor || afterWords > Math.max(Math.ceil(beforeWords * growthCap), beforeWords + 120)) {
+        if (afterWords < shrinkFloor || afterWords > Math.max(Math.ceil(beforeWords * growthCap), beforeWords + 10)) {
           reassembled += chunk;
           continue;
         }
@@ -929,6 +1079,16 @@ export async function runEnhancedSepiaPipeline(
       advice: finding.advice,
     })),
     architectureChecksApplied: [...new Set(finalDiag.architectureChecksApplied)],
+    ...(rubricReport
+      ? {
+          rubric: {
+            passes: rubricReport.passes,
+            defects: rubricReport.defects.length,
+            overCorrections: rubricReport.overCorrections.length,
+            failedGroups: rubricReport.failedGroups,
+          },
+        }
+      : {}),
     ...(note ? { note } : {}),
   };
 }
@@ -954,6 +1114,13 @@ export const beatPlanSchema = {
       },
       minItems: MIN_SCENE_BEATS,
       maxItems: MAX_SCENE_BEATS,
+    },
+    moves: {
+      type: Type.ARRAY,
+      description: "3–5 id приёмов de-AI (из каталога в промпте), выбранных под синопсис этой главы",
+      items: { type: Type.STRING },
+      minItems: 3,
+      maxItems: 5,
     },
   },
   required: ["beats"],
@@ -1060,17 +1227,11 @@ export function topupBeatFor(beats: ChapterBeat[], index: number, wordsSoFar: nu
  *  импортирован в src/lib/directLlmClient.ts, но там не использовался ни разу. Здесь
  *  оставлены пункты, которых нет в SCENE_SEPIA_MOVES, и подаются по три за сцену со
  *  сдвигом на бит: полный набор сразу сам становится новым шаблоном. */
-export const CHAPTER_ARCHITECTURE_MOVES = [
-  "Тема: не проговаривай мораль — ни рассказчиком, ни финальным диалогом-рассуждением.",
-  "Не давай всем нитям сойтись: одну деталь оставь без разрешения, одно следствие — незакрытым.",
-  "Не веди абзацы одной цепочкой «что случилось → почему → что вышло»: одно место сцепи сравнением (тот же эпизод или человек в другой раз) либо возражением — кто-то не согласен с предыдущим абзацем.",
-  "Меняй текстуру соседних сцен: плотная сцена — потом короткая и быстрая; насыщенный диалог — потом сжатое изложение. Одну интонацию на всю главу не держи.",
-  "Упомяни что-то по-настоящему конкретное и существующее: книгу, песню, марку, место, бытовую мелочь этого мира.",
-  "Нового важного человека вводи репликой или поступком, а не описанием внешности.",
-  "Не своди развязку к «герой сам выбрал → принял случившееся → вырос»: часть решений отдай случаю, другим людям или обстоятельствам.",
-  "Не выноси герою однозначного вердикта — ни хвалы, ни осуждения: амбивалентность ближе к человеческому письму.",
-  "Между знакомыми не всё в порядке: сеть отношений не должна быть плотной и равномерно тёплой — кто-то не знаком, кто-то в ссоре.",
-];
+/** Архитектурные приёмы главы. Хранилище каталога — server/sepiaMoves.ts (там же
+ *  сценические и редкий приём): один каталог на весь конвейер, а не два списка,
+ *  расходящихся между генерацией и аудитом. Здесь — те же строки строками, потому
+ *  что отдельные вызовы и тесты ожидают массив текстов. */
+export const CHAPTER_ARCHITECTURE_MOVES = ARCHITECTURE_MOVE_CATALOG.map((move) => move.text);
 
 /** Те же три чек-листа целиком — один раз на главу, в промпт плана: ×36 вызовов сцен
  *  такой объём удорожает, а архитектура решается именно на плане. */
@@ -1082,7 +1243,12 @@ export const CHAPTER_ARCHITECTURE_FULL = [
 
 /** Три пункта архитектуры на этот бит, со сдвигом: соседние сцены получают разные
  *  тройки, и требование не превращается в один и тот же список для всей главы. */
-export function architectureNotes(beatIndex: number): string {
+/** Три пункта архитектуры на этот бит, со сдвигом: соседние сцены получают разные
+ *  тройки, и требование не превращается в один и тот же список для всей главы.
+ *  Когда передан план главы (server/sepiaMoves.ts), берутся только приёмы, назначенные
+ *  этой сцене, — на главе их 3–5 на все сцены, а не все девять вращением. */
+export function architectureNotes(beatIndex: number, movePlan?: ChapterMovePlan): string {
+  if (movePlan) return architectureMovesBlock(movePlan, beatIndex);
   const total = CHAPTER_ARCHITECTURE_MOVES.length;
   const picks = [0, 1, 2].map((step) => CHAPTER_ARCHITECTURE_MOVES[(((beatIndex + step) % total) + total) % total]);
   return `АРХИТЕКТУРА ГЛАВЫ (в этом куске — только эти три пункта, остальные не тяни):
@@ -1100,15 +1266,11 @@ export function providerOfModel(model: string): string {
   return "";
 }
 
+/** Каталог сценических приёмов строкой. Сценический конвейер этот блок больше не
+ *  подшивает в каждую сцену (там идёт sceneMoveBlock с приёмами, назначенными главе),
+ *  строка осталась для маршрутов без плана: buildSingleChapterPrompt и правки сегментов. */
 export const SCENE_SEPIA_MOVES = `АРХИТЕКТУРА СЦЕНЫ (выбери 3–5 приёмов, не все сразу — их полный набор сам по себе читается как шаблон):
-- Не объясняй смысл сцены: ни от рассказчика, ни в финальной фразе. Смысл собирается из поступков.
-- Не выстраивай цепочку «причина → следствие → вывод» без зазоров. Одну деталь оставь необъяснённой, одно следствие — незакрытым.
-- Часть сведений давай с опозданием: сначала предмет или жест, потом — что он значил. Не объявляй заранее, к чему идёт разговор.
-- Эмоцию показывай поступком, оговоркой, неверным словом. Телесная реакция (холодок, ком в горле, сердце пропустило) — не единственный способ и не чаще одного раза на сцену.
-- Называй конкретные вещи мира: марку, номер, место, цену, бытовую деталь. Абстракции («атмосфера», «энергия», «пространство») запрещены.
-- Новых людей и сущностей — не больше одного на сцену. Не заставляй переглядываться тех, кого в сцене нет.
-- Время линейно, но с пропусками: перескочи через рутину между двумя точками, а не перечисляй её.
-- Не заканчивай сцену разрешением и принятием. Закончи на действии, которое ставит следующий вопрос и оставляет героя в неудобном положении.`;
+${SCENE_MOVE_CATALOG.map((move) => `- ${move.text}`).join("\n")}`;
 
 /** Персонажи главы. Без явного списка модель подменяет адресата реплики: в живом
  *  прогоне 20.09.2026 «прошептал он мне в спину» прозвучало при обращении к Илье,
@@ -1226,6 +1388,8 @@ ${input.customPrompt ? `Пожелания автора: ${input.customPrompt}\n
 - СТРОГО по синопсису ЭТОЙ главы. Не пересказывай сюжет предыдущей (кольца «Число 20», повторная еда/заряд с нуля, если это уже было).
 - Не добавляй персонажей, технологий и локаций вне канона.
 - Никаких английских слов в title/goal/hook/endsWith.
+- Приёмы de-AI (sepia) выбираются НА ГЛАВУ, а не на каждую сцену: выбери 3–5 id под синопсис этой главы и верни их в поле moves. На все сцены главы пойдёт только это подмножество — полный список на каждой сцене сам по себе читается как шаблон. Один редкий приём (rarity) добавляется нами сам, его в moves не включай.
+${moveCatalogPrompt()}
 - Верни JSON по схеме.`;
 }
 
@@ -1239,6 +1403,7 @@ export function buildScenePrompt(
   antiRepeatNotes = "",
   povDirective = "",
   scenePlan: ScenePlan = { minWords: 350, maxWords: 520 },
+  movePlan?: ChapterMovePlan,
 ): string {
   const focus = SCENE_FOCUSES[beatIndex % SCENE_FOCUSES.length];
   const characterNotes = buildCharacterNotes(input);
@@ -1262,7 +1427,7 @@ ${characterNotes ? `\n${characterNotes}\n` : ""}
 Объём: ${scenePlan.minWords}–${scenePlan.maxWords} слов (полноценный кусок главы, не набросок). Раскрой действие и восприятие. Не добивай объём пустыми повторами и не пересказывай уже написанное.
 ${process.env.RHYTHM_RULE_OFF ? "" : (process.env.RHYTHM_RULE_OLD ? OLD_RHYTHM_RULE : RHYTHM_RULE)}
 
-${architectureNotes(beatIndex)}${modelFingerprintGuidance(providerOfModel(input.model), input.model)}
+${architectureNotes(beatIndex, movePlan)}${modelFingerprintGuidance(providerOfModel(input.model), input.model)}
 
 ${previousTail ? `Продолжай сразу после этого хвоста (не повторяй его дословно и не пересказывай теми же фразами):\n"""\n${previousTail}\n"""\n` : "Это начало главы после предыдущих событий канона.\n"}
 ${scenePlan.seamNotes ? `${scenePlan.seamNotes}\n` : ""}
@@ -1278,7 +1443,7 @@ ${input.worldBible ? `- Библия мира (фрагмент): ${input.worldB
 
 ${styleExtras}
 
-${SCENE_SEPIA_MOVES}
+${sceneMoveBlock(movePlan, beatIndex, beatCount) || SCENE_SEPIA_MOVES}
 
 Требования:
 1. Только текст прозы на русском, без заголовка бита, без Markdown, без комментариев, без английского.
@@ -2242,7 +2407,7 @@ async function planBeats(
   input: ChapterGenerateInput,
   generate: GenerateFn,
   noteStep?: (label: string) => void,
-): Promise<ChapterBeat[]> {
+): Promise<{ beats: ChapterBeat[]; moves: string[] }> {
   noteStep?.("план битов");
   try {
     const planRaw = await generate({
@@ -2254,7 +2419,10 @@ async function planBeats(
       responseSchema: beatPlanSchema,
       maxOutputTokens: 4096,
     });
-    const plan = parseJsonResponse<{ beats: ChapterBeat[] }>(planRaw, "План битов");
+    const plan = parseJsonResponse<{ beats: ChapterBeat[]; moves?: unknown }>(planRaw, "План битов");
+    // Приёмы главы: 3–5 id из каталога. Невалидные и «rarity» отбрасываются в
+    // buildChapterMovePlan — там же решается, что делать, когда модель вернула мусор.
+    const moves = requestedMovesFromPlan(plan.moves);
     if (Array.isArray(plan.beats) && plan.beats.length >= 3) {
       const kept = plan.beats.slice(0, MAX_SCENE_BEATS).map((beat) => ({
         title: String(beat.title || "Бит"),
@@ -2266,20 +2434,20 @@ async function planBeats(
       // Прежняя приёмка «≥3 битов» такой план пропускала (живой прогон 20.09.2026).
       if (kept.length >= MIN_SCENE_BEATS) {
         emitChapterStep(`План: ${kept.length} битов.`);
-        return kept;
+        return { beats: kept, moves };
       }
       emitChapterStep(
         `План дал ${kept.length} битов вместо ${MIN_SCENE_BEATS}–${MAX_SCENE_BEATS} — добираю структурными битами.`,
         "warn",
       );
-      return padBeatsToMinimum(kept, input);
+      return { beats: padBeatsToMinimum(kept, input), moves };
     }
   } catch (error) {
     emitChapterStep("План битов не распарсился — беру структурный запасной план.", "warn");
     console.warn("Beat plan JSON failed — using structured fallback beats:", error);
   }
   // Не single-pass: сцены дают ≥1500 слов; single-pass на free NIM часто обрезается.
-  return padBeatsToMinimum(fallbackBeatsFromSynopsis(input), input);
+  return { beats: padBeatsToMinimum(fallbackBeatsFromSynopsis(input), input), moves: [] };
 }
 
 export async function generateScenesDraft(
@@ -2294,6 +2462,7 @@ export async function generateScenesDraft(
   candidateIndex: number,
   candidatesN: number,
   noteStep?: (label: string) => void,
+  moveIds: string[] = [],
 ): Promise<{ draft: string; scenesGenerated: number; topupScenes: number; rejectedScenes: number; narrationPerson: NarrationPerson }> {
   const scenes: string[] = [];
   let tail = input.previousChapter ? input.previousChapter.slice(-PREVIOUS_TAIL_SCENE_CHARS) : "";
@@ -2313,6 +2482,18 @@ export async function generateScenesDraft(
   }
   const plannedBeats = beats.length;
   const maxScenes = Math.min(MAX_SCENE_BEATS, plannedBeats + MAX_TOPUP_SCENES);
+  // Приёмы sepia выбираются один раз на всю главу (server/sepiaMoves.ts) и
+  // раскладываются по сценам так, чтобы большинство сцен осталось без приёмов:
+  // прежнее «каталог в каждую сцену» давало 30–50 применений на главу, а это
+  // перекоррекция — новый отпечаток, который sepia прямо предупреждает строкой
+  // over-correction advisory. Seed одинаков на всех кандидатах: варианты черновика
+  // сравниваются при одних и тех же приёмах.
+  const movePlan = buildChapterMovePlan({
+    beatCount: maxScenes,
+    seed: `${input.title}|${input.currentChapterTitle}|${input.currentChapterSummary}|${input.genre}`,
+    requested: moveIds,
+  });
+  if (candidateIndex === 0) emitChapterStep(`Приёмы главы: ${movePlanSummary(movePlan)}.`);
   let topupScenes = 0;
   let rejectedScenes = 0;
   // Реестр случившегося: модель закрывает одно событие второй раз другими словами
@@ -2383,6 +2564,7 @@ export async function generateScenesDraft(
           antiRepeat + extra,
           povDirective,
           scenePlan,
+          movePlan,
         ),
         temperature: modelTemperature(input.model, depth.sceneTemperature, candidateIndex) + attempt * 0.03,
         // free Groq TPM: max_tokens входит в лимит; сервер ещё урежет для groq
@@ -2551,7 +2733,7 @@ export async function generateHumanizedChapter(
   const candidateMeta: Array<{ scenesGenerated: number; topupScenes: number; rejectedScenes: number; narrationPerson: NarrationPerson }> = [];
 
   if (depth.sceneGeneration) {
-    const beats = await planBeats(input, countedGenerate, noteStep);
+    const { beats, moves: chapterMoves } = await planBeats(input, countedGenerate, noteStep);
     plannedBeats = beats.length;
     if (beats.length >= 3) {
       mode = "scenes";
@@ -2573,6 +2755,7 @@ export async function generateHumanizedChapter(
           cand,
           candidatesN,
           noteStep,
+          chapterMoves,
         );
         scenesGenerated = sg;
         candidateMeta[cand] = { scenesGenerated: sg, topupScenes, rejectedScenes, narrationPerson };
@@ -2709,6 +2892,7 @@ export async function generateHumanizedChapter(
       recreatePasses: touchup.refinedBlocks + enhanced.phasesExecuted.length,
       enhancedScoreUsed: true,
       phasesExecuted: enhanced.phasesExecuted,
+      rubric: enhanced.rubric,
       negativeProfileUsed: enhanced.negativeProfileUsed,
       // Балл выше — локальная гипотеза, а не результат внешнего детектора. В отчёте
       // по главе 4 локальный аудит давал 13/100 при вердикте 22 сегмента из 22 «AI»,
@@ -3009,6 +3193,7 @@ export async function rewriteDetectorAiSegments(
       recreatePasses: touchup.refinedBlocks + rewrittenCount + enhanced.phasesExecuted.length,
       enhancedScoreUsed: true,
       phasesExecuted: enhanced.phasesExecuted,
+      rubric: enhanced.rubric,
       negativeProfileUsed: enhanced.negativeProfileUsed,
       // Балл выше — локальная гипотеза, а не результат внешнего детектора. В отчёте
       // по главе 4 локальный аудит давал 13/100 при вердикте 22 сегмента из 22 «AI»,
@@ -3095,6 +3280,7 @@ export async function humanizeProseDraft(
       recreatePasses: touchup.refinedBlocks + enhanced.phasesExecuted.length,
       enhancedScoreUsed: true,
       phasesExecuted: enhanced.phasesExecuted,
+      rubric: enhanced.rubric,
       negativeProfileUsed: enhanced.negativeProfileUsed,
       // Балл выше — локальная гипотеза, а не результат внешнего детектора. В отчёте
       // по главе 4 локальный аудит давал 13/100 при вердикте 22 сегмента из 22 «AI»,
