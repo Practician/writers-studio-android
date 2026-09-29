@@ -368,7 +368,9 @@ export default function App() {
       setLlmLogs((prev) => [...prev, {
         level: "warn",
         provider: detail.provider,
-        message: `Лимит HTTP ${detail.status || 0}: переключение ключа ${detail.from}/${detail.total} → ${detail.to}/${detail.total}.`,
+        message: detail.status === 400 || detail.status === 401 || detail.status === 403
+          ? `Ключ отклонён (HTTP ${detail.status}): переключение ключа ${detail.from}/${detail.total} → ${detail.to}/${detail.total}.`
+          : `Лимит HTTP ${detail.status || 0}: переключение ключа ${detail.from}/${detail.total} → ${detail.to}/${detail.total}.`,
         ts: Date.now(),
       }].slice(-40));
       setShowLlmLog(true);

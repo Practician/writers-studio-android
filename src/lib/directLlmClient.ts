@@ -410,8 +410,9 @@ function releaseGeminiKey(key: string): void {
 }
 
 /**
- * Состояние КЛЮЧА целиком: пауза ставится только за отказ авторизации (401/403),
- * её снимает первый же успешный ответ. Дневная квота ключ больше не паркует: у Google
+ * Состояние КЛЮЧА целиком: пауза ставится за отказ авторизации (401/403) и за
+ * отклонённый самим Google ключ (400 «API key not valid»), её снимает первый же
+ * успешный ответ. Дневная квота ключ больше не паркует: у Google
  * RPD считается на модель в проекте, поэтому такой отказ снимает модель
  * (recordGeminiOutcome), а ключ остаётся рабочим для остальных моделей.
  *
@@ -420,14 +421,16 @@ function releaseGeminiKey(key: string): void {
  * модели в том же запросе вызывал releaseGeminiKey и снимал паузу — в журнале это
  * выглядело сплошными «ключ 1/3» без единой строки о пропуске.
  */
-function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText: boolean): void {
+function noteGeminiKeyOutcome(key: string, status: number, ok: boolean, hasText: boolean, payload?: unknown): void {
   if (ok && hasText) {
     releaseGeminiKey(key);
     return;
   }
   const now = Date.now();
-  if (status === 401 || status === 403) {
-    parkGeminiKey(key, now + GEMINI_KEY_AUTH_COOLDOWN_MS, `ключ отклонён (${status})`);
+  if (isGeminiKeyRejected(status, payload)) {
+    parkGeminiKey(key, now + GEMINI_KEY_AUTH_COOLDOWN_MS, status === 400
+      ? "неверный API-ключ: Google отклонил его (HTTP 400)"
+      : `ключ отклонён (${status})`);
   }
 }
 
@@ -487,7 +490,7 @@ function geminiModelChain(primary: string, key: string): GeminiChainPlan {
 
 /** Запоминает исход вызова, чтобы следующий запрос не тратил попытку на ту же ошибку. */
 function recordGeminiOutcome(key: string, model: string, status: number, ok: boolean, hasText: boolean, providerMessage?: unknown): void {
-  noteGeminiKeyOutcome(key, status, ok, hasText);
+  noteGeminiKeyOutcome(key, status, ok, hasText, providerMessage);
   const memory = geminiMemoryFor(key);
   const now = Date.now();
   if (status === 404 || status === 410) {
@@ -761,6 +764,24 @@ function shouldRotateKey(status: number): boolean {
 // выжигал три ключа подряд (в живом журнале — «ротация ключей» без единого 429).
 function shouldRotateProviderKey(provider: DirectProvider, status: number): boolean {
   return shouldRotateKey(status) || (provider === "gemini" && (status === 401 || status === 403));
+}
+
+/**
+ * Google отклоняет САМ ключ тремя статусами: 401/403 (проект отозван или заблокирован)
+ * и 400 «API key not valid» (журнал 29.09.2026: третий ключ в пуле заканчивался мусором
+ * `…  }')`, каждый запрос начинался с него и падал — «Gemini исчерпала ротацию моделей;
+ * переход к Groq», ключи 1 и 3 при этом остались бы рабочими).
+ *
+ * Это не квота и не ошибка запроса: ключ не заработает никогда, поэтому его снимаем
+ * и идём дальше по пулу. Прочие 400 (битый JSON, неизвестное имя модели) ключа не
+ * касаются — по ним ротация сожгла бы исправный пул впустую.
+ */
+function isGeminiKeyRejected(status: number, payload?: unknown): boolean {
+  if (status === 401 || status === 403) return true;
+  if (status !== 400) return false;
+  const error = (payload as any)?.error ?? payload ?? {};
+  const text = [error?.code, error?.status, error?.error, error?.message].filter(Boolean).join(" ");
+  return /\bAPI_KEY_INVALID\b|API key not valid|API key is not valid|invalid api key/i.test(text);
 }
 
 // Детекторы ловят в первую очередь «пальцы» конкретной модели: переписывать сегмент
@@ -1348,7 +1369,11 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     }
 
     const rawProviderMessage = payload?.error?.message || payload?.error || `Ошибка ${providerLabel(provider)} (${response.status})`;
-    const providerMessage = shouldRotateProviderKey(provider, response.status) && index + 1 >= keyPool.length
+    // Отклонённый самим Google ключ не лечится ни сменой модели, ни уходом к другому
+    // провайдеру: ключ снимается (noteGeminiKeyOutcome) и запрос идёт на следующий
+    // ключ Gemini этого же пула.
+    const keyRejected = provider === "gemini" && isGeminiKeyRejected(response.status, payload);
+    const providerMessage = (shouldRotateProviderKey(provider, response.status) || keyRejected) && index + 1 >= keyPool.length
       ? `${rawProviderMessage}. Ротация ключей недоступна: сохранён только ключ ${index + 1}/${keyPool.length}.`
       : rawProviderMessage;
     if (response.ok) {
@@ -1401,12 +1426,19 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     // первый стабильно перегружен или не видит модель по всем профилям.
     const rotateKey = index + 1 < keyPool.length
       && (shouldRotateProviderKey(provider, response.status)
+        || keyRejected
         || (provider === "gemini"
           && (isTransientGeminiStatus(response.status) || response.status === 404 || response.status === 410)));
-    const exhaustedNote = provider === "nvidia" || provider === "gemini" ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
-    const messageWithFallback = rotateKey || !nextProvider
+    // «Исчерпала ротацию моделей» объясняет отказ МОДЕЛЕЙ; отклонённый ключ к ним
+    // отношения не имеет — иначе журнал врёт автору о причине (журнал 29.09.2026:
+    // «API key not valid» превращалось в «исчерпала ротацию моделей; переход к Groq»).
+    const exhaustedNote = provider === "nvidia" || (provider === "gemini" && !keyRejected) ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
+    const rejectedNote = keyRejected
+      ? ` Ключ отклонён Google (HTTP ${response.status}): снят на ${Math.round(GEMINI_KEY_AUTH_COOLDOWN_MS / 3_600_000)} ч${rotateKey ? `, пробую следующий ключ Gemini (${index + 2}/${keyPool.length})` : ""}.`
+      : "";
+    const messageWithFallback = (rotateKey || !nextProvider
       ? providerMessage
-      : `${providerMessage}.${exhaustedNote} переход к ${providerLabel(nextProvider)}.`;
+      : `${providerMessage}.${exhaustedNote} переход к ${providerLabel(nextProvider)}.`) + rejectedNote;
     const trace = traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, messageWithFallback, { chars: 0, finishReason: finishReasonFor(payload) });
     emitApiTrace(trace);
 

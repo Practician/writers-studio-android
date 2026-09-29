@@ -102,6 +102,60 @@ test("блокировка запроса фильтром: одна попыт�
   }
 });
 
+// Журнал APK 29.09.2026: третий ключ в пуле заканчивался мусором `…  }')`, Google
+// отвечал 400 «API key not valid», а клиент писал «исчерпала ротацию моделей» и уходил
+// к Groq — ключи 1 и 2 при этом оставались рабочими. Отклонённый ключ обязан сниматься
+// и уступать место следующему ключу пула.
+const BROKEN_KEY = "AIzaBrokenKey0000000 }')";
+const INVALID_KEY = { error: { code: 400, status: "INVALID_ARGUMENT", message: "API key not valid. Please pass a valid API key." } };
+
+test("неверный API-ключ (400): ключ снимается, запрос идёт на следующий ключ Gemini, а не к Groq", async () => {
+  resetGeminiModelMemory();
+  const gateway = await startGateway((key) => (key === BROKEN_KEY
+    ? { status: 400, payload: INVALID_KEY }
+    : { status: 200, payload: ok(`ответ ${key.slice(-1)}`) }));
+  __setGeminiBaseUrlForTests(gateway.url);
+  traces.length = 0;
+  try {
+    const first = await directGenerate(request([BROKEN_KEY, KEY1, KEY2]));
+    assert.equal(first, "ответ 1", "после отклонённого ключа берётся следующий рабочий");
+    assert.deepEqual(gateway.hits.map((hit) => hit.key), [BROKEN_KEY, KEY1], "ровно один вызов на сломанный ключ");
+    assert.ok(
+      !traces.some((trace) => /переход к /.test(String(trace?.message || ""))),
+      "один неверный ключ не должен бросать весь пул Gemini",
+    );
+    assert.ok(traces.some((trace) => /Ключ отклонён Google/.test(String(trace?.message || ""))), "причина видна в журнале");
+
+    // Повторный запрос снятый ключ не трогает: он стоит в паузе до следующих суток.
+    const afterFirst = gateway.hits.length;
+    const second = await directGenerate(request([BROKEN_KEY, KEY1, KEY2]));
+    assert.equal(second, "ответ 1");
+    assert.ok(gateway.hits.slice(afterFirst).every((hit) => hit.key !== BROKEN_KEY), "снятый ключ пропускается");
+    assert.ok(traces.some((trace) => /Ключ в паузе/.test(String(trace?.message || ""))), "пропуск объяснён в журнале");
+    const paused = geminiHealthSummary().paused;
+    assert.equal(paused.length, 1, "снятый ключ виден в памяти настроек");
+    assert.match(paused[0]?.reason || "", /неверный API-ключ/);
+  } finally {
+    __setGeminiBaseUrlForTests(null);
+    await gateway.close();
+  }
+});
+
+test("400 по причине запроса, а не ключа: пул ключей не трогается", async () => {
+  resetGeminiModelMemory();
+  const gateway = await startGateway(() => ({ status: 400, payload: { error: { code: 400, message: "Invalid JSON payload received." } } }));
+  __setGeminiBaseUrlForTests(gateway.url);
+  traces.length = 0;
+  try {
+    await assert.rejects(() => directGenerate(request([KEY1, KEY2])), /Invalid JSON payload/);
+    assert.deepEqual(geminiHealthSummary().paused, [], "ошибка запроса не должна снимать рабочий ключ");
+    assert.ok(!traces.some((trace) => /Ключ отклонён Google/.test(String(trace?.message || ""))));
+  } finally {
+    __setGeminiBaseUrlForTests(null);
+    await gateway.close();
+  }
+});
+
 test("липкость lite истекает: через 10 минут основная модель пробуется снова", async () => {
   resetGeminiModelMemory();
   let primaryHealthy = false;
