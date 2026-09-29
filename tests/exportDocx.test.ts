@@ -28,15 +28,23 @@ async function captureDocx(createDocument: () => Promise<unknown>): Promise<Down
       body: { appendChild: () => undefined, removeChild: () => undefined },
     },
   });
+  // URL остаётся настоящим конструктором, меняются только статические методы:
+  // внутри createDocument() модуль docx догружается динамически, и tsx в этот
+  // момент делает new URL(...). Обычный объект-заглушка роняла его с
+  // «TypeError: URL is not a constructor» (Node 24 + tsx).
+  const urlClass = globalThis.URL;
+  class DocxUrl extends urlClass {
+    static createObjectURL(blob: Blob): string {
+      createdBlob = blob;
+      return "blob:writers-studio-docx";
+    }
+    static revokeObjectURL(): void {
+      // Заглушка: отзывать нечего, скачивание перехвачено.
+    }
+  }
   Object.defineProperty(globalThis, "URL", {
     configurable: true,
-    value: {
-      createObjectURL: (blob: Blob) => {
-        createdBlob = blob;
-        return "blob:writers-studio-docx";
-      },
-      revokeObjectURL: () => undefined,
-    },
+    value: DocxUrl,
   });
   Object.defineProperty(globalThis, "setTimeout", {
     configurable: true,

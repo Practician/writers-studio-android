@@ -66,12 +66,19 @@ test("провайдер пишущей модели определяет гай
 test("промпт сцены несёт три пункта архитектуры и тики своей модели", () => {
   const deepseek = promptFor("deepseek-ai/deepseek-v4-flash-0731", 2);
   assert.match(deepseek, /АРХИТЕКТУРА ГЛАВЫ/);
-  assert.match(deepseek, /Особенности именно этой модели \(DeepSeek\)/);
+  // Версия — точный тег (sepia, Model identity): V4 измерялся на V3.2, поэтому
+  // гайд помечен как prior, а не как измерение именно этой модели.
+  assert.match(deepseek, /Особенности модели \(DeepSeek V4; .*prior/u);
+  const deepseekV32 = promptFor("deepseek/deepseek-v3.2", 2);
+  assert.match(deepseekV32, /Особенности модели \(DeepSeek V3\.2; измеренные тики V3\.2\)/u);
   const gemini = promptFor("gemini-3.8-flash", 2);
-  assert.match(gemini, /Особенности именно этой модели \(Gemini\)/);
+  // 3.8 вне тега «3 and 3.1» — тоже prior, а не измеренный отпечаток.
+  assert.match(gemini, /Особенности модели \(Gemini 3\.8; .*prior/u);
+  const gemini31 = promptFor("gemini-3.1-flash", 2);
+  assert.match(gemini31, /Особенности модели \(Gemini 3\.1; измеренные тики линейки 3\/3\.1\)/u);
   // Чужой гайд в текст не попадает: он портит письмо другой модели.
   const groq = promptFor("openai/gpt-oss-120b", 2);
-  assert.doesNotMatch(groq, /Особенности именно этой модели/);
+  assert.doesNotMatch(groq, /Особенности модели/u);
   assert.match(groq, /АРХИТЕКТУРА ГЛАВЫ/);
 });
 

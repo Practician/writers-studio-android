@@ -99,9 +99,13 @@ function main(): void {
   rows.push(measure("result.json (глава 4)", "AI", aiChapter()));
 
   const files = listFiles(BOOKS_DIR);
+  const WINDOWS_LIMIT = WINDOWS_PER_BOOK;
   let taken = 0;
+  let books = 0;
   for (const file of files) {
-    if (taken >= 6) break;
+    // Шесть книг по три окна: на двух-трёх авторах минимум по выборке случайный,
+    // а порог ставится по самому худшему человеческому окну.
+    if (books >= 6) break;
     let decoded: string | null = null;
     try {
       decoded = stripFb2(fs.readFileSync(file));
@@ -109,14 +113,18 @@ function main(): void {
       console.warn(`пропущен ${path.basename(file)}:`, (error as Error).message);
     }
     if (!decoded) continue;
-    for (let index = 0; index < WINDOWS_PER_BOOK && taken < 6; index += 1) {
+    let fromBook = 0;
+    for (let index = 0; index < WINDOWS_LIMIT; index += 1) {
       const start = 10_000 + index * 45_000;
       const chunk = decoded.slice(start, start + WINDOW);
       if (chunk.length < WINDOW * 0.8) break;
       rows.push(measure(`${path.basename(file)} #${index + 1}`, "HUMAN", chunk));
       taken += 1;
+      fromBook += 1;
     }
+    if (fromBook) books += 1;
   }
+  console.log(`\nокон HUMAN: ${taken} из ${books} книг`);
 
   const header = ["класс", "текст", "spread", "paraCV", "TTR", "passive", "conn"].join("\t");
   console.log(header);

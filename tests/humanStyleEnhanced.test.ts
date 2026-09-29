@@ -241,7 +241,35 @@ describe("runMultiDetectorGate", () => {
     assert.strictEqual(typeof result.passiveShare, "number");
     assert.strictEqual(typeof result.ttr200, "number");
     assert.strictEqual(typeof result.connectorDiv, "number");
+    assert.strictEqual(typeof result.sentenceSpread, "number");
     assert.ok(Array.isArray(result.details));
+  });
+
+  it("ровный метрономный ритм ловится разбросом длин предложений", () => {
+    // 7 одинаковых предложений: измеримый разброс есть, но он нулевой.
+    const monotone = Array.from({ length: 7 }, (_, index) =>
+      `Он шёл по коридору и считал двери номер ${index} не оглядываясь.`,
+    ).join(" ");
+    const result = runMultiDetectorGate(monotone, AI_TELL_CATALOG_EXTENDED, "general");
+    assert.ok(result.sentenceSpread < 0.46, `spread=${result.sentenceSpread}`);
+    assert.ok(
+      result.details.some((detail) => detail.includes("Разброс длин предложений")),
+      result.details.join("; "),
+    );
+  });
+
+  it("короткий фрагмент без измеримого разброса этот дефект не получает", () => {
+    // Три короткие фразы: sentenceLengthSpread возвращает 0 не потому, что ритм
+    // ровный, а потому что измерять нечего, — гейт не должен ругать выдержку.
+    const fragment = "Нож лежал поперёк стола. Семь минут до поезда. Она не ответила.";
+    const result = runMultiDetectorGate(fragment, AI_TELL_CATALOG_EXTENDED, "general");
+    assert.equal(result.sentenceSpread, 0);
+    assert.ok(
+      !result.details.some((detail) => detail.includes("Разброс длин предложений")),
+      result.details.join("; "),
+    );
+    // Порог спреда не должен перевернуть вердикт короткого живого фрагмента.
+    assert.ok(["PASS", "REVIEW"].includes(result.verdict), result.verdict);
   });
 });
 

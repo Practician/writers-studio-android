@@ -278,6 +278,20 @@ export function sentenceLengthSpread(text: string): number {
 }
 
 /**
+ * Сколько предложений текста вообще учитывается в sentenceLengthSpread:
+ * те же отсев и правило «минимум 3 слова». Нужно, чтобы отличить
+ * «разброса нет» от «разброс не измеряется» — на короткой выдержке
+ * sentenceLengthSpread возвращает 0, и без этой оговорки гейт посчитал бы
+ * обычный фрагмент монотонным.
+ */
+export function countMeasurableSentences(text: string): number {
+  return text
+    .split(/(?<=[.!?…])\s+/u)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => (sentence.match(/[\p{L}\p{N}]+/gu) || []).length >= 3).length;
+}
+
+/**
  * Доля предложений в пассивном залоге (passiveVoiceShare).
  * Признак: глагол «быть/стать» + краткое/полное причастие на -н/-т.
  * AI злоупотребляет пассивом. Норма для художественной прозы: < 12%.
@@ -339,6 +353,8 @@ export interface ExtendedStyleMetrics {
   passiveVoiceShare: number;
   uniqueWordRatio200: number;
   connectorDiversity: number;
+  /** Коэффициент вариации длины предложений; 0 — текст короче 6 предложений. */
+  sentenceLengthSpread: number;
 }
 
 /**
@@ -364,6 +380,7 @@ export function computeExtendedMetrics(
     passiveVoiceShare:            passiveVoiceShare(text),
     uniqueWordRatio200:           uniqueWordRatio200(text),
     connectorDiversity:           connectorDiversity(text),
+    sentenceLengthSpread:         sentenceLengthSpread(text),
   };
 }
 
@@ -685,6 +702,8 @@ export interface GateResult {
   passiveShare: number;
   ttr200: number;
   connectorDiv: number;
+  /** Коэффициент вариации длины предложений (0 — текст короче 6 предложений). */
+  sentenceSpread: number;
   /** Архитектурный балл StoryScope: 0 — чисто, выше 35 — машинная архитектура. */
   architectureScore: number;
   /** Найденные архитектурные признаки с подсказкой, что именно править. */
@@ -709,15 +728,23 @@ export function runMultiDetectorGate(
     maxPassiveShare?: number;
     minTTR200?: number;
     minConnectorDiv?: number;
+    minSentenceSpread?: number;
     maxArchitectureScore?: number;
   } = {},
 ): GateResult {
   const {
     maxAiTellScore    = 18,
-    minParagraphCV    = 0.35,
+    // Пороги из scripts/sepia-calibrate.ts: 0.9 × минимум по 18 человеческим окнам
+    // (6 книг × 3 окна, окно 23k знаков). Ниже минимума живой прозы, чтобы гейт её
+    // не ронял; негатив (result_*.json, 22 сегмента из 22 «AI») даёт CV абзацев 0.07
+    // и проваливается с большим запасом. См. docs/SEPIA.md, «Калибровка».
+    minParagraphCV    = 0.6,
     maxPassiveShare   = 0.15,
     minTTR200         = 0.52,
     minConnectorDiv   = 0.45,
+    // 0.9 × минимум 0.51, медиана человеческих окон 0.58; у негатива 0.53 — эта
+    // мера классы не различает, она держит гейт от ровного, метрономного ритма.
+    minSentenceSpread  = 0.46,
     maxArchitectureScore = 35,
   } = config;
 
@@ -726,6 +753,11 @@ export function runMultiDetectorGate(
   const passiveShare = passiveVoiceShare(text);
   const ttr200      = uniqueWordRatio200(text);
   const connDiv     = connectorDiversity(text);
+  const spread      = sentenceLengthSpread(text);
+  // Разброс не измеряется на коротком куске: sentenceLengthSpread возвращает 0
+  // и для 5 предложений, и для монотонного ритма — без этой оговорки гейт путал
+  // бы короткую выдержку с дефектом.
+  const spreadMeasurable = countMeasurableSentences(text) >= 6;
 
   const failures: string[] = [];
 
@@ -734,6 +766,9 @@ export function runMultiDetectorGate(
   if (passiveShare > maxPassiveShare) failures.push(`Пассивный залог ${(passiveShare * 100).toFixed(0)}% > ${(maxPassiveShare * 100).toFixed(0)}%`);
   if (ttr200 < minTTR200)           failures.push(`TTR-200 ${ttr200.toFixed(2)} < ${minTTR200} (бедный словарь)`);
   if (connDiv < minConnectorDiv)    failures.push(`Diversity коннекторов ${connDiv.toFixed(2)} < ${minConnectorDiv} (монотонные связки)`);
+  if (spreadMeasurable && spread < minSentenceSpread) {
+    failures.push(`Разброс длин предложений CV=${spread.toFixed(2)} < ${minSentenceSpread} (ровный ритм без живой смены длин)`);
+  }
 
   // Архитектурный слой StoryScope. Пять приведённых выше проверок смотрят на
   // поверхность, а в замере StoryScope правка поверхности сдвигает детектор лишь с
@@ -759,6 +794,7 @@ export function runMultiDetectorGate(
     passiveShare,
     ttr200,
     connectorDiv:  connDiv,
+    sentenceSpread: spread,
     architectureScore: architecture.score,
     architectureFindings: architecture.findings.map((finding) => ({
       id: finding.id,

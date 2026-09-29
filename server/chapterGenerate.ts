@@ -602,12 +602,15 @@ function scoreCandidateWithEnhanced(
   const genreContext = mapGenreContext(genre);
   const stats = computeStyleStats(text);
   const extendedMetrics = computeExtendedMetrics(text, { ...stats });
+  // Пороги minParagraphCV/minSentenceSpread — из scripts/sepia-calibrate.ts
+  // (18 человеческих окон против негатива result_*.json), см. docs/SEPIA.md.
   const gate = runMultiDetectorGate(text, COMBINED_AI_TELL_CATALOG, genreContext, {
     maxAiTellScore: Math.max(depth.scoreGate + 6, 18),
-    minParagraphCV: 0.32,
+    minParagraphCV: 0.6,
     maxPassiveShare: 0.18,
     minTTR200: 0.5,
     minConnectorDiv: 0.42,
+    minSentenceSpread: 0.46,
   });
   const structural = structuralPatternDiagnostics(text);
   const extendedAiTellScore = aiTellScoreEnhanced(text, COMBINED_AI_TELL_CATALOG, genreContext);
@@ -988,12 +991,14 @@ export async function runEnhancedSepiaPipeline(
   // чтобы измерить то, чего в куске нет.
   const architectureMeasurable = countSentencesForProfile(current) >= ARCHITECTURE_MIN_SENTENCES;
   for (let iteration = 1; architectureMeasurable && iteration <= maxIterations; iteration += 1) {
+    // Те же калиброванные пороги, что в scoreCandidateWithEnhanced (docs/SEPIA.md).
     const gate = runMultiDetectorGate(current, COMBINED_AI_TELL_CATALOG, mapGenreContext(options.genre), {
       maxAiTellScore: Math.max(options.depth.scoreGate + 6, 18),
-      minParagraphCV: 0.32,
+      minParagraphCV: 0.6,
       maxPassiveShare: 0.18,
       minTTR200: 0.5,
       minConnectorDiv: 0.42,
+      minSentenceSpread: 0.46,
     });
     const architecture = architectureDiagnostics(current);
     architectureFindings = architecture.findings;

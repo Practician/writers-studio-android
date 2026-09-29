@@ -61,6 +61,9 @@ test("проверка длинной главы быстрая", () => {
   const scan = scanSpellIssues(checker, text);
   const elapsed = Date.now() - started;
   assert.ok(scan.checkedWords > 15000, `проверено слов: ${scan.checkedWords}`);
-  assert.ok(elapsed < 500, `проверка заняла ${elapsed} мс`);
+  // Порог держит алгоритм, а не скорость устройства: тест гоняется параллельно с
+  // остальными файлами, и на занятом Termux/CI 500 мс уходило в шум. Квадратичная
+  // реализация на 100k знаков уходит в секунды, 2000 мс её всё ещё ловят.
+  assert.ok(elapsed < 2000, `проверка заняла ${elapsed} мс`);
   console.log(`замер: ${text.length} знаков, ${scan.checkedWords} слов, ${elapsed} мс`);
 });
