@@ -8,6 +8,8 @@ import {
   isAcceptableDetectorSegmentRewrite,
   isAcceptableRewrite,
   isAcceptableStaccatoRewrite,
+  longTailAdded,
+  longTailRegressed,
   rewriteDetectorAiSegments,
   runTouchupPipeline,
   staccatoRegressed,
@@ -273,6 +275,71 @@ test("detectorSegmentIssues и приёмка сегмента учитываю�
   assert.equal(isAcceptableRewrite(stampy, choppy), true, "правка убирает штамп — общий критерий доволен");
   assert.equal(staccatoRegressed(stampy, choppy), true, "чистый источник получил стаккато");
   assert.equal(isAcceptableDetectorSegmentRewrite(stampy, choppy), false);
+});
+
+// --- сборка 107: хвост длинных предложений (эталон Вася.txt, главы 1-3) ---
+
+/** Сегмент без длинных фраз и без стаккато (все фразы 7–9 слов) — как глава 4. */
+const TAILLESS_SEGMENT = [
+  "Он вошёл в длинный коридор и остановился у стены.",
+  "Стены здесь были сырые и холодные на ощупь.",
+  "Где-то в глубине постоянно капала вода.",
+  "Он прислушался, но не расслышал ничего интересного.",
+  "Потом шагнул вперёд по коридору неуверенно.",
+  "Свет мигнул разок и погас на мгновение.",
+  "Он достал старый фонарь из кармана куртки.",
+  "Фонарь не зажёгся совсем с первого раза.",
+  "Он постучал крепко им о ладонь.",
+  "Лампа слабо дрогнула и засветилась тускло.",
+  "И длинный коридор снова стал совсем тёмным.",
+].join(" ");
+
+/** Правка без хвоста: те же фразы, сшитые попарно — до 20 слов, но не 25. */
+const MERGED_WITHOUT_TAIL = [
+  "Он вошёл в длинный коридор и остановился у стены, стены здесь были сырые и холодные на ощупь.",
+  "Где-то в глубине постоянно капала вода, он прислушался, но не расслышал ничего интересного.",
+  "Потом шагнул вперёд по коридору неуверенно, свет мигнул разок и погас на мгновение.",
+  "Он достал старый фонарь из кармана куртки, фонарь не зажёгся совсем с первого раза.",
+  "Он постучал крепко им о ладонь, лампа слабо дрогнула и засветилась тускло.",
+  "И длинный коридор снова стал совсем тёмным.",
+].join(" ");
+
+/** Правка с хвостом: те же фразы, две растянуты до 25+ слов. */
+const MERGED_WITH_TAIL = [
+  "Он медленно вошёл в длинный коридор и остановился у сырой стены, прислушиваясь, как где-то в глубине гулко и "
+  + "безжизненно капает вода, отражаясь от бетонных плит под низким сводом.",
+  "Стены здесь были сырые и холодные на ощупь.",
+  "Он прислушался, но не расслышал ничего интересного.",
+  "Потом шагнул вперёд по коридору неуверенно, и свет мигнул разок и погас на мгновение.",
+  "Он достал старый фонарь из кармана куртки, но тот не зажёгся совсем с первого раза, и пришлось постучать "
+  + "им крепко о ладонь, прежде чем слабая лампа наконец дрогнула и засветилась тускло.",
+  "И длинный коридор снова стал совсем тёмным.",
+].join(" ");
+
+test("detectorSegmentIssues и приёмка требуют хвост длинных предложений", () => {
+  // Сегмент без длинных фраз получает замечание, с хвостом — нет.
+  const issues = detectorSegmentIssues(TAILLESS_SEGMENT);
+  assert.ok(
+    issues.some((issue) => issue.startsWith("нет хвоста длинных предложений")),
+    `ожидали замечание о хвосте, получили ${JSON.stringify(issues)}`,
+  );
+  assert.ok(!detectorSegmentIssues(MERGED_WITH_TAIL).some((issue) => issue.startsWith("нет хвоста")));
+
+  // Правка, сшивающая фразы до 20 слов: общая приёмка её принимает
+  // (разброс длин вырос, штампов не прибавилось), а приёмка сегмента — нет,
+  // потому что хвост так и не появился. Именно это правило двигает метрику.
+  assert.equal(isAcceptableRewrite(TAILLESS_SEGMENT, MERGED_WITHOUT_TAIL), true, "общая приёмка должна пропустить");
+  assert.equal(longTailAdded(TAILLESS_SEGMENT, MERGED_WITHOUT_TAIL), false);
+  assert.equal(isAcceptableDetectorSegmentRewrite(TAILLESS_SEGMENT, MERGED_WITHOUT_TAIL), false);
+
+  // Правка с длинными фразами принимается, хотя burstiness у неё иной.
+  assert.equal(longTailAdded(TAILLESS_SEGMENT, MERGED_WITH_TAIL), true);
+  assert.equal(longTailRegressed(TAILLESS_SEGMENT, MERGED_WITH_TAIL), false);
+  assert.equal(isAcceptableDetectorSegmentRewrite(TAILLESS_SEGMENT, MERGED_WITH_TAIL), true);
+
+  // Отнять хвост у чистого сегмента нельзя ни одной правкой.
+  assert.equal(longTailRegressed(MERGED_WITH_TAIL, TAILLESS_SEGMENT), true);
+  assert.equal(isAcceptableDetectorSegmentRewrite(MERGED_WITH_TAIL, TAILLESS_SEGMENT), false);
 });
 
 test("rewriteDetectorAiSegments: пост-проход склейки кладёт результат в blocks", async () => {

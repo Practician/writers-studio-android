@@ -27,6 +27,9 @@ import {
   humanStyleDirectives,
   humanizeGatePassed,
   isDialogueSentence,
+  LONG_SENTENCE_WORDS,
+  longTailIssue,
+  longTailStats,
   negativeVoiceGuidanceBlock,
   pickBestVariant,
   rankChapterCandidate,
@@ -41,6 +44,9 @@ import {
   shortSentenceStats,
   staccatoBlocks,
   staccatoIssue,
+  LONG_TAIL_MIN_SENTENCES,
+  LONG_TAIL_SHARE_LIMIT,
+  LONG_TAIL_SHARE_TARGET,
   STACCATO_BLOCK_MIN_SENTENCES,
   STACCATO_WORD_LIMIT,
   type AiTellScore,
@@ -359,11 +365,61 @@ export function isAcceptableStaccatoRewrite(source: string, candidate: string): 
 }
 
 /**
+ * Правка не должна отнять длинные фразы: хвост (предложения 25+ слов) убывать не может.
+ * Считаем только на достаточно длинном фрагменте — на трёх предложениях счёт шумит.
+ */
+export function longTailRegressed(source: string, candidate: string): boolean {
+  const before = longTailStats(source);
+  const after = longTailStats(candidate);
+  // На трёх предложениях счёт шумит, на шести уже нет: две длинные из шести против
+  // нуля в одиннадцати — явная потеря хвоста, а не погрешность.
+  if (before.total < 6 || after.total < 3) return false;
+  return after.count < before.count;
+}
+
+/**
+ * Достаточно ли правка двигает хвост: минимум на одно длинное предложение больше,
+ * чем было, и не ниже цели LONG_TAIL_SHARE_TARGET от длины куска (0,12 — мягче
+ * человеческих 0,19–0,30, потому что сегмент переписывается целиком).
+ */
+export function longTailAdded(source: string, candidate: string): boolean {
+  const before = longTailStats(source);
+  const after = longTailStats(candidate);
+  if (!after.total) return false;
+  const required = Math.max(before.count + 1, Math.round(after.total * LONG_TAIL_SHARE_TARGET));
+  return after.count >= required;
+}
+
+/**
+ * Приёмка правки, чья главная заслуга — длинные фразы. Нужна потому, что общая
+ * приёмка смотрит на штампы и разброс, а длинное предложение зачастую снижает
+ * burstiness — удачная правка отвергалась бы ровно из-за того, чего мы добиваемся
+ * (та же история, что с isAcceptableStaccatoRewrite).
+ */
+export function isAcceptableLongTailRewrite(source: string, candidate: string): boolean {
+  if (!candidate.trim() || candidate.trim() === source.trim()) return false;
+  if (blockQualityIssues(source, candidate).length) return false;
+  if (candidate.length > source.length * TOUCHUP_MAX_GROWTH) return false;
+  if (countWordsRu(source) >= 120 && countWordsRu(candidate) < Math.max(40, Math.floor(countWordsRu(source) * 0.7))) return false;
+  if (detectAiTells(candidate).length > detectAiTells(source).length) return false;
+  if (!longTailAdded(source, candidate)) return false;
+  if (staccatoRegressed(source, candidate)) return false;
+  const beforeBurst = sentenceBurstiness(source);
+  const afterBurst = sentenceBurstiness(candidate);
+  if (afterBurst < Math.min(RHYTHM_FLOOR, beforeBurst)) return false;
+  return true;
+}
+
+/**
  * Замечания батча для одного сегмента отчёта: штампы и ритм плюс стаккато.
  * Стаккато в этих issues отсутствовало, а это главный сигнал внешнего детектора:
  * доля предложений ≤6 слов 0,503 у AI против 0,329 у HUMAN (отчёт 30.09.2026).
  * `rhythmIssues` при этом молчит — burstiness у AI-сегментов 0,69, порог 0,35,
  * а у сегментов без штампов список issues и вовсе был пуст.
+ *
+ * С 01.10.2026 сюда же попадает и отсутствие хвоста длинных предложений — оно
+ * идёт из `rhythmIssues` → `longTailIssue` и на эталоне главы 4 срабатывает почти
+ * на каждом сегменте (0,013–0,048 против человеческих 0,19–0,30).
  */
 export function detectorSegmentIssues(text: string): string[] {
   const issues = blockHumanizeIssues(text);
@@ -393,7 +449,17 @@ export function staccatoRegressed(source: string, candidate: string): boolean {
  * отвергалась бы из-за упавшего burstiness (см. isAcceptableStaccatoRewrite).
  */
 export function isAcceptableDetectorSegmentRewrite(source: string, candidate: string): boolean {
-  if (isAcceptableRewrite(source, candidate)) return !staccatoRegressed(source, candidate);
+  if (longTailRegressed(source, candidate)) return false;
+  if (isAcceptableRewrite(source, candidate)) {
+    if (staccatoRegressed(source, candidate)) return false;
+    // Общая приёмка довольна штампами и разбросом, но хвост длинных предложений
+    // обязана вырасти: иначе правка «улучшила» локальный score и оставила текст
+    // без длинных фраз, как это было на главе 4 (0,013 → 0,048 при человеческих 0,19–0,30).
+    return !longTailIssue(source) || longTailAdded(source, candidate);
+  }
+  // Общий критерий отверг (упал burstiness или score), но правка явно добавила
+  // длинные фразы — это и есть задача, ради которой сегмент и отправлялся.
+  if (longTailIssue(source) && isAcceptableLongTailRewrite(source, candidate)) return true;
   return Boolean(staccatoIssue(source, STACCATO_BLOCK_MIN_SENTENCES))
     && isAcceptableStaccatoRewrite(source, candidate);
 }
@@ -476,7 +542,7 @@ export const SCENE_SEAM_SENTENCES = 3;
 // детектора, сборка 82 (13.6 %) — 0 живых при 21/21 AI, хотя локальный аудит «улучшился».
 // RHYTHM_RULE_OLD=1 возвращает прежний текст (для A/B), RHYTHM_RULE_OFF=1 убирает правило.
 const OLD_RHYTHM_RULE = "Ритм фраз: длину предложений чередуй, но без рубцов. Хотя бы одно длинное предложение на 25+ слов в сцене, а совсем коротких (до пяти слов) — не больше двух пятых от всех. Сплошной обмен короткими репликами на всю сцену — подпись модели, а не темп.";
-const RHYTHM_RULE = "Ритм фраз: длину предложений чередуй, не выравнивай под средний размер. Одна длинная фраза (25+ слов) на сцену — хорошо, если звучит живо, а не ради метра. Короткие фразы и обмен репликами — норма живой прозы: не подгоняй их под длину соседних.";
+const RHYTHM_RULE = "Ритм фраз: длину предложений чередуй, не выравнивай под средний размер. В сцене нужен длинный хвост: минимум каждое пятое предложение — длинное (25–40 слов), без него текст звучит как телеграф. Короткие фразы и обмен репликами — норма живой прозы: не подгоняй их под длину соседних.";
 
 export function emitChapterStep(message: string, level: "info" | "warn" = "info"): void {
   console.warn(`[глава] ${message}`);
@@ -2051,9 +2117,10 @@ export const REPEATED_OPENER_TRIGGER = 0.2;
  * ровно тот рисунок, который внешний детектор помечает AI (доля коротких фраз
  * у AI-сегментов 0.493 против 0.329 у HUMAN, 30.09.2026).
  */
-const RHYTHM_DIRECTIVE = "ровный ритм: чередуй длинные и короткие фразы нерегулярно, но коротких (≤6 слов) не больше трети и никогда не три подряд; разные зачины";
-/** Цель стаккато-прохода: склейка, а не новое чередование. */
-const STACCATO_DIRECTIVE = "цепочки коротких предложений — склей соседние рубленые фразы в более длинные, не добавляя фактов и не превращая абзац в одно длинное предложение";
+const RHYTHM_DIRECTIVE = "ровный ритм: чередуй длинные и короткие фразы нерегулярно, коротких (≤6 слов) не больше трети и никогда не три подряд; длинный хвост обязателен — хотя бы одно предложение на 25+ слов, если фраз в куске четыре и больше; разные зачины";
+/** Цель стаккато-прохода: склейка в ДЛИННЫЕ фразы, а не в средние. Склейка двух
+ *  рубленых в 14 слов хвост не создаёт: эталон требует 25–40. */
+const STACCATO_DIRECTIVE = "цепочки коротких предложений — склей соседние рубленые фразы в длинные (25–40 слов), не добавляя фактов; два-три предложения в одной длинной фразе допустимы, но не весь абзац одним предложением";
 /** Нижняя граница разброса длин после склейки: та же, что у «ровного ритма» в rhythmIssues. */
 const RHYTHM_FLOOR = 0.35;
 
@@ -2781,6 +2848,13 @@ export async function generateScenesDraft(
       if (attempt === 0) {
         const staccato = staccatoIssue(cleaned);
         if (staccato) soft.push(staccato);
+        // Длинный хвост мерим той же ценой, что и стаккато: одна проверка на первую
+        // попытку. Порог 0.01 — «ни одного длинного предложения в сцене»: общий порог
+        // 0,15 на сцене из трёх десятков фраз срабатывал бы почти всегда и съел бы
+        // квоту перезапросами. Эталон 01.10.2026: в главе 4 при правках было 0,013
+        // длинных предложений против 0,19–0,30 у человека.
+        const tail = longTailIssue(cleaned, LONG_TAIL_MIN_SENTENCES, 0.01);
+        if (tail) soft.push(tail);
       }
       softNotes = [...quota, ...soft];
       // Держим самую чистую из забракованных попыток: если это плановый бит и брак
@@ -3177,6 +3251,7 @@ export async function rewriteDetectorAiSegments(
       text: segments[index].text,
     }));
     const anyStaccato = targets.some((target) => target.issues.some((issue) => issue.startsWith("стаккато:")));
+    const anyLongTail = targets.some((target) => target.issues.some((issue) => issue.startsWith("нет хвоста длинных предложений")));
     try {
       const raw = await generate({
         model: options.model,
@@ -3195,6 +3270,12 @@ export async function rewriteDetectorAiSegments(
           (anyStaccato
             ? " У отмеченных сегментов стаккато: склей соседние рубленые фразы (≤6 слов) в более длинные, "
               + "не добавляя фактов и не превращая весь сегмент в одно длинное предложение."
+            : "") +
+          (anyLongTail
+            ? " У отмеченных сегментов нет длинного хвоста: живая проза даёт 15–30% предложений длиной "
+              + "25+ слов, а здесь почти все фразы средние. В каждом таком сегменте сделай минимум одно-два "
+              + "длинных предложения (25–40 слов) — сращивая соседние фразы или дописывая продолжение того же "
+              + "наблюдения, без новых фактов; остальные предложения оставь средними и короткими."
             : ""),
         temperature: modelTemperature(options.model, 0.72),
         responseMimeType: "application/json",
@@ -3226,6 +3307,17 @@ export async function rewriteDetectorAiSegments(
     }
   }
   if (rewrittenCount) emitChapterStep(`Батч принял ${rewrittenCount} правок из ${aiIndexes.length} AI-сегментов.`);
+  // Наблюдаемость главного числа сборки 107: хвост длинных предложений — то, ради чего
+  // правка и делается (эталон 01.10: 0,19–0,30 у человека против 0,048 у нас).
+  {
+    const tailBefore = longTailStats(originalJoined);
+    const tailAfter = longTailStats(revised.join(""));
+    const pct = (value: number) => `${Math.round(value * 100)}%`;
+    emitChapterStep(
+      `Длинный хвост (предложения ${LONG_SENTENCE_WORDS}+ слов): ${pct(tailBefore.share)} → ${pct(tailAfter.share)}, `
+      + `норма 15–30%.`,
+    );
+  }
 
   // Пост-проход склейки по стаккато. Главный сигнал внешнего детектора — доля рубленых
   // фраз (0,493 против 0,329, AUC 0,84), но батч выше оптимизирует штампы: на главе 4

@@ -11,6 +11,9 @@ import {
   humanStyleDirectives,
   humanizeGatePassed,
   isCleanBlock,
+  longTailIssue,
+  longTailStats,
+  LONG_TAIL_MIN_SENTENCES,
   paragraphAiTellScore,
   pickBestVariant,
   positiveVoiceFewShots,
@@ -487,6 +490,68 @@ test("staccatoIssue ловит цепочки рубленых фраз и мо�
   assert.equal(staccatoIssue(LIVING_BLOCK), null, "длинные фразы без цепочек — не стаккато");
   // Маленький фрагмент не оцениваем: доля на трёх предложениях — шум.
   assert.equal(staccatoIssue("Он шагнул. Встал. Пошёл."), null);
+});
+
+/** Одиннадцать рубленых фраз без единой длинной — как сегмент главы 4 до правок. */
+const TAILLESS_SEGMENT = [
+  "Он вошёл в коридор и остановился.",
+  "Стены здесь были сырые на ощупь.",
+  "Где-то в глубине капала вода.",
+  "Он прислушался и не расслышал ничего.",
+  "Потом шагнул вперёд по коридору.",
+  "Свет мигнул и погас на мгновение.",
+  "Он достал фонарь из кармана.",
+  "Фонарь не зажёгся с первого раза.",
+  "Он постучал им о ладонь.",
+  "Лампа дрогнула и засветилась тускло.",
+  "И коридор снова стал тёмным.",
+].join(" ");
+
+/** Те же фразы, где две растянуты до человеческой длины (25+ слов). */
+const WITH_TAIL_SEGMENT = [
+  "Он медленно огляделся вокруг: пыль лежала на бетоне ровным слоем, дверь в конце коридора была приоткрыта, "
+  + "свет из щели ложился полосой на мокрый пол, не двигаясь с места.",
+  "Стены здесь были сырые на ощупь.",
+  "Где-то в глубине капала вода.",
+  "Он прислушался к тишине, которая повисла между стенами, и понял, что шум этот — не вода, а что-то живое, "
+  + "что давно привыкло ждать в темноте и не собиралось показываться.",
+  "Потом шагнул вперёд по коридору.",
+  "Свет мигнул и погас на мгновение.",
+  "Он достал фонарь из кармана.",
+  "Фонарь не зажёгся с первого раза.",
+  "Он постучал им о ладонь.",
+  "Лампа дрогнула и засветилась тускло.",
+  "И коридор снова стал тёмным.",
+].join(" ");
+
+test("longTailIssue ловит отсутствие длинного хвоста и молчит на человеческом тексте", () => {
+  const empty = longTailStats(TAILLESS_SEGMENT);
+  assert.equal(empty.total, 11, "все одиннадцать фраз вне реплик");
+  assert.equal(empty.count, 0, "длинных нет");
+  assert.equal(empty.share, 0);
+
+  const note = longTailIssue(TAILLESS_SEGMENT);
+  assert.ok(note, "одиннадцать рубленых фраз без длинной — обязаны дать замечание");
+  assert.match(note!, /нет хвоста длинных предложений/u);
+  assert.match(note!, /25\+ слов/u);
+  assert.match(note!, /15–30%/u);
+
+  assert.equal(longTailIssue(WITH_TAIL_SEGMENT), null, "две длинные из одиннадцати — хвост есть");
+  assert.equal(longTailStats(WITH_TAIL_SEGMENT).count, 2);
+
+  // Маленький фрагмент не оцениваем: доля на трёх предложениях — шум.
+  assert.equal(longTailIssue("Он шагнул. Встал. Пошёл."), null);
+  // Ниже человеческого минимума (0,186) замечание не срабатывает.
+  assert.ok(longTailIssue(TAILLESS_SEGMENT, LONG_TAIL_MIN_SENTENCES, 0.01), "порог сцены 0.01 = «ни одного длинного»");
+  assert.equal(longTailIssue(WITH_TAIL_SEGMENT, LONG_TAIL_MIN_SENTENCES, 0.01), null);
+});
+
+test("rhythm issues дополняются замечанием о монотонном длинном абзаце", () => {
+  const issues = rhythmIssues(TAILLESS_SEGMENT);
+  assert.ok(issues.some((issue) => issue.startsWith("нет хвоста длинных предложений")), JSON.stringify(issues));
+  // Абзац из пяти фраз ещё не меряем: главная мера хвоста — сцена и сегмент отчёта.
+  const five = TAILLESS_SEGMENT.split(". ").slice(0, 5).join(". ") + ".";
+  assert.ok(!rhythmIssues(five).some((issue) => issue.startsWith("нет хвоста длинных предложений")));
 });
 
 test("staccatoBlocks отдаёт худшие абзацы в пределах лимита", () => {

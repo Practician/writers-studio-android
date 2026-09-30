@@ -6,6 +6,7 @@ import {
   STACCATO_SHARE_LIMIT,
   aiTellScore,
   isDialogueSentence,
+  longTailStats,
   shortSentenceStats,
   staccatoBlocks,
 } from "../server/humanStyle";
@@ -26,6 +27,8 @@ const summarize = (label: string, list: Row[]) => {
     share6: +avg(shorts.map((stat) => stat.share)).toFixed(3),
     chain6: +avg(shorts.map((stat) => stat.maxChain)).toFixed(2),
     maxChain: Math.max(...shorts.map((stat) => stat.maxChain)),
+    // Хвост длинных предложений (25+ слов) — метрика сборки 107, эталон 0,19–0,30.
+    tail: +avg(list.map((row) => longTailStats(row.text).share)).toFixed(3),
     burst: +avg(scores.map((score) => score.burstiness ?? 0)).toFixed(3),
     tell: +avg(scores.map((score) => score.score)).toFixed(2),
     hot: shorts.filter((stat) => stat.share >= STACCATO_SHARE_LIMIT || stat.maxChain >= STACCATO_CHAIN_LIMIT).length,
@@ -43,8 +46,14 @@ rows.forEach((row, index) => {
   const hot = stat.share >= STACCATO_SHARE_LIMIT || stat.maxChain >= STACCATO_CHAIN_LIMIT;
   console.log(
     String(index).padStart(2), row.label.padEnd(11), `share6=${stat.share.toFixed(3)}`,
-    `chain=${stat.maxChain}`, `sent=${stat.total}`, hot ? "HOT" : "",
+    `chain=${stat.maxChain}`, `sent=${stat.total}`, `tail=${longTailStats(row.text).share.toFixed(2)}`, hot ? "HOT" : "",
   );
 });
 
 console.log("горячих блоков по главе:", staccatoBlocks(rows.map((row) => row.text), 50).length, "из", rows.length);
+
+const whole = longTailStats(rows.map((row) => row.text).join("\n\n"));
+console.log(
+  `хвост по главе: ${(whole.share * 100).toFixed(1)}% длинных предложений `
+  + `(${whole.count} из ${whole.total}), эталон человека 19–30%`,
+);
