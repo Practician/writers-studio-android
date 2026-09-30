@@ -149,6 +149,61 @@ test("rewriteDetectorAiSegments: правка, которую судья отв�
   assert.equal(baseline.humanizeReport.pairJudge, undefined);
 });
 
+// --- сборка 105: стаккато-проход тоже под судьёй ---
+
+/** Рубленый AI-сегмент: доля ≤6 слов 0,625, цепочка 5 при пороге 4. */
+const HOT = "Он медленно огляделся вокруг. Пыль лежала на бетоне ровным слоем. "
+  + "Дверь в конце коридора была приоткрыта. Свет из щели ложился полосой. Он прислушался и не расслышал ничего. "
+  + "Потом шагнул вперёд и почти сразу замер, потому что пол под ногой хрустнул, будто под ним рассыпалось что-то "
+  + "старое и сухое, а звук этот ушёл вглубь коридора и вернулся эхом. Он стоял и ждал, пока тишина снова не сомкнётся "
+  + "над ним, и думал, что если двинуться дальше, то будет только хуже. Он сел на корточки и стал ждать.";
+
+const MERGED = "Он медленно огляделся вокруг: пыль лежала на бетоне ровным слоем, "
+  + "дверь в конце коридора была приоткрыта, свет из щели ложился полосой. Он прислушался и не расслышал ничего, "
+  + "потом шагнул вперёд и почти сразу замер, потому что пол под ногой хрустнул, будто под ним рассыпалось что-то "
+  + "старое и сухое, а звук этот ушёл вглубь коридора и вернулся эхом. Он стоял и ждал, пока тишина снова не сомкнётся "
+  + "над ним, и думал, что если двинуться дальше, то будет только хуже. Он сел на корточки и стал ждать.";
+
+test("rewriteDetectorAiSegments: склейку стаккато, отвергнутую судьёй, не несёт в blocks", async () => {
+  const segments = [
+    { text: "Человеческий кусок без формул. Я сел и выпил воды.", label: "HUMAN" },
+    { text: HOT, label: "AI" },
+  ];
+  const generate = async (params: { contents: string; responseMimeType?: string }) => {
+    const match = params.contents.match(/<DATA role="ai-staccato">\n([\s\S]*?)\n<\/DATA>/)
+      || params.contents.match(/<DATA role="ai-segments">\n([\s\S]*?)\n<\/DATA>/)
+      || params.contents.match(/<DATA role="priority-blocks">\n([\s\S]*?)\n<\/DATA>/);
+    if (match) {
+      const targets = JSON.parse(match[1]) as Array<{ text: string }>;
+      const rewrite = params.contents.includes('role="ai-staccato"');
+      return JSON.stringify({ blocks: targets.map((target) => (rewrite ? MERGED : target.text)) });
+    }
+    if (params.responseMimeType === "application/json") return JSON.stringify({ blocks: [HOT] });
+    return segments.map((segment) => segment.text).join("");
+  };
+
+  // Маркер есть только в оригинале: судья всегда оставит оригинал.
+  const rejecting = markerJudge("Дверь в конце коридора");
+  const rejected = await rewriteDetectorAiSegments(segments, generate as any, {
+    model: "mock",
+    personaBlock: "",
+    humanizeDepth: "fast",
+    pairJudge: rejecting,
+  });
+  assert.equal(rejected.humanizeReport.staccatoMergedSegments, 0, "судья отверг склейку");
+  assert.equal(rejected.blocks[1], HOT);
+  assert.ok(rejected.humanizeReport.pairJudge!.rejected >= 1);
+
+  // Без судьи склейка принимается и попадает в blocks.
+  const accepted = await rewriteDetectorAiSegments(segments, generate as any, {
+    model: "mock",
+    personaBlock: "",
+    humanizeDepth: "fast",
+  });
+  assert.equal(accepted.humanizeReport.staccatoMergedSegments, 1);
+  assert.equal(accepted.blocks[1], MERGED);
+});
+
 // --- строгий режим кнопки «переписать только AI-сегменты» ---
 
 import { keepEdgeWhitespace } from "../server/chapterGenerate";

@@ -35,6 +35,9 @@
 | **Стаккато мерится при написании сцены, а не только на собранной главе** | пороги `server/humanStyle.ts:404` (`STACCATO_WORD_LIMIT = 6`, `SHARE = 0.38`, `CHAIN = 4`), замер `staccatoIssue` `:418`, вызов в петле попыток сцены `server/chapterGenerate.ts:2739` (только `attempt === 0` — цена ограничена одним повтором на сцену; заметка уходит в `emitChapterStep` → в «Копировать журнал») | `tests/humanStyle.test.ts:480`, `tests/chapterGenerate.test.ts:377` |
 | **Стаккато-проход имеет право сработать при пройденном gate** | подавление `break` `server/chapterGenerate.ts:2161` и `:2217`, сам проход `:2261`, выбор абзацев `staccatoBlocks` `server/humanStyle.ts:435`, отдельная приёмка `isAcceptableStaccatoRewrite` `server/chapterGenerate.ts:339` (общая требует, чтобы score не вырос, а склейка сама снижает разброс — удачные склейки отвергались) | `tests/chapterGenerate.test.ts:101` |
 | **Ритм-инструкция без метронома** | `RHYTHM_DIRECTIVE` `server/chapterGenerate.ts:2012`: прежняя «одна фраза ≤6 слов, одна длинная» задавала механическое чередование — ровно тот рисунок, который детектор помечает AI; теперь «коротких не больше трети и никогда не три подряд» | входит в промпты touchup-проходов, проверяется прогоном `npm test` |
+| **Стаккато стоит в целях батча «переписать AI-сегменты»** | `detectorSegmentIssues` `server/chapterGenerate.ts:368` = `blockHumanizeIssues` + `staccatoIssue(…, STACCATO_BLOCK_MIN_SENTENCES)`: раньше `rhythmIssues` молчал при burstiness 0,69, а у сегментов без штампов список issues был пуст вовсе — модель правила «что не названо» | `tests/chapterGenerate.test.ts` («detectorSegmentIssues и приёмка сегмента учитывают стаккато») |
+| **Приёмка сегмента не пропускает ни вырождение в стаккато, ни пустую склейку** | `isAcceptableDetectorSegmentRewrite` `server/chapterGenerate.ts:395`: правка, проходящая по штампам, отвергается при `staccatoRegressed` (`:376`); правка, не проходящая по штампам, но склеивающая рубленость, принимается через `isAcceptableStaccatoRewrite` | тот же тест (обе ветки) |
+| **Пост-проход склейки обновляет `blocks`, а не только `text`** | `rewriteDetectorAiSegments` `server/chapterGenerate.ts:3232`: AI-сегменты, оставшиеся стаккато-горячими после батча, склеиваются ещё раз (`STACCATO_DIRECTIVE`), счётчик `staccatoMergedSegments`; панель вставляет в главу именно `blocks` — поэтому проход, который пишет только в `text`, в документ не попадал | `tests/chapterGenerate.test.ts`, `tests/pairJudge.test.ts` («склейку стаккато, отвергнутую судьёй, не несёт в blocks») |
 | **Измеримость отчёта** | `rubric` в отчёте: `server/chapterGenerate.ts:2900`, `:3201`, `:3288` (`passes / defects / overCorrections / failedGroups`) | `tests/sepiaRubric.test.ts` |
 | Проводка фаз, липкая модель, ротация ключей | `src/lib/directLlmClient.ts:148` (`GEMINI_STICKY_MS`), `:29` (`PHASE_MODEL_ROUTING = false`) | `tests/geminiKeyOrder.test.ts` |
 
@@ -91,6 +94,45 @@ REVIEW из-за CV абзацев — поднять/опустить поро�
   реплик). Поэтому оно живёт отдельной метрикой и отдельным проходом, который
   имеет право сработать после того, как gate уже пройден.
 - Повторить замер на новом отчёте: `npx tsx scripts/probeDetectorSegments.ts result_*.json`.
+
+### 2.2. Почему правка «переписать AI-сегменты» не двигала вердикт
+
+Второй отчёт (`result_2026-09-30T15-18-46.json`, сборка 103 → правка уже 30.09)
+**не изменился**: 12 из 22 сегментов AI/LIKELY_AI (9 AI + 3 LIKELY_AI), доля
+предложений ≤6 слов у AI даже выросла **0,493 → 0,503** (у HUMAN 0,329), локальный
+`aiTellScore` упал 8,3 → 6,8. Порог 0,38 / цепочка 4 по-прежнему помечает 10 из 12 AI
+и 1 из 10 HUMAN. Причина разобрана на трёх уровнях:
+
+1. **Правка не доходила до документа.** Кнопка в `AuthorEditorPanel` при
+   автоприменении splice'ит `blocks`, а `blocks` — это `revised`, то есть результат
+   *батча*. Sepia-фазы и touchup пишут в `text` (`server/chapterGenerate.ts:3364`),
+   и панель их выбрасывает. Пост-проход склейки из сборки 104 работал именно там и
+   в главу не попадал вовсе.
+2. **Стаккато не было в целях батча.** `issues` собирался из `blockHumanizeIssues`,
+   где `rhythmIssues` молчит при burstiness 0,69 (порог 0,35), а у сегментов без
+   штампов список был пуст — модель получала «правь, причина не названа».
+3. **Приёмка не знала про стаккато.** `isAcceptableRewrite` принимает правку, если
+   не вырос score; склейка же сама снижает разброс и добавляет баллы
+   `rhythmComponent`, то есть удачные склейки отвергались, а правка, ухудшающая
+   стаккато, но убирающая штамп, — принималась.
+
+Что сделано (сборка 105):
+
+- `detectorSegmentIssues(text)` — `blockHumanizeIssues` + `staccatoIssue(text,
+  STACCATO_BLOCK_MIN_SENTENCES)`; подключён в `targets` батча, при горячих
+  сегментах в промпт батча добавляется явное требование склеить рубленые фразы.
+- `isAcceptableDetectorSegmentRewrite(source, candidate)`: правка, проходящая по
+  общему критерию, отвергается при `staccatoRegressed`; правка, провалившая общую
+  проверку, но склеивающая рубленость (и не добавляющая штампов), принимается.
+- **Пост-проход склейки** в `rewriteDetectorAiSegments` (`server/chapterGenerate.ts:3227`):
+  сегменты, оставшиеся стаккато-горячими после батча, склеиваются отдельным
+  запросом (`STACCATO_DIRECTIVE`), приёмка — `isAcceptableStaccatoRewrite` +
+  `filterByPairJudge`, результат пишется в **`revised` → `blocks`**, то есть в
+  главу. Цена: **+1–2 запроса на прогон** только когда после батча остались
+  горячие сегменты (счётчик `staccatoMergedSegments` в отчёте).
+
+Повторить замер после сборки 105: `npx tsx scripts/probeStaccato.ts result_*.json`
+(доля ≤6 слов, цепочка, `share6` по классам) и сравнить с 0,503 / 0,329.
 
 ---
 

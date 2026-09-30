@@ -1,11 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aiTellScore, humanizeGatePassed, rankChapterCandidate, resolveHumanizeDepth, staccatoIssue } from "../server/humanStyle";
+import { aiTellScore, humanizeGatePassed, rankChapterCandidate, resolveHumanizeDepth, staccatoIssue, STACCATO_BLOCK_MIN_SENTENCES } from "../server/humanStyle";
 import {
+  detectorSegmentIssues,
   fallbackBeatsFromSynopsis,
   humanizeProseDraft,
+  isAcceptableDetectorSegmentRewrite,
+  isAcceptableRewrite,
+  isAcceptableStaccatoRewrite,
   rewriteDetectorAiSegments,
   runTouchupPipeline,
+  staccatoRegressed,
   type ChapterGenerateInput,
 } from "../server/chapterGenerate";
 
@@ -228,6 +233,89 @@ test("rewriteDetectorAiSegments rewrites only AI labels", async () => {
   // HUMAN-фрагмент должен сохраниться
   assert.ok(result.text.includes("выпил воды") || result.text.includes("Человеческий"));
   assert.ok(!result.text.includes("Волна ужаса") || result.humanizeReport.scoreAfter <= result.humanizeReport.scoreBefore);
+});
+
+// --- сборка 105: стаккато в целях батча, своя приёмка и пост-проход склейки ---
+
+/** Рубленый сегмент отчёта детектора: доля ≤6 слов 0,625, цепочка 5 (порог 4). */
+const STACCATO_HOT_SEGMENT = "Он медленно огляделся вокруг. Пыль лежала на бетоне ровным слоем. "
+  + "Дверь в конце коридора была приоткрыта. Свет из щели ложился полосой. Он прислушался и не расслышал ничего. "
+  + "Потом шагнул вперёд и почти сразу замер, потому что пол под ногой хрустнул, будто под ним рассыпалось что-то "
+  + "старое и сухое, а звук этот ушёл вглубь коридора и вернулся эхом. Он стоял и ждал, пока тишина снова не сомкнётся "
+  + "над ним, и думал, что если двинуться дальше, то будет только хуже. Он сел на корточки и стал ждать.";
+
+/** Тот же кусок, склеенный: доля ≤6 слов 0, цепочка 0. */
+const STACCATO_MERGED_SEGMENT = "Он медленно огляделся вокруг: пыль лежала на бетоне ровным слоем, "
+  + "дверь в конце коридора была приоткрыта, свет из щели ложился полосой. Он прислушался и не расслышал ничего, "
+  + "потом шагнул вперёд и почти сразу замер, потому что пол под ногой хрустнул, будто под ним рассыпалось что-то "
+  + "старое и сухое, а звук этот ушёл вглубь коридора и вернулся эхом. Он стоял и ждал, пока тишина снова не сомкнётся "
+  + "над ним, и думал, что если двинуться дальше, то будет только хуже. Он сел на корточки и стал ждать.";
+
+test("detectorSegmentIssues и приёмка сегмента учитывают стаккато", () => {
+  // Стаккато-замечание есть у рубленого сегмента и нет у связанного текста.
+  const issues = detectorSegmentIssues(STACCATO_HOT_SEGMENT);
+  assert.ok(issues.some((issue) => issue.startsWith("стаккато:")), `ожидали стаккато-issues, получили ${JSON.stringify(issues)}`);
+  assert.ok(!detectorSegmentIssues("Он долго смотрел на медленно оседающую пыль на бетонный пол подвала.")
+    .some((issue) => issue.startsWith("стаккато:")));
+
+  // Общий критерий отвергает удачную склейку (burstiness падает, score растёт),
+  // приёмка сегмента её принимает — иначе стаккато-проход никогда ничего не примет.
+  assert.equal(isAcceptableRewrite(STACCATO_HOT_SEGMENT, STACCATO_MERGED_SEGMENT), false);
+  assert.equal(isAcceptableStaccatoRewrite(STACCATO_HOT_SEGMENT, STACCATO_MERGED_SEGMENT), true);
+  assert.equal(isAcceptableDetectorSegmentRewrite(STACCATO_HOT_SEGMENT, STACCATO_MERGED_SEGMENT), true);
+
+  // Обратный случай: правка проходит по штампам, но включает стаккато — отвергается.
+  const stampy = "Он шёл вдоль сырой стены, считая шаги, пока дыхание не выровнялось и сердце не замедлилось. "
+    + "Потом он достал фонарь, поднял его к потолку и пошёл дальше по коридору, не оборачиваясь на скрип позади.";
+  const choppy = "Он шёл вдоль сырой стены и прислушивался. Дыхание выровнялось, но сердце колотилось. "
+    + "Свет дрожал на бетонной стене. Тень ползла по полу. Он шагнул вперёд. Пыль поднялась из щелей. "
+    + "Скрипнуло что-то в глубине коридора. Он замер и прижался к стене.";
+  assert.equal(isAcceptableRewrite(stampy, choppy), true, "правка убирает штамп — общий критерий доволен");
+  assert.equal(staccatoRegressed(stampy, choppy), true, "чистый источник получил стаккато");
+  assert.equal(isAcceptableDetectorSegmentRewrite(stampy, choppy), false);
+});
+
+test("rewriteDetectorAiSegments: пост-проход склейки кладёт результат в blocks", async () => {
+  const segments = [
+    { text: "Человеческий кусок без формул. Я сел и выпил воды.", label: "HUMAN" },
+    { text: STACCATO_HOT_SEGMENT, label: "AI" },
+  ];
+  const batchRequests: string[] = [];
+  const staccatoRequests: string[] = [];
+  const generate = async (params: { contents: string; responseMimeType?: string }) => {
+    if (params.contents.includes('role="ai-staccato"')) {
+      staccatoRequests.push(params.contents);
+      const match = params.contents.match(/<DATA role="ai-staccato">\n([\s\S]*?)\n<\/DATA>/)!;
+      const targets = JSON.parse(match[1]) as Array<{ text: string }>;
+      return JSON.stringify({ blocks: targets.map(() => STACCATO_MERGED_SEGMENT) });
+    }
+    const match = params.contents.match(/<DATA role="ai-segments">\n([\s\S]*?)\n<\/DATA>/)
+      || params.contents.match(/<DATA role="priority-blocks">\n([\s\S]*?)\n<\/DATA>/);
+    if (match) {
+      batchRequests.push(params.contents);
+      const targets = JSON.parse(match[1]) as Array<{ text: string }>;
+      // Батч возвращает сегменты дословно: приёмка правку не принимает,
+      // и склейку обязан сделать отдельный стаккато-проход.
+      return JSON.stringify({ blocks: targets.map((target) => target.text) });
+    }
+    if (params.responseMimeType === "application/json") return JSON.stringify({ blocks: [STACCATO_HOT_SEGMENT] });
+    return segments.map((segment) => segment.text).join("");
+  };
+
+  const result = await rewriteDetectorAiSegments(segments, generate as any, {
+    model: "mock",
+    personaBlock: "сухо",
+    humanizeDepth: "fast",
+  });
+
+  assert.ok(batchRequests.length >= 1, "батч по AI-сегментам должен запускаться");
+  assert.ok(batchRequests[0].includes("стаккато:"), "цели батча должны содержать стаккато-issues");
+  assert.equal(staccatoRequests.length, 1, "пост-проход склейки должен отработать один раз");
+  assert.equal(result.humanizeReport.staccatoMergedSegments, 1);
+  assert.equal(result.humanizeReport.detectorSegmentsRewritten, 0, "дословный ответ батча не считается переписыванием");
+  assert.equal(result.blocks[1], STACCATO_MERGED_SEGMENT, "склейка обязана попасть в blocks — панель вставляет в главу именно их");
+  assert.equal(staccatoIssue(result.blocks[1], STACCATO_BLOCK_MIN_SENTENCES), null);
+  assert.ok(result.blocks[0].includes("выпил воды"), "HUMAN-сегмент остаётся дословно");
 });
 
 // --- сборка 78: добор сцен до цели, замок лица повествования, повтор по трём сценам, латиница после аудита ---
