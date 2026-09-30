@@ -3165,6 +3165,9 @@ export async function rewriteDetectorAiSegments(
   const revised = segments.map((segment) => segment.text);
   let rewrittenCount = 0;
   const batchSize = 4;
+  emitChapterStep(
+    `Переписка AI-сегментов: ${aiIndexes.length} из ${segments.length}, батчей ${Math.ceil(aiIndexes.length / batchSize)}.`,
+  );
   for (let offset = 0; offset < aiIndexes.length; offset += batchSize) {
     const batch = aiIndexes.slice(offset, offset + batchSize);
     const targets = batch.map((index) => ({
@@ -3222,6 +3225,7 @@ export async function rewriteDetectorAiSegments(
       console.warn("Detector segment batch failed:", error);
     }
   }
+  if (rewrittenCount) emitChapterStep(`Батч принял ${rewrittenCount} правок из ${aiIndexes.length} AI-сегментов.`);
 
   // Пост-проход склейки по стаккато. Главный сигнал внешнего детектора — доля рубленых
   // фраз (0,493 против 0,329, AUC 0,84), но батч выше оптимизирует штампы: на главе 4
@@ -3281,6 +3285,13 @@ export async function rewriteDetectorAiSegments(
     } catch (error) {
       console.warn("Detector segment staccato batch failed:", error);
     }
+  }
+  if (staccatoHot.length) {
+    emitChapterStep(
+      staccatoMerged
+        ? `Стаккато-склейка: ${staccatoMerged} из ${staccatoHot.length} горячих сегментов.`
+        : `Стаккато-склейка: горячих ${staccatoHot.length}, принятых правок нет.`,
+    );
   }
 
   if (options.strictHuman) {

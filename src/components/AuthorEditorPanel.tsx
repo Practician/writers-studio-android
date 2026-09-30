@@ -26,6 +26,7 @@ import {
 } from "../types";
 import { auditStyleSignals, compareStyle, hashText } from "../lib/authorAudit";
 import { DetectorReport, isAiSegment, readDetectorReport } from "../lib/detectorReport";
+import { findDetectorSegmentRange, mergeBlockIntoRange } from "../lib/detectorApply";
 import {
   AdaptiveDetectorProfile,
   buildAdaptiveWritingGuidance,
@@ -92,37 +93,10 @@ function ProfileView({ profile }: { profile: AuthorVoiceSheet }) {
 }
 
 /** Строит строку из букв/цифр и карту «индекс в нормализованной строке → индекс в исходной». */
-function normalizeWithMap(value: string): { text: string; map: number[] } {
-  let text = "";
-  const map: number[] = [];
-  for (let i = 0; i < value.length; i += 1) {
-    const ch = value[i].toLowerCase();
-    const c = ch === "ё" ? "е" : ch;
-    if (/[а-яa-z0-9]/.test(c)) {
-      text += c;
-      map.push(i);
-    }
-  }
-  return { text, map };
-}
-
 /**
- * Ищет фрагмент текста (сегмент отчёта детектора) в главе по потоку букв/цифр
- * и возвращает реальные границы в главе. Нужно, потому что нейродетектор
- * нормализует типографику (ё→е, убирает тире/многоточия), и смещения из отчёта
- * не совпадают с позициями в главе.
+ * Границы сегмента отчёта ищутся в `src/lib/detectorApply.ts` (общий модуль:
+ * его же тесты проверяют, что переносы строк главы не схлопываются).
  */
-function findDetectorSegmentRange(chapter: string, segment: string): { start: number; end: number } | null {
-  const chapterLetters = normalizeWithMap(chapter);
-  const segmentLetters = normalizeWithMap(segment);
-  if (!segmentLetters.text.length || !chapterLetters.text.length) return null;
-  const from = chapterLetters.text.indexOf(segmentLetters.text);
-  if (from < 0) return null;
-  const to = from + segmentLetters.text.length;
-  const start = chapterLetters.map[from];
-  const end = (chapterLetters.map[to - 1] ?? start) + 1;
-  return { start, end };
-}
 
 function DiffView({ original, revised }: { original: string; revised: string }) {
   const blocks = useMemo(() => diffParagraphs(original, revised), [original, revised]);
@@ -680,7 +654,13 @@ export default function AuthorEditorPanel({
                         if (typeof block !== "string" || !block.trim() || block === segment.text) return;
                         const range = findDetectorSegmentRange(newDraft, segment.text);
                         if (!range) return;
-                        newDraft = newDraft.slice(0, range.start) + block + newDraft.slice(range.end);
+                        // Сегменты отчёта приходят без переносов строк, а диапазон в главе
+                        // охватывает настоящие абзацы: подстановка блока как есть схлопывала
+                        // их в простыню (проверено: 105 абзацев → 1).
+                        const originalRange = newDraft.slice(range.start, range.end);
+                        newDraft = newDraft.slice(0, range.start)
+                          + mergeBlockIntoRange(originalRange, block)
+                          + newDraft.slice(range.end);
                         replaced += 1;
                       });
                       if (replaced > 0) {
