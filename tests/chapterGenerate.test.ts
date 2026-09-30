@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aiTellScore, rankChapterCandidate, resolveHumanizeDepth } from "../server/humanStyle";
+import { aiTellScore, humanizeGatePassed, rankChapterCandidate, resolveHumanizeDepth, staccatoIssue } from "../server/humanStyle";
 import {
   fallbackBeatsFromSynopsis,
   humanizeProseDraft,
@@ -96,6 +96,66 @@ test("touchup pipeline removes catalog stamps via mock model", async () => {
   assert.ok(after.score < before.score, `score should drop: ${before.score} -> ${after.score}`);
   assert.equal(after.hits.filter((hit) => hit.id === "volna-chuvstva").length, 0);
   assert.equal(after.hits.filter((hit) => hit.id === "vremya-zamerlo").length, 0);
+});
+
+test("стаккато-доводка запускается даже при пройденном gate", async () => {
+  // Текст без единого штампа: score 6 при пороге 12, ритм на 78 словах не измеряется,
+  // то есть старый код выходил из цикла сразу и стаккато осталось бы нетронутым.
+  // Так и было на главе 4 (внешний детектор 30.09.2026: 12 из 22 сегментов AI).
+  const source = [
+    "Он налил воды в ладони и пробовал каплю на вкус.",
+    "Руки вытерлись о штанину.",
+    "Дверная створка стояла неподвижно.",
+    "Он давил на неё плечом.",
+    "Створка сдвинулась на палец.",
+    "Тогда он обошёл бочку с другой стороны помещения.",
+    "Между досками виднелась широкая щель.",
+    "Конец ножа свободно туда помещался.",
+    "Он поддел доску и дёрнул ножом.",
+    "Доска треснула и упала на пол, подняв пыль.",
+    "Пыль осела на бочке.",
+    "Вода внутри стояла холодная.",
+    "Он огляделся ещё раз вокруг.",
+    "Больше в помещении ничего не было.",
+  ].join(" ");
+
+  const before = aiTellScore(source);
+  assert.ok(humanizeGatePassed(before, 12, 0.45), `gate должен проходить: score=${before.score}`);
+
+  const merged = [
+    "Он налил воды в ладони, вытер руки о штанину и подошёл к дверной створке, которая стояла неподвижно, сколько он ни давил на неё плечом и не переставал искать щель по краю.",
+    "Тогда он обошёл бочку с боку и увидел щель.",
+    "Между досками помещался конец ножа, и он поддел доску, дёрнул ножом — доска треснула, упала на пол и подняла пыль, осевшую на бочке с холодной водой.",
+    "Он огляделся ещё раз, но пусто.",
+  ].join(" ");
+
+  const staccatoRequests: string[] = [];
+  const generate = async (params: { contents: string; responseMimeType?: string }) => {
+    if (params.responseMimeType === "application/json" || params.contents.includes("priority-blocks")) {
+      const match = params.contents.match(/<DATA role="priority-blocks">\n([\s\S]*?)\n<\/DATA>/);
+      assert.ok(match, "ожидался payload priority-blocks");
+      const targets = JSON.parse(match![1]) as Array<{ text: string }>;
+      if (params.contents.includes("убрать стаккато")) {
+        staccatoRequests.push(params.contents);
+        return JSON.stringify({ blocks: targets.map(() => merged) });
+      }
+      // Прочие проходы ничего не меняют: важен именно стаккато-проход.
+      return JSON.stringify({ blocks: targets.map((target) => target.text) });
+    }
+    return source;
+  };
+
+  const result = await runTouchupPipeline(source, generate as any, {
+    model: "mock",
+    personaBlock: "сухо",
+    depth: resolveHumanizeDepth("balanced"),
+  });
+
+  assert.equal(staccatoRequests.length, 1, "стаккато-проход должен отработать ровно один раз");
+  assert.ok(result.passesRun >= 1, "проход должен попасть в счётчик");
+  assert.ok(!result.text.includes("Дверная створка стояла неподвижно."), "рубленые фразы должны быть склеены");
+  assert.ok(result.text.includes("подняла пыль"), "содержание и порядок действий сохраняются");
+  assert.equal(staccatoIssue(result.text), null, "после доводки стаккато не должно остаться");
 });
 
 test("humanizeProseDraft report includes enhanced phases and gate fields", async () => {
@@ -312,6 +372,70 @@ test("scene generation tops the chapter up to the target and locks narration per
   assert.ok(sceneCalls[0].contents.includes("ЛИЦО ПОВЕСТВОВАНИЯ"));
   assert.ok(sceneCalls[0].contents.includes("третье лицо"));
   assert.ok(sceneCalls[1].contents.includes("ЛИЦО ПОВЕСТВОВАНИЯ"));
+});
+
+test("стаккато в сцене перезапрашивается при написании, а не правится в конце", async () => {
+  // Ритм-правило в промпте сцены просит не выравнивать фразы, но ничего не меряет:
+  // сцена с цепочками рубленых фраз проходила все прежние проверки и попадала в
+  // главу целиком — стаккато всплывал только во внешнем детекторе уже на собранной
+  // главе (30.09.2026: 12 из 22 сегментов AI, доля коротких фраз 0.493 против 0.329).
+  const shortVariants = [
+    "Он ступил босиком и остановился.",
+    "Темнота стояла густая и неподвижная.",
+    "Где-то капнула вода.",
+    "Он сглотнул и пошёл дальше.",
+    "Воздух пахло сырой землёй.",
+    "Пальцы нащупали холодный камень.",
+    "Он оглянулся через плечо.",
+  ];
+  const staccatoScene = Array.from({ length: 60 }, (_, i) => (i % 5 === 4
+    ? `Очерет шевельнулся у самой воды, и он прислушался к шороху под камнями, зовя этот путь тропой номер ${i}.`
+    : shortVariants[i % shortVariants.length])).join(" ");
+  const goodScene = Array.from({ length: 14 }, (_, i) =>
+    `Он дошёл до края тропы, где голый камень сменялся багульником, и стал ждать, пока глаза привыкнут к темноте, зовя этот путь обходом номер ${i}.`,
+  ).join(" ");
+
+  const logs: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+  let sceneCalls = 0;
+  try {
+    const generate = async (params: any): Promise<string> => {
+      if (/сценарист-структуралист/i.test(params.systemInstruction)) {
+        return JSON.stringify({
+          beats: Array.from({ length: 8 }, (_, i) => ({ title: `Бит ${i + 1}`, goal: `Событие ${i + 1}`, hook: `Зацепка ${i + 1}`, endsWith: `Конец ${i + 1}` })),
+        });
+      }
+      if (params.responseMimeType === "application/json") return JSON.stringify({ blocks: [] });
+      if (params.contents.includes("Бит:")) {
+        sceneCalls += 1;
+        if (sceneCalls === 1) return staccatoScene;
+        if (sceneCalls === 2) return goodScene;
+        return mockSceneText(sceneCalls);
+      }
+      return "";
+    };
+
+    const result = await generateHumanizedChapter(
+      baseInput({
+        currentChapterTitle: "Глава 6. Погода",
+        currentChapterSummary: "Ночь у воды",
+        authorSample: Array.from({ length: 40 }, (_, i) => `Он шёл вдоль стены и считал шаги, номер ${i}. Пыль лежала на полу ровным слоем.`).join(" "),
+        humanizeDepth: "maximum",
+        chapterCandidates: 1,
+      }),
+      generate,
+    );
+
+    assert.ok(
+      logs.some((line) => /перезапрос — стаккато/u.test(line)),
+      `перезапрос с замечанием про стаккато не был заявлен; журнал:\n${logs.slice(0, 25).join("\n")}`,
+    );
+    assert.ok(!result.text.includes("очерет"), "стаккато-сцена не должна остаться в главе");
+    assert.ok(result.text.includes("багульник"), "перезапрос должен принять нормальную версию сцены");
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 test("забракованная сцена не попадает в главу", async () => {

@@ -19,6 +19,8 @@ import {
   repeatedOpenerShare,
   openerClassShare,
   speechFormattingStats,
+  staccatoBlocks,
+  staccatoIssue,
   resolveHumanizeDepth,
   rhythmIssues,
   sentenceBurstiness,
@@ -443,4 +445,53 @@ test("починенные штампы действительно ловят с
     const live = new RegExp(entry!.pattern.source, entry!.pattern.flags.includes("g") ? entry!.pattern.flags : `${entry!.pattern.flags}g`);
     assert.ok(live.test(text), `«${id}» должен ловить: ${text}`);
   }
+});
+
+// --- стаккато: метрика приёмки, откалиброванная по внешнему нейродетектору ---
+
+const CHOPPY_BLOCK = [
+  "Вода в бочке стояла холодная.",
+  "Он налил в ладони.",
+  "Попробовал.",
+  "Горько.",
+  "Потом вытер руки о штаны и посмотрел на дверь.",
+  "Створка не двигалась.",
+  "Давил.",
+  "Не поддалось.",
+  "Тогда он обошёл бочку с другой стороны и нашёл щель между досками, в которую помещался конец ножа.",
+  "Поддел.",
+  "Дёрнул.",
+  "Доска треснула и упала на пол, подняв пыль.",
+].join(" ");
+
+const LIVING_BLOCK = [
+  "Он налил воды в ладони и попробовал каплю — горько на вкус.",
+  "Вытер руки о штаны и подошёл к дверной створке.",
+  "Створка не поддавалась, сколько он ни давил на неё всей спиной.",
+  "Тогда он обошёл бочку с другой стороны.",
+  "Там между досками виднелась щель, куда свободно помещался конец ножа.",
+  "Поддел ножом и дёрнул — доска треснула и упала на пол, подняв пыль.",
+  "Вода в бочке стояла холодная, и пахло сырой землёй из-под камней.",
+  "Он огляделся, но в помещении кроме бочки и полки ничего не было.",
+  "Полка шаталась под ладонью, едва держась на одном гвозде.",
+  "Гвоздь он вытащил и положил в карман, чтобы не потерять.",
+].join(" ");
+
+test("staccatoIssue ловит цепочки рубленых фраз и молчит на живом тексте", () => {
+  const note = staccatoIssue(CHOPPY_BLOCK);
+  assert.ok(note, "цепочка из четырёх рубленых фраз обязана дать замечание");
+  assert.match(note!, /стаккато/u);
+  assert.match(note!, /склей/u);
+  assert.match(note!, /цепочка до 4/u);
+
+  assert.equal(staccatoIssue(LIVING_BLOCK), null, "длинные фразы без цепочек — не стаккато");
+  // Маленький фрагмент не оцениваем: доля на трёх предложениях — шум.
+  assert.equal(staccatoIssue("Он шагнул. Встал. Пошёл."), null);
+});
+
+test("staccatoBlocks отдаёт худшие абзацы в пределах лимита", () => {
+  assert.deepEqual(staccatoBlocks([LIVING_BLOCK, CHOPPY_BLOCK, LIVING_BLOCK], 8), [1]);
+  assert.deepEqual(staccatoBlocks([CHOPPY_BLOCK, LIVING_BLOCK, CHOPPY_BLOCK], 8), [0, 2]);
+  assert.deepEqual(staccatoBlocks([CHOPPY_BLOCK, CHOPPY_BLOCK], 1), [0]);
+  assert.deepEqual(staccatoBlocks([CHOPPY_BLOCK], 0), [], "лимит 0 — ничего не берём");
 });

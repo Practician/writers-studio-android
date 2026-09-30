@@ -389,6 +389,63 @@ export function shortSentenceStats(text: string, maxWords = 4, isDialogue?: (sen
   return { share: count / lengths.length, maxChain, count, total: lengths.length, dialogueSkipped: sentences.length - measured.length };
 }
 
+/**
+ * Пороги стаккато для приёмки текста. Откалиброваны по внешнему нейродетектору
+ * 30.09.2026 (22 сегмента главы 4: AI+LIKELY_AI 12 против HUMAN 10) на метрике
+ * «доля предложений ≤6 слов вне речи»: AI 0.493 против HUMAN 0.329, AUC 0.84 —
+ * сильнейший из замеренных сигналов (средняя длина предложения 0.72,
+ * burstiness 0.71, доля ≤4 слов 0.71). Порог 0.38 ловит 10 из 12 AI-сегментов
+ * и даёт одно ложное срабатывание на 10 HUMAN; цепочка ≥4 ловит 6 из 12 при 1 из 10.
+ *
+ * Проверка сознательно НЕ входит в балл gate (см. aiTellScore: при включении
+ * стаккато gate становился недостижимым), но проход доводки имеет право
+ * сработать и при пройденном gate — иначе стаккато вообще не правится.
+ */
+export const STACCATO_WORD_LIMIT = 6;
+export const STACCATO_SHARE_LIMIT = 0.38;
+export const STACCATO_CHAIN_LIMIT = 4;
+/** Минимум измеримых предложений (вне реплик), чтобы доля была не шумом. */
+export const STACCATO_MIN_SENTENCES = 10;
+/** То же для абзаца: он короче главы и почти всегда перемежан репликами,
+ *  цепочка в четыре фразы там набирается редко — минимум замера ниже. */
+export const STACCATO_BLOCK_MIN_SENTENCES = 4;
+
+/**
+ * Замечание по стаккато для одного фрагмента: строка для промпта переписывания
+ * либо null, если фрагмент в норме или слишком мал для замера. Реплики диалога
+ * из замера исключаются — короткий обмен репликами стаккато не является.
+ */
+export function staccatoIssue(text: string, minSentences = STACCATO_MIN_SENTENCES): string | null {
+  const stat = shortSentenceStats(text, STACCATO_WORD_LIMIT, isDialogueSentence);
+  if (stat.total < minSentences) return null;
+  const shareHot = stat.share >= STACCATO_SHARE_LIMIT;
+  const chainHot = stat.maxChain >= STACCATO_CHAIN_LIMIT;
+  if (!shareHot && !chainHot) return null;
+  const parts = [`${Math.round(stat.share * 100)}% предложений ≤${STACCATO_WORD_LIMIT} слов`];
+  if (chainHot) parts.push(`цепочка до ${stat.maxChain} коротких подряд`);
+  return `стаккато: ${parts.join(", ")} — склей соседние короткие фразы в более длинные, не добавляй новых рубленых`;
+}
+
+/**
+ * Абзацы с худшим стаккато — для выбора блоков финального прохода доводки.
+ * Пороги те же, что у главного замера, но минимум измеримых предложений ниже:
+ * цепочка в главе считается через абзацы и реплики, поэтому в одном абзаце её
+ * может не быть, а доля рубленых фраз — быть.
+ */
+export function staccatoBlocks(blocks: string[], maximum: number): number[] {
+  return blocks
+    .map((block, index) => ({
+      index,
+      stat: shortSentenceStats(block, STACCATO_WORD_LIMIT, isDialogueSentence),
+      hot: Boolean(staccatoIssue(block, STACCATO_BLOCK_MIN_SENTENCES)),
+    }))
+    .filter((entry) => entry.hot)
+    .sort((left, right) => right.stat.maxChain - left.stat.maxChain || right.stat.share - left.stat.share)
+    .slice(0, Math.max(maximum, 0))
+    .map((entry) => entry.index)
+    .sort((left, right) => left - right);
+}
+
 export function aiTellScore(text: string): AiTellScore {
   const hits = detectAiTells(text);
   const wordCount = Math.max(wordsOf(text).length, 1);
