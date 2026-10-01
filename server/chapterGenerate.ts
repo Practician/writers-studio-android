@@ -24,6 +24,7 @@ import {
   detectAiTells,
   extractNumbers,
   flagBlocksForTouchup,
+  heavyStampHits,
   humanStyleDirectives,
   humanizeGatePassed,
   isDialogueSentence,
@@ -675,6 +676,35 @@ export function speechFormattingIssue(text: string): string {
   return `прямая речь не размечена тире и кавычками (${stats.unmarked} из ${stats.tagged} реплик, например «${stats.samples[0]?.slice(0, 60)}»)`;
 }
 
+/**
+ * Штампы, названные при самом написании сцены (сборка 110). Балл AI-штампов раньше
+ * считался только «после написания» — в touchup-проходах и гейте, — то есть модель не
+ * слышала «здесь типовой штамп», пока ещё могла переписать сцену целиком. Цена та же,
+ * что у стаккато, хвоста и стиля: одна проверка на первую попытку, максимум один
+ * перезапрос с названным нарушением.
+ *
+ * Называем только конкретные попадания: строка вида «звучит генеративно» не говорит
+ * модели, что править, а мелкие штампы (weight 2) встречаются и в живой прозе — их
+ * перечисляем лишь тогда, когда общий балл уже пробил гейт.
+ */
+export function sceneStampIssues(text: string, scoreGate: number): string[] {
+  const score = aiTellScore(text);
+  const weight = new Map(COMBINED_AI_TELL_CATALOG.map((entry) => [entry.id, entry.weight]));
+  const heavy = heavyStampHits(score);
+  let named = heavy;
+  if (!heavy.length && score.score > scoreGate) {
+    const seen = new Set<string>();
+    named = score.hits.filter((hit) => {
+      if ((weight.get(hit.id) ?? 1) < 2 || seen.has(hit.id)) return false;
+      seen.add(hit.id);
+      return true;
+    });
+  }
+  return named
+    .slice(0, 3)
+    .map((hit) => `штамп «${hit.match}» (${hit.label}) — замени конкретным восприятием, действием или прямой мыслью героя`);
+}
+
 /** Единственный счётчик слов конвейера: и цикл добора, и отчёт автору, и проверка
  *  «фрагмент короче 250 слов» считают одним способом. Раньше цикл считал по пробелам
  *  (тире тоже попадало в счёт), а отчёт — по словоподобным токенам: глава считалась
@@ -847,7 +877,7 @@ function scoreCandidateWithEnhanced(
   const topupPenalty = meta?.topupScenes && meta.topupScenes > 1 ? (meta.topupScenes - 1) * 6 : 0;
   const rejectedPenalty = (meta?.rejectedScenes || 0) * 6;
   const gatePenalty = gate.verdict === "FAIL" ? 10 : gate.verdict === "REVIEW" ? 4 : -4;
-  const rank = rankChapterCandidate(score, depth.scoreGate, depth.minBurstiness)
+  const rank = rankChapterCandidate(score, depth.scoreGate, depth.minBurstiness, styleIssuesByWindows(text).length)
     + rejectedPenalty
     + topupPenalty
     + Math.max(0, extendedAiTellScore - Math.max(depth.scoreGate, 8)) * 0.7
@@ -2951,6 +2981,9 @@ export async function generateScenesDraft(
         // отчёт детектора. Цена та же, что у стаккато и хвоста: одна проверка на
         // первую попытку, максимум один перезапрос с названным нарушением.
         soft.push(...styleIssuesByWindows(cleaned));
+        // Штампы (сборка 110): модель слышит их, пока сцену ещё можно переписать,
+        // а не в touchup-проходах уже на собранной главе.
+        soft.push(...sceneStampIssues(cleaned, depth.scoreGate));
       }
       softNotes = [...quota, ...soft];
       // Держим самую чистую из забракованных попыток: если это плановый бит и брак

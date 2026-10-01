@@ -980,8 +980,19 @@ export const HUMANIZE_DEPTHS: Record<HumanizeDepth, HumanizeDepthConfig> = {
 /**
  * Ранг кандидата главы: меньше = лучше.
  * Штампы и score важнее; burstiness поощряется; gate-pass даёт бонус.
+ * `styleDefects` — сколько леверов стиля (кавычки, повторность, зачины, восклицания,
+ * считает `styleIssuesByWindows`) провалено в самом тексте черновика: выбор между
+ * черновиками главы — это тоже «при написании», и до сборки 110 стиль в нём не
+ * участвовал вовсе.
  */
-export function rankChapterCandidate(score: AiTellScore, scoreGate = 12, minBurstiness = 0.45): number {
+export const STYLE_DEFECT_RANK_COST = 3;
+
+export function rankChapterCandidate(
+  score: AiTellScore,
+  scoreGate = 12,
+  minBurstiness = 0.45,
+  styleDefects = 0,
+): number {
   const heavy = heavyStampHits(score).length;
   const gateBonus = humanizeGatePassed(score, scoreGate, minBurstiness) ? -8 : 0;
   const rhythmMeasurable = typeof score.words !== "number" || score.words >= MIN_BURSTINESS_WORDS;
@@ -997,7 +1008,8 @@ export function rankChapterCandidate(score: AiTellScore, scoreGate = 12, minBurs
   const openerPenalty = score.openerRepetition >= 0.12
     ? Math.min(((score.openerRepetition - 0.12) / 0.2) * 8, 8)
     : 0;
-  return score.score + heavy * 12 + burstPenalty + shortSharePenalty + shortChainPenalty + openerPenalty + gateBonus;
+  return score.score + heavy * 12 + burstPenalty + shortSharePenalty + shortChainPenalty + openerPenalty + gateBonus
+    + styleDefects * STYLE_DEFECT_RANK_COST;
 }
 
 

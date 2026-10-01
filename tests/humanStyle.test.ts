@@ -18,12 +18,14 @@ import {
   pickBestVariant,
   positiveVoiceFewShots,
   quantitativeVoiceBlock,
+  rankChapterCandidate,
   repeatedNgramShare,
   repeatedOpenerShare,
   openerClassShare,
   OPENER_SHARE_LIMIT,
   WORD_REPEAT_TTR_LIMIT,
   EXCLAMATION_RATE_LIMIT,
+  STYLE_DEFECT_RANK_COST,
   segmentStyle,
   segmentStyleWindows,
   styleIssues,
@@ -649,4 +651,30 @@ test("styleIssuesByWindows: калибровочная нарезка и одн�
   // Короткий кусок без окон мерится как есть, и чистый эталон замечаний не даёт.
   assert.ok(styleIssuesByWindows(QUOTED_STYLE_SEGMENT).some((issue) => issue.startsWith("кавычки:")));
   assert.ok(!styleIssuesByWindows(DEPHRASED_STYLE_SEGMENT).some((issue) => issue.startsWith("кавычки:")));
+});
+
+test("ранг черновика главы штрафует дефекты стиля (сборка 110)", () => {
+  // Выбор между черновиками — тоже «при написании», но до сборки 110 стиль в ранг
+  // не входил: кавычечный черновик выигрывал у чистого при равных штампах.
+  const cleanScore = aiTellScore(CLEAN_STYLE_SEGMENT);
+  const quotedScore = aiTellScore(QUOTED_STYLE_SEGMENT);
+  assert.equal(styleIssuesByWindows(CLEAN_STYLE_SEGMENT).length, 0, "эталонный кусок без дефектов");
+  const quotedDefects = styleIssuesByWindows(QUOTED_STYLE_SEGMENT).length;
+  assert.ok(quotedDefects >= 1, `кавычки должны давать дефект, тут ${quotedDefects}`);
+  // Штампы и ритм у двух кусков одинаковы — разница только в оформлении реплики.
+  assert.equal(
+    rankChapterCandidate(cleanScore, 8, 0.5, 0),
+    rankChapterCandidate(quotedScore, 8, 0.5, 0),
+    "без учёта стиля куски неразличимы",
+  );
+  assert.ok(
+    rankChapterCandidate(quotedScore, 8, 0.5, quotedDefects)
+      > rankChapterCandidate(cleanScore, 8, 0.5, 0),
+    "с учётом стиля чистый черновик выигрывает",
+  );
+  assert.equal(
+    rankChapterCandidate(quotedScore, 8, 0.5, quotedDefects)
+      - rankChapterCandidate(quotedScore, 8, 0.5, 0),
+    quotedDefects * STYLE_DEFECT_RANK_COST,
+  );
 });
