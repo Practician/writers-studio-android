@@ -1472,11 +1472,14 @@ export function narrationPersonMismatch(text: string, locked: NarrationPerson): 
 export function topupBeatFor(beats: ChapterBeat[], index: number, wordsSoFar: number): ChapterBeat {
   const last = beats[beats.length - 1];
   const missing = Math.max(0, SCENE_TARGET_WORDS - wordsSoFar);
+  // Разбор прогона 01.10.2026: в плане главы 4 событий хватало на ~2100 слов, добор до 3300
+  // просил «новое действие, препятствие или разговор» — и модель вывела великана Гура,
+  // запланированного на главы 10–11. Добор — это УГЛУБЛЕНИЕ уже случившегося, а не сюжет.
   return {
     title: `Добор ${index - beats.length + 1}: продолжение после «${last?.title || "финала"}»`,
-    goal: `Разверни главу после «${last?.endsWith || "конца последнего бита"}»: ещё одна законченная сцена — новое действие, препятствие или разговор, ведущий к развязке главы. Нужно около ${missing} слов, чтобы глава дотянула до цели.`,
-    hook: "Конкретная деталь обстановки, предмет или действие, которых в главе ещё не было.",
-    endsWith: "Новый поворот, после которого главу можно закончить.",
+    goal: `Углуби то, что уже произошло после «${last?.endsWith || "конца последнего бита"}»: ещё одна законченная сцена на том же месте и с теми же героями — их реплики и реакции на уже случившееся, бытовое действие, спор, шутка, усталость, наблюдение за уже названным предметом. НЕ вводи новых персонажей, существ, предметов, мест и сюжетных событий: ничто новое в сцену не приходит и ничто из плана будущих глав не раскрывается. Нужно около ${missing} слов, чтобы глава дотянула до цели.`,
+    hook: "Деталь, уже названная в главе (предмет, звук, жест, слова героя), к которой можно вернуться и увидеть её иначе.",
+    endsWith: "Спокойный конец внутри уже начатой ситуации; сюжет не продвигается дальше синопсиса главы.",
   };
 }
 
@@ -2001,6 +2004,35 @@ const SUMMARY_ENDING = /(?:^|[.!?…]\s+)(?:всё|все|это|такое)\s+(
 
 /** Финал сцены подводит смысл вместо действия — приём, который sepia запрещает первым
  *  («Не объясняй смысл сцены»), а модель ставила в конец почти каждой сцены. */
+/**
+ * Имена, которых не было ни в синопсисе, ни в плане, ни в предыдущем тексте, ни в канон-блоке.
+ * Имя ищется только там, где слово с заглавной буквы стоит ВНУТРИ предложения (после строчной
+ * буквы или запятой) либо в формуле знакомства («меня зовут X», «X меня звать»): слова вроде
+ * «Темнота» или «Пальцы» в начале предложения — не имена, первая версия проверки принимала их
+ * за новых героев (тест на стаккато показал ложные срабатывания). Сравнение с разрешённым
+ * текстом идёт по падежной основе. Только замечание, не брак: ложное срабатывание стоит одного
+ * перезапроса, а настоящий новый персонаж — главы не по плану.
+ */
+export function newNamesIssue(allowedText: string, scene: string): string {
+  const allowed = allowedText.toLocaleLowerCase("ru");
+  const found = new Set<string>();
+  const patterns = [
+    /(?<=[а-яё,]\s+)([А-ЯЁ][а-яё]{2,})(?![\p{L}-])/gu,
+    /(?:зовут|звать|звали|зваться)\s+([А-ЯЁ][а-яё]{2,})(?![\p{L}-])/gu,
+    /(?<![\p{L}-])([А-ЯЁ][а-яё]{2,})\s+меня\s+(?:зовут|звать)/gu,
+  ];
+  for (const pattern of patterns) {
+    for (const match of scene.matchAll(pattern)) {
+      const lower = match[1].toLocaleLowerCase("ru");
+      const stem = lower.slice(0, Math.max(3, lower.length - 2));
+      if (!allowed.includes(stem)) found.add(match[1]);
+    }
+  }
+  const names = [...found].slice(0, 3);
+  if (!names.length) return "";
+  return `новое имя вне плана: ${names.map((name) => `«${name}»`).join(", ")} — такого героя нет в синопсисе, плане главы и предыдущем тексте; если это не прозвище уже названного героя, убери его: действуют только уже названные герои`;
+}
+
 export function explanationTailIssue(text: string): string {
   const closing = closingSentences(text, 1);
   if (!closing) return "";
@@ -2948,6 +2980,13 @@ export async function generateScenesDraft(
       const soft: string[] = [];
       const explanation = explanationTailIssue(cleaned);
       if (explanation) soft.push(explanation);
+      const allowedNames = [
+        input.currentChapterTitle, input.currentChapterSummary, input.previousChapter, input.canonDossier,
+        ...beats.map((planned) => `${planned.title} ${planned.goal} ${planned.hook} ${planned.endsWith}`),
+        ...scenes,
+      ].join("\n");
+      const invented = newNamesIssue(allowedNames, cleaned);
+      if (invented) soft.push(invented);
       const similes = simileIssue(cleaned);
       if (similes) quota.push(similes);
       const seam = seamEchoIssue(scenes, cleaned);

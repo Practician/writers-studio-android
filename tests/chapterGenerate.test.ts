@@ -405,6 +405,7 @@ import {
   povDirectiveFor,
   repairForeignWords,
   russianLanguageIssues,
+  newNamesIssue,
   SCENE_TARGET_WORDS,
   topupBeatFor,
 } from "../server/chapterGenerate";
@@ -903,4 +904,23 @@ test("приёмка 108: снятие кавычек принимается, д
     false,
     "новый дефект в чистый источник не принимается",
   );
+});
+
+test("topup beat forbids new characters and events", () => {
+  const beats = fallbackBeatsFromSynopsis(baseInput({ currentChapterTitle: "Глава 4. Ночь у чужого входа" }));
+  const beat = topupBeatFor(beats, beats.length, 2_100);
+  assert.match(beat.goal, /НЕ вводи новых персонажей/);
+  assert.match(beat.goal, new RegExp(String(SCENE_TARGET_WORDS - 2_100)));
+});
+
+test("newNamesIssue flags a character absent from plan and text, ignores known names and sentence starts", () => {
+  const allowed = "Васька и Илья разожгли костёр. Потом они ели рыбу. Илья молчал.";
+  const scene = "Тень двинулась. Потом Васька крикнул. — Гур меня звать, — буркнул гигант. Темнота. Пальцы дрожали. Илья кивнул, и обиделся Гур.";
+  const issue = newNamesIssue(allowed, scene);
+  assert.match(issue, /«Гур»/);
+  for (const word of ["Васька", "Потом", "Илья", "Тень", "Темнота", "Пальцы"]) {
+    assert.ok(!issue.includes(`«${word}»`), `${word} не должно быть в замечании: ${issue}`);
+  }
+  assert.equal(newNamesIssue(allowed, "Васька вздохнул. Темнота. Илья промолчал, а Васька встал. Потом они легли."), "");
+  assert.match(newNamesIssue(allowed, "Васька встал и увидел Гура у воды."), /«Гура»/);
 });
