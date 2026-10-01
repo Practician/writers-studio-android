@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aiTellScore, humanizeGatePassed, rankChapterCandidate, resolveHumanizeDepth, staccatoIssue, STACCATO_BLOCK_MIN_SENTENCES } from "../server/humanStyle";
+import { aiTellScore, humanizeGatePassed, longTailStats, rankChapterCandidate, resolveHumanizeDepth, staccatoIssue, STACCATO_BLOCK_MIN_SENTENCES } from "../server/humanStyle";
 import {
   detectorSegmentIssues,
+  enhancedPhaseNeeded,
   fallbackBeatsFromSynopsis,
   hasStyleDefect,
   humanizeProseDraft,
@@ -110,10 +111,11 @@ test("touchup pipeline removes catalog stamps via mock model", async () => {
   assert.equal(after.hits.filter((hit) => hit.id === "vremya-zamerlo").length, 0);
 });
 
-test("стаккато-доводка запускается даже при пройденном gate", async () => {
-  // Текст без единого штампа: score 6 при пороге 12, ритм на 78 словах не измеряется,
-  // то есть старый код выходил из цикла сразу и стаккато осталось бы нетронутым.
-  // Так и было на главе 4 (внешний детектор 30.09.2026: 12 из 22 сегментов AI).
+test("стаккато-доводка запускается даже при непройденном gate", async () => {
+  // Телеграфный текст без единого штампа: gate его не пропускает (нет хвоста
+  // длинных фраз + однородные зачины), но стаккато-проход обязан отработать —
+  // иначе рубленые фразы не склеятся никогда. Раньше gate такой текст пропускал
+  // (хвост в score не входил), и доводка срабатывала лишь по исключению.
   const source = [
     "Он налил воды в ладони и пробовал каплю на вкус.",
     "Руки вытерлись о штанину.",
@@ -132,7 +134,11 @@ test("стаккато-доводка запускается даже при п�
   ].join(" ");
 
   const before = aiTellScore(source);
-  assert.ok(humanizeGatePassed(before, 12, 0.45), `gate должен проходить: score=${before.score}`);
+  // Сборка 112: телеграф без единой длинной фразы и с однородными зачинами gate
+  // больше не пропускает (нет хвоста + openerClass) — и это правильно: такой
+  // текст и есть машинный. Стаккато-проход при этом обязан отработать тем более.
+  assert.ok(!humanizeGatePassed(before, 12, 0.45), `телеграф не должен проходить gate: score=${before.score}`);
+  assert.ok((before.longTailComponent ?? 0) > 0, "отсутствие хвоста должно давать баллы");
 
   const merged = [
     "Он налил воды в ладони, вытер руки о штанину и подошёл к дверной створке, которая стояла неподвижно, сколько он ни давил на неё плечом и не переставал искать щель по краю.",
@@ -924,3 +930,82 @@ test("newNamesIssue flags a character absent from plan and text, ignores known n
   assert.equal(newNamesIssue(allowed, "Васька вздохнул. Темнота. Илья промолчал, а Васька встал. Потом они легли."), "");
   assert.match(newNamesIssue(allowed, "Васька встал и увидел Гура у воды."), /«Гура»/);
 });
+
+test("детерминированная склейка чинит хвост без помощи модели (сборка 112)", async () => {
+  // Модель-пустышка возвращает блоки без изменений — как слабый flash-lite после
+  // 503-фолбэка в живом прогоне главы 4. Хвост при этом обязан вырасти за счёт
+  // детерминированной склейки, а не третьего круга перезапросов.
+  const source = [
+    "Он подошёл вплотную к холодной стене и медленно провёл рукой по камню.",
+    "Он почувствовал странное тепло, идущее из глубины кладки.",
+    "Васька замер на месте и внимательно посмотрел на старшего брата.",
+    "Илья молчал и продолжал смотреть в густую темноту.",
+    "Он шагнул вперёд через порог и настороженно огляделся по сторонам.",
+    "Васька кивнул в ответ и подошёл ближе к догорающему костру.",
+    "Илья поднял сухую ветку и подбросил её в самый центр углей.",
+    "Он сел рядом на корточки и протянул озябшие руки к теплу.",
+    "Васька тяжело вздохнул и посмотрел на тёмную стену леса.",
+    "Илья медленно встал и подошёл к самому краю сырой пещеры.",
+    "Он долго прислушивался к шуму холодного ветра за стеной.",
+    "Васька спросил брата, долго ли им ещё ждать рассвета.",
+  ].join(" ");
+  assert.equal(longTailStats(source).count, 0, "длинных нет");
+
+  const generate = async (params: { contents: string; responseMimeType?: string }) => {
+    if (params.responseMimeType === "application/json" || params.contents.includes("priority-blocks")) {
+      const match = params.contents.match(/<DATA role="priority-blocks">\n([\s\S]*?)\n<\/DATA>/);
+      assert.ok(match, "ожидался payload priority-blocks");
+      const targets = JSON.parse(match![1]) as Array<{ text: string }>;
+      return JSON.stringify({ blocks: targets.map((target) => target.text) });
+    }
+    return source;
+  };
+
+  const result = await runTouchupPipeline(source, generate as any, {
+    model: "mock",
+    personaBlock: "сухо",
+    depth: resolveHumanizeDepth("balanced"),
+  });
+
+  const after = longTailStats(result.text);
+  assert.ok(after.count >= 1, `склейка обязана дать длинные фразы, тут ${after.count}`);
+  assert.ok(
+    (result.cleanNote ?? "").includes("детерминированная склейка"),
+    `в отчёте должна быть склейка: ${result.cleanNote}`,
+  );
+});
+
+test("enhanced-фазы пропускают чистые куски без запроса (сборка 112)", () => {
+  const depth = resolveHumanizeDepth("balanced");
+  // Короткий кусок — пропуск запрещён: метрики на нём шумят.
+  const tiny = "Я шёл вдоль стены и слушал, как ключ тихо звенит в кармане.";
+  assert.equal(countWordsForTest(tiny) < 150, true);
+  // Длинный чистый кусок: ритм в норме, штампов нет, хвост есть.
+  const cleanLong = [
+    "Вечер пятницы не задался с самого начала, и завертелось всё после того, как он опоздал на автобус в райцентр, где его уже ждали друзья с гитарой и дешёвым лимонадом.",
+    "Стоя под куцым козырьком загаженной остановки, он обдумывал сложившуюся ситуацию и перебирал в уме варианты, каждый из которых казался хуже предыдущего.",
+    "Ветер усилился, заморосил мелкий дождь, а настроение испортилось окончательно и бесповоротно.",
+    "Мокрая футболка липла к спине, кроссовки хлюпали, рюкзак давил на плечи и тянул назад, так что к концу пути руки гудели, а лямки, казалось, въелись в кожу навсегда.",
+    "Он решил двинуть к брату, благо идти было недалеко, а дома ждали тепло, ужин и никакого хип-хопа, от которого его уже тошнило.",
+    "Танька уедет без него, да и не особо-то он туда хотел попасть в такую погоду.",
+    "Редкие прохожие смотрели на него с удивлением, но ему было всё равно: он уже привык, что в таком виде его принимают за настоящего городского сумасшедшего.",
+    "До дома он добрался уже в сумерках, когда в окнах зажёгся свет.",
+    "В прихожей пахло жареной картошкой, котом и чужим уютом.",
+    "Он сбросил рюкзак. Сел на табуретку.",
+    "Брат вышел из кухни с полотенцем через плечо и молча поставил перед ним тарелку.",
+    "Ели молча, и это молчание, густое и тёплое, было лучшим разговором за весь этот бесконечный день.",
+    "Потом они пили чай с вареньем, смотрели в окно на дождь и молчали о своём, потому что всё важное уже было сказано без слов.",
+    "За окном шумели деревья, капли стучали по козырьку, а внутри было тепло.",
+    "Он подумал, что вечер всё-таки удался, пусть и не так, как планировалось.",
+  ].join(" ");
+  assert.ok(countWordsForTest(cleanLong) >= 150, "кусок обязан быть измеримым");
+  assert.equal(enhancedPhaseNeeded("rhythm-breaker", cleanLong, depth), false, "чистый ритм — пропуск");
+  assert.equal(enhancedPhaseNeeded("lexical-diversifier", cleanLong, depth), false, "штампов нет — пропуск");
+
+  const dirtyLong = `${cleanLong} Это был не просто вечер. Волна ужаса накрыла его, и время словно остановилось. Сердце пропустило удар.`;
+  assert.equal(enhancedPhaseNeeded("lexical-diversifier", dirtyLong, depth), true, "штампы есть — фаза нужна");
+});
+
+function countWordsForTest(text: string): number {
+  return (text.match(/[\p{L}\p{N}]+/gu) || []).length;
+}

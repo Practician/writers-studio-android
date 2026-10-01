@@ -24,6 +24,7 @@ import {
   detectAiTells,
   extractNumbers,
   flagBlocksForTouchup,
+  fuseShortSentencesForTail,
   heavyStampHits,
   humanStyleDirectives,
   humanizeGatePassed,
@@ -904,6 +905,32 @@ function sepiaPhasesForRoute(route: SepiaRoute): SepiaPhaseName[] {
   return ["rhythm-breaker", "micro-imperfections"];
 }
 
+/**
+ * Нужна ли куску эта enhanced-фаза вообще (сборка 112). Живой прогон главы 4:
+ * 17 enhanced-вызовов, большинство из которых приёмка отклонила («не дали
+ * принятой правки — остался базовый touchup»), то есть запросы ушли впустую.
+ * Чистый кусок пропускаем без запроса. Пропуск только на измеримом объёме
+ * (≥150 слов): на коротком куске метрики шумят, и молчаливый пропуск там давал
+ * бы ложное чувство чистоты.
+ */
+export function enhancedPhaseNeeded(
+  phase: SepiaPhaseName,
+  chunk: string,
+  depth: { scoreGate: number; minBurstiness: number },
+): boolean {
+  if (phase === "rhythm-breaker") {
+    const score = aiTellScore(chunk);
+    return score.burstiness < depth.minBurstiness
+      || Boolean(staccatoIssue(chunk, STACCATO_BLOCK_MIN_SENTENCES))
+      || Boolean(longTailIssue(chunk, 6));
+  }
+  if (phase === "lexical-diversifier") {
+    const score = aiTellScore(chunk);
+    return score.score > depth.scoreGate || heavyStampHits(score).length > 0;
+  }
+  return hasStyleDefect(chunk) || Boolean(longTailIssue(chunk, 6));
+}
+
 function cleanModelText(raw: string): string {
   return String(raw || "").replace(/^```(?:text|markdown)?\s*/i, "").replace(/```$/i, "").trim();
 }
@@ -1108,6 +1135,11 @@ export async function runEnhancedSepiaPipeline(
     let reassembled = "";
     for (const [chunkIndex, chunk] of chunks.entries()) {
       const beforeDiag = scoreCandidateWithEnhanced(chunk, aiTellScore(chunk), options.depth, options.genre);
+      if (countWordsRu(chunk) >= 150 && !enhancedPhaseNeeded(phase, chunk, options.depth)) {
+        appendNote(`enhanced-фаза ${phase}: кусок ${chunkIndex + 1} чистый — пропуск без запроса`);
+        reassembled += chunk;
+        continue;
+      }
       const targetBurst = [Math.max(0.45, options.depth.minBurstiness), Math.min(0.82, Math.max(0.58, options.depth.minBurstiness + 0.18))] as [number, number];
       const prompt = phase === "rhythm-breaker"
         ? buildRhythmBreakerPrompt(chunk, [options.personaBlock, negativeGuidance].filter(Boolean).join("\n\n"), targetBurst)
@@ -2548,6 +2580,29 @@ export async function runTouchupPipeline(
 
   if (!unresolvedLabels.length) {
     unresolvedLabels = [...new Set(priorityMatches(current))];
+  }
+
+  // Детерминированный добив хвоста (сборка 112): если LLM-проходы хвост не
+  // вырастили, склейка соседних коротких фраз точкой с запятой делает это без
+  // единого запроса к модели. Живой прогон главы 4: три попытки на сцену уходили
+  // впустую на замечание «нет хвоста», грязный текст принимался как есть.
+  // Принимаем склейку, только если она не добавила штампов, не вернула стаккато
+  // и не уронила ритм ниже пола.
+  {
+    if (longTailIssue(current)) {
+      const fused = fuseShortSentencesForTail(current);
+      if (fused.fused > 0) {
+        const fusedRegressions = rewriteRegressionIssues(current, fused.text, options.lockedNarrationPerson ?? "unknown");
+        const fusedStaccatoBad = staccatoRegressed(current, fused.text);
+        const fusedBurstsOk = sentenceBurstiness(fused.text) >= Math.min(RHYTHM_FLOOR, sentenceBurstiness(current));
+        const fusedStampsOk = detectAiTells(fused.text).length <= detectAiTells(current).length;
+        if (!fusedRegressions.length && !fusedStaccatoBad && fusedBurstsOk && fusedStampsOk) {
+          current = fused.text;
+          refinedBlocks += fused.fused;
+          cleanNote = `детерминированная склейка: ${fused.fused} пар(ы) коротких фраз → длинные (доля 25+ слов ${Math.round(fused.share * 100)}%)`;
+        }
+      }
+    }
   }
 
   return { text: current, refinedBlocks, passesRun, unresolvedLabels, cleanNote };

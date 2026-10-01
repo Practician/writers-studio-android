@@ -319,6 +319,14 @@ export interface AiTellScore {
   staccatoComponent?: number;
   /** Диагностика: балл за отсутствие глаголов мысли. В gate не входит. */
   thoughtPenalty?: number;
+  /** В gate входит: отсутствие длинного хвоста (предложений 25+ слов). */
+  longTailComponent?: number;
+  /** В gate входит: прямая речь без единого восклицания. */
+  exclamationComponent?: number;
+  /** Доля предложений 25+ слов вне реплик (0…1). */
+  longTailShare?: number;
+  /** Восклицаний на 100 предложений. */
+  exclamationRate?: number;
   /** Доля реплик диалога в тексте — по ним стаккато не считается. */
   dialogueShare?: number;
   /** Доля коротких предложений и самая длинная цепочка — по нарративу, без реплик. */
@@ -487,6 +495,98 @@ export function longTailIssue(
   return `нет хвоста длинных предложений: ${stat.count} из ${stat.total} длиной ${LONG_SENTENCE_WORDS}+ слов `
     + `(${Math.round(stat.share * 100)}%, живая проза даёт 15–30%) — срастя́й соседние фразы в длинные `
     + `(${LONG_SENTENCE_WORDS}–40 слов) и дописывай продолжение, не добавляя новых фактов`;
+}
+
+export interface FuseTailResult {
+  /** Текст после склейки (абзацы и порядок фраз сохранены). */
+  text: string;
+  /** Сколько пар фраз склеено. */
+  fused: number;
+  /** Доля длинных предложений после склейки. */
+  share: number;
+}
+
+/**
+ * Детерминированная склейка коротких фраз в длинные (сборка 112).
+ *
+ * Причина: модель (особенно слабая, после 503-фолбэка на flash-lite) раз за разом
+ * игнорирует замечание «нет хвоста длинных предложений» — в живом прогоне главы 4
+ * три попытки на сцену уходили впустую, грязный текст принимался как есть, а счёт
+ * шёл на 110 запросов. Склейка не требует модели вообще: пара соседних
+ * повествовательных фраз суммарной длиной 25–40 слов соединяется либо запятой
+ * (вторая начинается с союза «и/а/но» — грамматически чисто), либо точкой
+ * с запятой (две независимые клаузы — тоже чисто). Слова не меняются и не
+ * добавляются, реплики, вопросы, восклицания и цитаты не трогаются.
+ */
+export function fuseShortSentencesForTail(
+  text: string,
+  targetShare = LONG_TAIL_SHARE_TARGET,
+): FuseTailResult {
+  const joinPair = (a: string, b: string): string => {
+    const clean = a.trim().replace(/\.$/u, "");
+    const next = b.trim();
+    // Вторая фраза начинается с союза — запятая вместо точки грамматически чиста.
+    if (/^(И|А|Но|Зато|Однако|Причём|Причем)\b/u.test(next)) {
+      return `${clean}, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
+    }
+    // Две независимые клаузы через точку с запятой — тоже чисто.
+    return `${clean}; ${next}`;
+  };
+  const parts = text.split(/(\n{2,})/u);
+  let fused = 0;
+  const fusedParts = parts.map((part) => {
+    if (/^\n{2,}$/u.test(part)) return part;
+    let sents = splitSentences(part);
+    if (sents.length < 2) return part;
+    for (let pass = 0; pass < 6; pass += 1) {
+      const stat = longTailStats(sents.join(" "));
+      if (stat.share >= targetShare || stat.total < 4) break;
+      const usable = (sentence: string): number | null => {
+        const trimmed = sentence.trim();
+        if (isDialogueSentence(trimmed)) return null;
+        if (!/\.$/u.test(trimmed)) return null;
+        if (/[«»"„“;]/u.test(trimmed)) return null;
+        const count = wordsOf(trimmed).length;
+        if (count > 22) return null;
+        return count;
+      };
+      // Кандидаты — пары и тройки соседних фраз суммарной длиной 25–40 слов:
+      // при средней длине 10–12 слов пары до «длинной» не дотягивают, тройки —
+      // дотягивают. Выбираем вариант, ближайший к 30 словам.
+      let bestStart = -1;
+      let bestSpan = 0;
+      let bestScore = Infinity;
+      for (let i = 0; i < sents.length - 1; i += 1) {
+        const first = usable(sents[i]);
+        if (first === null) continue;
+        const counts: number[] = [first];
+        for (let span = 2; span <= 3 && i + span <= sents.length; span += 1) {
+          const count = usable(sents[i + span - 1]);
+          if (count === null) break;
+          counts.push(count);
+          if (counts.some((value) => value > 14) && span === 3) continue;
+          const sum = counts.reduce((total, value) => total + value, 0);
+          if (sum < LONG_SENTENCE_WORDS || sum > 40) continue;
+          const score = Math.abs(sum - 30);
+          if (score < bestScore) {
+            bestScore = score;
+            bestStart = i;
+            bestSpan = span;
+          }
+        }
+      }
+      if (bestStart < 0) break;
+      let merged = sents[bestStart].trim();
+      for (let k = 1; k < bestSpan; k += 1) {
+        merged = joinPair(merged, sents[bestStart + k]);
+      }
+      sents = [...sents.slice(0, bestStart), merged, ...sents.slice(bestStart + bestSpan)];
+      fused += 1;
+    }
+    return sents.join(" ");
+  });
+  const out = fusedParts.join("");
+  return { text: out, fused, share: longTailStats(out).share };
 }
 
 // --- Сборка 108: оформление и повторность (калибровка на 32 сегментах книги) ---
@@ -712,13 +812,12 @@ export function aiTellScore(text: string): AiTellScore {
     ? 0
     : Math.min(((rhythmFloor - burstiness) / rhythmFloor) * 15, 15);
   const openerComponent = Math.min(openerRepetition * 50, 10);
-  // Однородность зачинов: класс «он / имя героя / это» живёт в коридоре 15–20 %,
-  // выше 25 % текст ведёт себя как список кадров с одним и тем же зачином. Считаем
-  // мягче повторов подряд: это признак сюжета, а не опечатка, и высокий балл штрафует
-  // до 8 при потолке gate 8 — как полный провал, но не выше.
-  const openerClassComponent = openerGeneric <= 0.25
+  // Однородность зачинов: класс «он / имя героя / это» у живого автора 12–13 %
+  // (эталон книги 12,8 %), у машинной главы 4 — 33,7 %. Порог 0,20 вместо 0,25:
+  // эталон (0,127) по-прежнему даёт 0, а глава 4 получает ~7 вместо ~3.
+  const openerClassComponent = openerGeneric <= 0.20
     ? 0
-    : Math.min(((openerGeneric - 0.25) / 0.25) * 8, 8);
+    : Math.min(((openerGeneric - 0.20) / 0.20) * 10, 10);
   // Прямая речь: размеченная речь — норма русской прозы, неразмеченная — признак
   // того, что речь вообще не оформлена, и сильная машинная черта. Штрафуем по доле
   // немаркированных, но не на полную: в тексте без речевых тегов (чистый нарратив)
@@ -730,6 +829,25 @@ export function aiTellScore(text: string): AiTellScore {
   // Inventory-детектор: 3+ предложения подряд описывают физические свойства локации.
   // live data: AI=4.0 vs HUMAN=1.2 (ratio 3.3x) — сильнейший AI-маркер.
   const inventoryComponent = detectInventoryChain(sentences) ? 8 : 0;
+
+  // Длинный хвост (сборка 112): у живого автора 15–30 % фраз длиной 25+ слов
+  // (эталон гл.1–3: 0,19–0,30), у машинной главы 4 — 0,087. Раньше хвост в gate
+  // не входил вообще: gate пропускал текст без единой длинной фразы (глава 4
+  // давала score 7 при эталоне 9 — перевёрнутая шкала). Замер только там, где
+  // он измерим (≥10 предложений вне реплик), иначе короткий фрагмент получал
+  // бы штраф за сам факт краткости.
+  const tailStat = longTailStats(text);
+  const longTailComponent = tailStat.total >= LONG_TAIL_MIN_SENTENCES && tailStat.share < LONG_TAIL_SHARE_LIMIT
+    ? Math.min(((LONG_TAIL_SHARE_LIMIT - tailStat.share) / LONG_TAIL_SHARE_LIMIT) * 8, 8)
+    : 0;
+  // Восклицания в прямой речи (сборка 112): у автора 13 на 100 предложений,
+  // у главы 4 — 2,5 при живых репликах с речевыми тегами. Проверка молчит, если
+  // прямой речи почти нет (чистый нарратив без тегов штрафовать не за что).
+  const exclCount = sentences.filter((sentence) => sentence.includes("!")).length;
+  const exclRate = sentences.length ? (exclCount / sentences.length) * 100 : 100;
+  const exclamationComponent = sentences.length >= 8 && speech.tagged >= 2 && exclRate < EXCLAMATION_RATE_LIMIT
+    ? 4
+    : 0;
 
   // Thought-verbs бонус: "подумал/решил/понял/осознал" в 1-м лице — сильный HUMAN-маркер.
   // live data: thoughtPer1k HUMAN=12.3 vs AI=3.4 (ratio 0.28 = HUMAN в 3.6x чаще).
@@ -743,16 +861,19 @@ export function aiTellScore(text: string): AiTellScore {
     }
   }
 
-  // Gate-оценка собирается ТОЛЬКО из признаков внешнего детектора. Стаккато и
-  // thought-штраф в неё не входят: вместе они давали минимум 10-14 баллов при пороге 8
-  // у глубины «Максимум» — gate становился недостижимым по построению, а «улучшение»
-  // шло за счёт выравнивания реплик (сборка 80 → 82: локальный аудит лучше, внешний
-  // детектор хуже). Оба компонента остаются в отчёте как диагностика.
+  // Gate-оценка собирается из признаков внешнего детектора: штампы, UI-лог, ровный
+  // ритм, зачины (оба вида), inventory, немаркированная речь, отсутствие длинного
+  // хвоста и немые реплики. Стаккато и thought-штраф в неё не входят: вместе они
+  // давали минимум 10-14 баллов при пороге 8 у глубины «Максимум» — gate
+  // становился недостижимым по построению, а «улучшение» шло за счёт выравнивания
+  // реплик (сборка 80 → 82: локальный аудит лучше, внешний детектор хуже).
+  // Оба компонента остаются в отчёте как диагностика.
   const score = Math.round(
     Math.min(
       Math.max(0,
         patternComponent + interfaceComponent + rhythmComponent + openerComponent
         + inventoryComponent + openerClassComponent + speechMarkingComponent
+        + longTailComponent + exclamationComponent
       ),
       100,
     ),
@@ -763,6 +884,10 @@ export function aiTellScore(text: string): AiTellScore {
     diagnosticScore,
     staccatoComponent: Math.round(staccatoComponent),
     thoughtPenalty: Math.round(thoughtPenalty),
+    longTailComponent: Math.round(longTailComponent),
+    exclamationComponent,
+    longTailShare: tailStat.share,
+    exclamationRate: Math.round(exclRate * 10) / 10,
     dialogueShare: sentences.length ? sentences.filter(isDialogueSentence).length / sentences.length : 0,
     shortShare: short.share,
     maxShortChain: short.maxChain,
@@ -962,12 +1087,16 @@ export const HUMANIZE_DEPTHS: Record<HumanizeDepth, HumanizeDepthConfig> = {
   maximum: {
     id: "maximum",
     title: "Максимум",
-    description: "Сцены + best-of-3 черновиков + best-of-N абзацев + gate",
+    description: "Сцены + best-of-2 черновиков + best-of-N абзацев + gate",
     sceneGeneration: true,
     maxTouchupBlocks: 20,
     touchupRounds: 2,
     bestOfN: 2,
-    chapterCandidates: 3,
+    // Сборка 112: было 3 — живой прогон главы 4 показал 110 запросов к модели,
+    // из которых ~треть уходила на третий черновик, почти никогда не выигрывающий
+    // отбор (ранг различает первые два). Два черновика сохраняют выбор без
+    // троекратной цены сценового маршрута.
+    chapterCandidates: 2,
     scoreGate: 8,
     minBurstiness: 0.5,
     cleanScoreMax: 8,
