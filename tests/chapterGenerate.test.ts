@@ -4,15 +4,19 @@ import { aiTellScore, humanizeGatePassed, rankChapterCandidate, resolveHumanizeD
 import {
   detectorSegmentIssues,
   fallbackBeatsFromSynopsis,
+  hasStyleDefect,
   humanizeProseDraft,
   isAcceptableDetectorSegmentRewrite,
   isAcceptableRewrite,
   isAcceptableStaccatoRewrite,
+  isAcceptableStyleRewrite,
   longTailAdded,
   longTailRegressed,
   rewriteDetectorAiSegments,
   runTouchupPipeline,
   staccatoRegressed,
+  styleDefectFixed,
+  styleDefectWorsened,
   type ChapterGenerateInput,
 } from "../server/chapterGenerate";
 
@@ -697,4 +701,57 @@ test("финальный rewrite не может вернуть молчание
   assert.ok(!/не\s+ответил|промолчал/iu.test(result.text), "rewrite не должен возвращать молчание");
   assert.ok(!/замер|застыл/iu.test(result.text), "rewrite не должен возвращать freeze-штамп");
   assert.match(result.humanizeReport.note || "", /отклон(?:ен|ён|ена)/u);
+});
+
+// --- Сборка 108: приёмка по дефектам эталона книги (зачины, повторы, кавычки, восклицания) ---
+
+/** Кусок без единого дефекта: реплика в дефисах, как в книге. */
+const CLEAN_STYLE_SEGMENT = [
+  "Он вошёл в длинный коридор и остановился у сырой стены, прислушиваясь, как где-то в глубине гулко и безжизненно капает вода, отражаясь от бетонных плит под низким сводом.",
+  "Стены здесь были сырые и холодные на ощупь.",
+  "Потом шагнул вперёд по коридору неуверенно, и свет мигнул разок и погас на мгновение, отчего в глубине снова сгустилась тьма.",
+  "Старый фонарь он достал из кармана куртки, но тот не зажёгся совсем с первого раза, и пришлось постучать им крепко о ладонь, прежде чем слабая лампа наконец дрогнула и засветилась тускло.",
+  "Вода капала в глубине коридора ровно и без торопливости.",
+  "Фонарь лежал в ладони тяжёлый и холодный.",
+  "Свет мигнул разок и погас на мгновение.",
+  "Коридор кончился тупиком!",
+  "И длинный коридор снова стал совсем тёмным.",
+  "Лампа слабо дрогнула и засветилась тускло.",
+  "Васька спросил: - Видишь что-нибудь там? -",
+  "Илья не ответил сразу.",
+].join(" ");
+
+/** Тот же кусок, но реплика в кавычках: единственный дефект — «». */
+const QUOTED_STYLE_SEGMENT = CLEAN_STYLE_SEGMENT.replace(
+  "- Видишь что-нибудь там? -",
+  "«Видишь что-нибудь там?»",
+);
+
+test("приёмка 108: снятие кавычек принимается, добавление в чистый кусок — нет", () => {
+  const quotedIssues = detectorSegmentIssues(QUOTED_STYLE_SEGMENT);
+  assert.ok(
+    quotedIssues.some((issue) => issue.startsWith("кавычки:")),
+    `ожидали замечание о кавычках, получили ${JSON.stringify(quotedIssues)}`,
+  );
+  assert.equal(quotedIssues.some((issue) => issue.startsWith("зачины:")), false, "зачины в порядке");
+  assert.equal(quotedIssues.some((issue) => issue.startsWith("восклицания:")), false, "восклицания в порядке");
+
+  assert.equal(hasStyleDefect(CLEAN_STYLE_SEGMENT), false, "эталонный кусок чист");
+  assert.equal(hasStyleDefect(QUOTED_STYLE_SEGMENT), true);
+  assert.equal(styleDefectFixed(QUOTED_STYLE_SEGMENT, CLEAN_STYLE_SEGMENT), true);
+  assert.equal(styleDefectWorsened(QUOTED_STYLE_SEGMENT, CLEAN_STYLE_SEGMENT), false);
+  assert.equal(isAcceptableStyleRewrite(QUOTED_STYLE_SEGMENT, CLEAN_STYLE_SEGMENT), true);
+  assert.equal(
+    isAcceptableDetectorSegmentRewrite(QUOTED_STYLE_SEGMENT, CLEAN_STYLE_SEGMENT),
+    true,
+    "правка, снимающая единственный дефект, принимается",
+  );
+
+  // Обратная правка — чистому куску добавили «»: новых дефектов мы не прощаем.
+  assert.equal(styleDefectWorsened(CLEAN_STYLE_SEGMENT, QUOTED_STYLE_SEGMENT), true);
+  assert.equal(
+    isAcceptableDetectorSegmentRewrite(CLEAN_STYLE_SEGMENT, QUOTED_STYLE_SEGMENT),
+    false,
+    "новый дефект в чистый источник не принимается",
+  );
 });

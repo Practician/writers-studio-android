@@ -21,6 +21,11 @@ import {
   repeatedNgramShare,
   repeatedOpenerShare,
   openerClassShare,
+  OPENER_SHARE_LIMIT,
+  WORD_REPEAT_TTR_LIMIT,
+  EXCLAMATION_RATE_LIMIT,
+  segmentStyle,
+  styleIssues,
   speechFormattingStats,
   staccatoBlocks,
   staccatoIssue,
@@ -559,4 +564,72 @@ test("staccatoBlocks отдаёт худшие абзацы в пределах 
   assert.deepEqual(staccatoBlocks([CHOPPY_BLOCK, LIVING_BLOCK, CHOPPY_BLOCK], 8), [0, 2]);
   assert.deepEqual(staccatoBlocks([CHOPPY_BLOCK, CHOPPY_BLOCK], 1), [0]);
   assert.deepEqual(staccatoBlocks([CHOPPY_BLOCK], 0), [], "лимит 0 — ничего не берём");
+});
+
+// --- Сборка 108: оформление и повторность (эталон: 32 сегмента книги, 100% HUMAN) ---
+
+/** Кусок без единого дефекта: разные зачины, слова повторяются, длинный хвост есть, «!» есть. */
+const CLEAN_STYLE_SEGMENT = [
+  "Он вошёл в длинный коридор и остановился у сырой стены, прислушиваясь, как где-то в глубине гулко и безжизненно капает вода, отражаясь от бетонных плит под низким сводом.",
+  "Стены здесь были сырые и холодные на ощупь.",
+  "Потом шагнул вперёд по коридору неуверенно, и свет мигнул разок и погас на мгновение, отчего в глубине снова сгустилась тьма.",
+  "Старый фонарь он достал из кармана куртки, но тот не зажёгся совсем с первого раза, и пришлось постучать им крепко о ладонь, прежде чем слабая лампа наконец дрогнула и засветилась тускло.",
+  "Вода капала в глубине коридора ровно и без торопливости.",
+  "Фонарь лежал в ладони тяжёлый и холодный.",
+  "Свет мигнул разок и погас на мгновение.",
+  "Коридор кончился тупиком!",
+  "И длинный коридор снова стал совсем тёмным.",
+  "Лампа слабо дрогнула и засветилась тускло.",
+  "Васька спросил: - Видишь что-нибудь там? -",
+  "Илья не ответил сразу.",
+].join(" ");
+
+/** Тот же кусок, но реплика взята в кавычки: единственный дефект — «». */
+const QUOTED_STYLE_SEGMENT = CLEAN_STYLE_SEGMENT.replace(
+  "- Видишь что-нибудь там? -",
+  "«Видишь что-нибудь там?»",
+);
+
+/** Реплики в дефисах, как в книге: «Васька спросил: - Видишь что-нибудь там? -». */
+const DEPHRASED_STYLE_SEGMENT = CLEAN_STYLE_SEGMENT;
+
+test("styleIssues: четыре левера сборки 108 отмерены по эталону книги", () => {
+  const quoted = styleIssues(QUOTED_STYLE_SEGMENT);
+  assert.deepEqual(quoted.map((issue) => issue.split(":")[0]), ["кавычки"], JSON.stringify(quoted));
+  assert.deepEqual(styleIssues(DEPHRASED_STYLE_SEGMENT), [], "эталонный кусок без дефектов");
+  // Короткий фрагмент не меряем: на трёх предложениях и TTR, и зачины — шум.
+  assert.deepEqual(styleIssues("Он долго смотрел на медленно оседающую пыль."), []);
+
+  const clean = segmentStyle(DEPHRASED_STYLE_SEGMENT);
+  assert.ok(clean.openerShare <= OPENER_SHARE_LIMIT, `зачин ${clean.openerShare}`);
+  assert.ok(clean.ttr <= WORD_REPEAT_TTR_LIMIT, `TTR ${clean.ttr}`);
+  assert.ok(clean.exclamationRate >= EXCLAMATION_RATE_LIMIT, `восклицания ${clean.exclamationRate}`);
+  assert.equal(clean.quoteSentences, 0);
+});
+
+test("styleIssues ловит однотипные зачины, повторность и отсутствие восклицаний", () => {
+  const stampy = [
+    "Он стоял у края обрыва и смотрел вниз.",
+    "Он не решался сделать шаг ближе.",
+    "Он помнил, как вчера здесь была вода.",
+    "Он услышал шорох за спиной.",
+    "Он обернулся и не увидел ничего.",
+    "Он сел на камень и стал ждать.",
+    "Он достал флягу из-за пазухи и сделал долгий глоток.",
+    "Ветер поднимал пыль над тропой и уносил её к дальнему лесу, где уже темнело.",
+    "Камни под ногой зыблись, словно их подкапывало чем-то давним и терпеливым.",
+    "Где-то внизу по камню стучало неровно и долго, откликаясь в скале.",
+    "Луна вышла из-за туч и залила склон холодным светом.",
+    "Кто-то крикнул ему со стороны дороги дважды, и голос был незнакомый, короткий.",
+  ].join(" ");
+  const issues = styleIssues(stampy);
+  assert.ok(issues.some((issue) => issue.startsWith("зачины:")), JSON.stringify(issues));
+  assert.ok(issues.some((issue) => issue.startsWith("повтор слов:")), JSON.stringify(issues));
+  assert.ok(issues.some((issue) => issue.startsWith("восклицания:")), JSON.stringify(issues));
+  assert.ok(!issues.some((issue) => issue.startsWith("кавычки:")), "кавычек нет");
+  const style = segmentStyle(stampy);
+  assert.ok(style.words >= 100, `TTR меряется от 100 слов, тут ${style.words}`);
+  assert.ok(style.openerShare > OPENER_SHARE_LIMIT);
+  assert.ok(style.ttr > WORD_REPEAT_TTR_LIMIT);
+  assert.ok(style.exclamationRate < EXCLAMATION_RATE_LIMIT);
 });

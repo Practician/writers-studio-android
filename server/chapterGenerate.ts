@@ -38,6 +38,9 @@ import {
   repeatedNgramShare,
   resolveHumanizeDepth,
   rhythmIssues,
+  segmentStyle,
+  segmentStyleAverage,
+  styleIssues,
   runMultiDetectorGate,
   sentenceBurstiness,
   speechFormattingStats,
@@ -47,6 +50,12 @@ import {
   LONG_TAIL_MIN_SENTENCES,
   LONG_TAIL_SHARE_LIMIT,
   LONG_TAIL_SHARE_TARGET,
+  OPENER_SHARE_LIMIT,
+  WORD_REPEAT_TTR_LIMIT,
+  EXCLAMATION_RATE_LIMIT,
+  STYLE_MIN_SENTENCES,
+  STYLE_MIN_WORDS,
+  type SegmentStyle,
   STACCATO_BLOCK_MIN_SENTENCES,
   STACCATO_WORD_LIMIT,
   type AiTellScore,
@@ -397,17 +406,86 @@ export function longTailAdded(source: string, candidate: string): boolean {
  * (та же история, что с isAcceptableStaccatoRewrite).
  */
 export function isAcceptableLongTailRewrite(source: string, candidate: string): boolean {
+  return styleRewriteGuards(source, candidate) && longTailAdded(source, candidate);
+}
+
+/**
+ * Общие ограничения для приёмок, чья главная заслуга — метрика, а не общий score:
+ * кандидат не должен быть пустым, копией, переросшим источником, пустым пересказом
+ * или текстом с новыми штампами, и не должен ронять стаккато и пол ритма.
+ */
+function styleRewriteGuards(source: string, candidate: string): boolean {
   if (!candidate.trim() || candidate.trim() === source.trim()) return false;
   if (blockQualityIssues(source, candidate).length) return false;
   if (candidate.length > source.length * TOUCHUP_MAX_GROWTH) return false;
   if (countWordsRu(source) >= 120 && countWordsRu(candidate) < Math.max(40, Math.floor(countWordsRu(source) * 0.7))) return false;
   if (detectAiTells(candidate).length > detectAiTells(source).length) return false;
-  if (!longTailAdded(source, candidate)) return false;
   if (staccatoRegressed(source, candidate)) return false;
   const beforeBurst = sentenceBurstiness(source);
   const afterBurst = sentenceBurstiness(candidate);
   if (afterBurst < Math.min(RHYTHM_FLOOR, beforeBurst)) return false;
   return true;
+}
+
+/** Дефекты, которые правка обязана двигать. Хвост меряем своей логикой
+ *  (`longTailAdded`), остальные четыре — порогами эталона книги. */
+function styleDefectFlags(text: string) {
+  const style = segmentStyle(text);
+  return {
+    tail: Boolean(longTailIssue(text)),
+    openers: style.sentences >= STYLE_MIN_SENTENCES && style.topOpenerCount >= 3
+      && style.openerShare > OPENER_SHARE_LIMIT,
+    repeats: style.words >= STYLE_MIN_WORDS && style.ttr > WORD_REPEAT_TTR_LIMIT,
+    quotes: style.sentences >= 6 && style.quoteSentences > 0,
+    exclamation: style.sentences >= 8 && style.exclamationRate < EXCLAMATION_RATE_LIMIT,
+  };
+}
+
+/** Есть ли у сегмента хоть один замечанный дефект: если нет, править его не просят. */
+export function hasStyleDefect(text: string): boolean {
+  const flags = styleDefectFlags(text);
+  return flags.tail || flags.openers || flags.repeats || flags.quotes || flags.exclamation;
+}
+
+/**
+ * Хотя бы один дефект источника ушёл. Считаем по метрике, а не по исчезнувшему
+ * замечанию: короткий кусок (меньше STYLE_MIN_SENTENCES) замечание снимает сам по
+ * себе, иначе правка из шести предложений «чинила» бы зачины одним лишь делением.
+ */
+export function styleDefectFixed(source: string, candidate: string): boolean {
+  const after = segmentStyle(candidate);
+  const flags = styleDefectFlags(source);
+  if (flags.tail && longTailAdded(source, candidate)) return true;
+  if (flags.openers && after.openerShare <= OPENER_SHARE_LIMIT) return true;
+  if (flags.repeats && after.ttr <= WORD_REPEAT_TTR_LIMIT) return true;
+  if (flags.quotes && after.quoteSentences === 0) return true;
+  if (flags.exclamation && after.exclamationRate >= EXCLAMATION_RATE_LIMIT) return true;
+  return false;
+}
+
+/** Появился новый дефект, которого у источника не было, — правка не принимается. */
+export function styleDefectWorsened(source: string, candidate: string): boolean {
+  const before = styleDefectFlags(source);
+  const after = segmentStyle(candidate);
+  if (!before.openers && after.sentences >= STYLE_MIN_SENTENCES && after.topOpenerCount >= 3
+    && after.openerShare > OPENER_SHARE_LIMIT) return true;
+  if (!before.repeats && after.words >= STYLE_MIN_WORDS && after.ttr > WORD_REPEAT_TTR_LIMIT) return true;
+  if (!before.quotes && after.sentences >= 6 && after.quoteSentences > 0) return true;
+  if (!before.exclamation && after.sentences >= 8 && after.exclamationRate < EXCLAMATION_RATE_LIMIT) return true;
+  return false;
+}
+
+/**
+ * Приёмка правки, чья главная заслуга — один из пяти дефектов (хвост, зачины,
+ * повторность, кавычки, восклицания). Нужна потому, что общий критерий смотрит на
+ * штампы и разброс, а удачная правка зачастую снижает burstiness и по нему
+ * отвергалась бы ровно из-за того, чего мы добиваемся.
+ */
+export function isAcceptableStyleRewrite(source: string, candidate: string): boolean {
+  if (!hasStyleDefect(source)) return false;
+  if (!styleRewriteGuards(source, candidate)) return false;
+  if (styleDefectWorsened(source, candidate)) return false;
+  return styleDefectFixed(source, candidate);
 }
 
 /**
@@ -424,7 +502,7 @@ export function isAcceptableLongTailRewrite(source: string, candidate: string): 
 export function detectorSegmentIssues(text: string): string[] {
   const issues = blockHumanizeIssues(text);
   const staccato = staccatoIssue(text, STACCATO_BLOCK_MIN_SENTENCES);
-  return staccato ? [...issues, staccato] : issues;
+  return [...issues, ...styleIssues(text), ...(staccato ? [staccato] : [])];
 }
 
 /** Правка не должна делать стаккато-горячим сегмент, который был чист,
@@ -452,14 +530,16 @@ export function isAcceptableDetectorSegmentRewrite(source: string, candidate: st
   if (longTailRegressed(source, candidate)) return false;
   if (isAcceptableRewrite(source, candidate)) {
     if (staccatoRegressed(source, candidate)) return false;
-    // Общая приёмка довольна штампами и разбросом, но хвост длинных предложений
-    // обязана вырасти: иначе правка «улучшила» локальный score и оставила текст
-    // без длинных фраз, как это было на главе 4 (0,013 → 0,048 при человеческих 0,19–0,30).
-    return !longTailIssue(source) || longTailAdded(source, candidate);
+    // Общая приёмка довольна штампами и разбросом, но дефекты эталона книги
+    // (хвост, зачины, повторность, кавычки, восклицания) обязаны уйти: иначе правка
+    // «улучшила» локальный score и оставила текст там, где детектор его видит AI.
+    // Чистому источку править нечего, но и он не должен получить новых дефектов.
+    if (!hasStyleDefect(source)) return !styleDefectWorsened(source, candidate);
+    return styleDefectFixed(source, candidate) && !styleDefectWorsened(source, candidate);
   }
-  // Общий критерий отверг (упал burstiness или score), но правка явно добавила
-  // длинные фразы — это и есть задача, ради которой сегмент и отправлялся.
-  if (longTailIssue(source) && isAcceptableLongTailRewrite(source, candidate)) return true;
+  // Общий критерий отверг (упал burstiness или score), но правка явно убрала один
+  // из дефектов — это и есть задача, ради которой сегмент и отправлялся.
+  if (isAcceptableStyleRewrite(source, candidate)) return true;
   return Boolean(staccatoIssue(source, STACCATO_BLOCK_MIN_SENTENCES))
     && isAcceptableStaccatoRewrite(source, candidate);
 }
@@ -3252,6 +3332,10 @@ export async function rewriteDetectorAiSegments(
     }));
     const anyStaccato = targets.some((target) => target.issues.some((issue) => issue.startsWith("стаккато:")));
     const anyLongTail = targets.some((target) => target.issues.some((issue) => issue.startsWith("нет хвоста длинных предложений")));
+    const anyStyle = targets.some((target) => target.issues.some(
+      (issue) => issue.startsWith("зачины:") || issue.startsWith("повтор слов:")
+        || issue.startsWith("кавычки:") || issue.startsWith("восклицания:"),
+    ));
     try {
       const raw = await generate({
         model: options.model,
@@ -3276,6 +3360,12 @@ export async function rewriteDetectorAiSegments(
               + "25+ слов, а здесь почти все фразы средние. В каждом таком сегменте сделай минимум одно-два "
               + "длинных предложения (25–40 слов) — сращивая соседние фразы или дописывая продолжение того же "
               + "наблюдения, без новых фактов; остальные предложения оставь средними и короткими."
+            : "") +
+          (anyStyle
+            ? " По отмеченным сегментам сверяйся с авторским эталоном: реплики и названия — без кавычек "
+              + "(реплику отделяй дефисом); повторяй уже названные слова и местоимения вместо синонимичной "
+              + "подмены; не начинай больше шестой части предложений с одного и того же слова; в прямой речи "
+              + "допускай окрики и восклицания — у автора 13 «!» на 100 предложений, здесь ни одного."
             : ""),
         temperature: modelTemperature(options.model, 0.72),
         responseMimeType: "application/json",
@@ -3316,6 +3406,18 @@ export async function rewriteDetectorAiSegments(
     emitChapterStep(
       `Длинный хвост (предложения ${LONG_SENTENCE_WORDS}+ слов): ${pct(tailBefore.share)} → ${pct(tailAfter.share)}, `
       + `норма 15–30%.`,
+    );
+    // Наблюдаемость леверов сборки 108: зачины, повторность, восклицания и кавычки.
+    // Меряем кусками ≈1050 знаков — той нарезкой, какую делает детектор, иначе TTR
+    // по всему тексту (0,48–0,55) не с чем сравнивать с сегментным эталоном 0,785.
+    const styleBefore = segmentStyleAverage(originalJoined);
+    const styleAfter = segmentStyleAverage(revised.join(""));
+    const quotes = (style: SegmentStyle) => ((style.quoteSentences / (style.sentences || 1)) * 100).toFixed(1);
+    emitChapterStep(
+      `Стиль: зачин-макс ${pct(styleBefore.openerShare)} → ${pct(styleAfter.openerShare)} (эталон до 16%), `
+      + `TTR ${styleBefore.ttr.toFixed(2)} → ${styleAfter.ttr.toFixed(2)} (эталон 0,79), `
+      + `восклицаний ${Math.round(styleBefore.exclamationRate)} → ${Math.round(styleAfter.exclamationRate)} на 100 предл. `
+      + `(эталон 13), кавычки ${quotes(styleBefore)} → ${quotes(styleAfter)} на 100 предл. (эталон 0,7).`,
     );
   }
 

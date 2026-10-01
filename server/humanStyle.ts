@@ -489,6 +489,151 @@ export function longTailIssue(
     + `(${LONG_SENTENCE_WORDS}–40 слов) и дописывай продолжение, не добавляя новых фактов`;
 }
 
+// --- Сборка 108: оформление и повторность (калибровка на 32 сегментах книги) ---
+
+/**
+ * Пороги, отобранные 01.10.2026 на прямом A/B: книга Васи прогнана через
+ * нейродетектор целиком (38 270 знаков, 32 сегмента — 100% HUMAN), глава 4
+ * той же нарезкой — 17 из 19 сегментов AI. Сортировка по z-отдалению среднего
+ * нашей главы от книжных сегментов дала:
+ *
+ *   кавычки «»      0,70 против 6,39 на 100 предложений  z=+2,07
+ *   повторность     TTR 0,785 против 0,842               z=+1,42
+ *   зачины          12,8% против 17,7%                   z=+1,20
+ *   служебные слова 31,7% против 27,5%                   z=−1,10
+ *   восклицания     13,1 против 0,99 на 100 предложений  z=−0,91
+ *
+ * Ритм и стаккато (хвост, burst, spread, share6), которыми занимались сборки
+ * 105–107, дали |z| меньше 0,55 — вердикт они не двигают, поэтому гейт на них
+ * остаётся, но новые леверы выше по силе.
+ */
+/** Самый частый зачин: эталон книги 12,8% (σ 4,0), наша глава 17,7%, HUMAN-сегменты главы 4 — 9%. */
+export const OPENER_SHARE_LIMIT = 0.16;
+/** Повторность слов внутри куска: эталон 0,785 (σ 0,040), наша глава 0,842. */
+export const WORD_REPEAT_TTR_LIMIT = 0.83;
+/** Восклицаний на 100 предложений: эталон 13,1, наша глава 0,99. Ниже порога = «!» в куске нет. */
+export const EXCLAMATION_RATE_LIMIT = 3;
+/** Минимум предложений, чтобы считать зачины и восклицания (как у хвоста). */
+export const STYLE_MIN_SENTENCES = 10;
+/** Минимум слов, чтобы TTR не шумел на коротком фрагменте. */
+export const STYLE_MIN_WORDS = 100;
+
+export interface SegmentStyle {
+  /** Всего предложений в куске. */
+  sentences: number;
+  /** Всего словоформ. */
+  words: number;
+  /** Самое частое слово, которым начинаются предложения. */
+  topOpener: string;
+  /** Сколько предложений начинается с него. */
+  topOpenerCount: number;
+  /** Доля таких предложений (0…1). */
+  openerShare: number;
+  /** TTR: сколько разных словоформ на одну форму (повторность). */
+  ttr: number;
+  /** Восклицаний на 100 предложений. */
+  exclamationRate: number;
+  /** Предложений, где есть «». */
+  quoteSentences: number;
+}
+
+/** Повторность, зачины, кавычки и восклицания — четыре левера сборки 108. */
+function wordForms(text: string): string[] {
+  // TTR меряем по словоформам: `wordsOf` режет по пробелам и оставляет «-», «—» и
+  // «мать!» отдельными токенами, из-за чего кусок книги давал 0,820 вместо
+  // калиброванного эталона 0,785 — порог 0,83 срабатывал бы на трети человеческих
+  // сегментов. Дефис внутри слова («что-нибудь») остаётся частью формы.
+  return (text.match(/[а-яёa-z]+(?:-[а-яёa-z]+)*/giu) ?? []).map((word) => word.toLowerCase());
+}
+
+export function segmentStyle(text: string): SegmentStyle {
+  const sentences = splitSentences(text);
+  const words = wordForms(text);
+  const firstWords = new Map<string, number>();
+  let quoteSentences = 0;
+  let exclamations = 0;
+  for (const sentence of sentences) {
+    const first = (sentence.match(/[а-яёa-z]+/iu)?.[0] ?? "").toLowerCase();
+    if (first) firstWords.set(first, (firstWords.get(first) ?? 0) + 1);
+    if (sentence.includes("«")) quoteSentences += 1;
+    if (sentence.includes("!")) exclamations += 1;
+  }
+  const [topOpener = "", topOpenerCount = 0]
+    = [...firstWords.entries()].sort((left, right) => right[1] - left[1])[0] ?? [];
+  return {
+    sentences: sentences.length,
+    words: words.length,
+    topOpener,
+    topOpenerCount,
+    openerShare: sentences.length ? topOpenerCount / sentences.length : 0,
+    ttr: words.length ? new Set(words).size / words.length : 0,
+    exclamationRate: sentences.length ? (exclamations / sentences.length) * 100 : 0,
+    quoteSentences,
+  };
+}
+
+/**
+ * Средний стиль по кускам ≈1050 знаков — нарезкой, какую делает внешний детектор.
+ * Её только и можно сравнивать с эталоном книги (32 сегмента: зачин 12,8%,
+ * TTR 0,785, 13,1 восклицания и 0,7 «» на 100 предложений): на всём тексте целиком
+ * TTR другой шкалы (0,48–0,55), и сегментным порогом 0,83 его мерить нельзя.
+ */
+export function segmentStyleAverage(text: string, size = 1050): SegmentStyle {
+  const windows: string[] = [];
+  let buffer = "";
+  for (const sentence of splitSentences(text)) {
+    buffer = buffer ? `${buffer} ${sentence}` : sentence;
+    if (buffer.length >= size) {
+      windows.push(buffer);
+      buffer = "";
+    }
+  }
+  if (buffer.trim()) windows.push(buffer.trim());
+  if (!windows.length) return segmentStyle(text);
+  const styles = windows.map((window) => segmentStyle(window));
+  const average = (list: number[]) => list.reduce((sum, value) => sum + value, 0) / list.length;
+  const loudest = styles.reduce((left, right) => (right.openerShare > left.openerShare ? right : left));
+  return {
+    sentences: Math.round(average(styles.map((style) => style.sentences))),
+    words: Math.round(average(styles.map((style) => style.words))),
+    topOpener: loudest.topOpener,
+    topOpenerCount: loudest.topOpenerCount,
+    openerShare: average(styles.map((style) => style.openerShare)),
+    ttr: average(styles.map((style) => style.ttr)),
+    exclamationRate: average(styles.map((style) => style.exclamationRate)),
+    quoteSentences: average(styles.map((style) => style.quoteSentences)),
+  };
+}
+
+/**
+ * Замечания по стилю для промпта батча. Пороги взяты на человеческом эталоне,
+ * поэтому срабатывание — не «фрагмент плохой», а «фрагмент отличается от книги».
+ * На правки идут только сегменты, помеченные внешним детектором как AI.
+ */
+export function styleIssues(text: string, minSentences = STYLE_MIN_SENTENCES): string[] {
+  const style = segmentStyle(text);
+  const issues: string[] = [];
+  if (style.sentences >= minSentences && style.topOpenerCount >= 3
+    && style.openerShare > OPENER_SHARE_LIMIT) {
+    issues.push(`зачины: «${style.topOpener}» начинает ${style.topOpenerCount} из ${style.sentences} предложений `
+      + `(${Math.round(style.openerShare * 100)}%, эталон до ${Math.round(OPENER_SHARE_LIMIT * 100)}%) — начинай `
+      + `по-разному: другое подлежащее, обстоятельство места или времени, инверсия`);
+  }
+  if (style.words >= STYLE_MIN_WORDS && style.ttr > WORD_REPEAT_TTR_LIMIT) {
+    issues.push(`повтор слов: TTR ${style.ttr.toFixed(2)} против 0,79 у человека — повторяй уже названные слова, `
+      + `возвращай «он», «тут», «снова», то же имя вторым кругом; не подменяй синонимом то, что уже названо`);
+  }
+  if (style.sentences >= 6 && style.quoteSentences > 0) {
+    issues.push(`кавычки: в ${style.quoteSentences} ${style.quoteSentences === 1 ? "предложении" : "предложениях"} `
+      + `есть «», у автора реплики и названия идут без кавычек (0,7 на 100 предложений) — сними кавычки, реплику отдели дефисом`);
+  }
+  if (style.sentences >= 8 && style.exclamationRate < EXCLAMATION_RATE_LIMIT) {
+    issues.push(`восклицания: ${Math.round(style.exclamationRate)} на 100 предложений, у автора 13 — в прямой речи `
+      + `допускай окрики, удивление и восклицания там, где они уместны, а не только ровные утверждения`);
+  }
+  return issues;
+}
+
 /**
  * Абзацы с худшим стаккато — для выбора блоков финального прохода доводки.
  * Пороги те же, что у главного замера, но минимум измеримых предложений ниже:
@@ -902,6 +1047,7 @@ export function humanStyleDirectives(): string {
 19. Внутренние глаголы: используй «подумал/решил/понял» умеренно — они маркер живого дневника. Но не называй свои эмоции: «осознал, что боится» → сделай жест или действие.
 20. Два физических действия подряд (достал→посмотрел→опустил) без внутренней реакции — признак «дневника инженера». Между действиями — одна мысль, одно наблюдение или пауза.
 21. Длина предложений: у живого автора есть длинный хвост — 15–30% фраз длиной 25–40 слов при медиане 15–19 слов. Если все предложения короткие и одинаковые (медиана около 10–12), сращивай соседние в длинные или дописывай продолжение — без новых фактов. Совсем короткие (≤6 слов) не больше шестой части, кроме реплик.
+22. Оформление и повторность по авторскому эталону: реплики и названия — без кавычек (в книге 0,7 «» на 100 предложений против 6,4 у нас), реплику отделяй дефисом; повторяй уже названные слова и местоимения вместо синонимичной подмены (у автора TTR 0,79); не начинай больше шестой части предложений с одного слова; в прямой речи допускай окрики и восклицания — у автора 13 «!» на 100 предложений. Причастные обороты с «который» — не чаще одного на 200 слов, двоеточие — реже одного на 25 предложений.
 ${YANDEX_DETECTOR_STYLE}
 ${NINE_LEVERS}
 ${NEGATIVE_EXAMPLES}`;

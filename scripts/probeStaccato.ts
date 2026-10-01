@@ -7,8 +7,10 @@ import {
   aiTellScore,
   isDialogueSentence,
   longTailStats,
+  segmentStyle,
   shortSentenceStats,
   staccatoBlocks,
+  type SegmentStyle,
 } from "../server/humanStyle";
 
 const [, , filePath] = process.argv;
@@ -21,6 +23,8 @@ const pick = (labels: string[]) => rows.filter((row) => labels.includes(row.labe
 const summarize = (label: string, list: Row[]) => {
   const shorts = list.map((row) => shortSentenceStats(row.text, 6, isDialogueSentence));
   const scores = list.map((row) => aiTellScore(row.text));
+  // Стиль сборки 108: зачины, повторность, восклицания, кавычки — эталон книги.
+  const styles = list.map((row) => segmentStyle(row.text));
   return {
     label,
     n: list.length,
@@ -29,6 +33,10 @@ const summarize = (label: string, list: Row[]) => {
     maxChain: Math.max(...shorts.map((stat) => stat.maxChain)),
     // Хвост длинных предложений (25+ слов) — метрика сборки 107, эталон 0,19–0,30.
     tail: +avg(list.map((row) => longTailStats(row.text).share)).toFixed(3),
+    opener: +avg(styles.map((style) => style.openerShare)).toFixed(3),
+    ttr: +avg(styles.map((style) => style.ttr)).toFixed(3),
+    excl: +avg(styles.map((style) => style.exclamationRate)).toFixed(1),
+    quotes: avg(styles.map((style) => style.quoteSentences)),
     burst: +avg(scores.map((score) => score.burstiness ?? 0)).toFixed(3),
     tell: +avg(scores.map((score) => score.score)).toFixed(2),
     hot: shorts.filter((stat) => stat.share >= STACCATO_SHARE_LIMIT || stat.maxChain >= STACCATO_CHAIN_LIMIT).length,
@@ -56,4 +64,24 @@ const whole = longTailStats(rows.map((row) => row.text).join("\n\n"));
 console.log(
   `хвост по главе: ${(whole.share * 100).toFixed(1)}% длинных предложений `
   + `(${whole.count} из ${whole.total}), эталон человека 19–30%`,
+);
+
+const styleOf = (list: Row[]) => {
+  const styles = list.map((row) => segmentStyle(row.text));
+  const average = (pick: (style: SegmentStyle) => number) => avg(styles.map(pick));
+  return {
+    opener: average((style) => style.openerShare),
+    ttr: average((style) => style.ttr),
+    excl: average((style) => style.exclamationRate),
+    // кавычки — как и эталон книги: на 100 предложений, а не штуками.
+    quotes: average((style) => (style.quoteSentences / (style.sentences || 1)) * 100),
+  };
+};
+const style = styleOf(rows);
+console.log(
+  `стиль по главе (среднее по ${rows.length} сегментам): `
+  + `зачин-макс ${(style.opener * 100).toFixed(1)}% (эталон до 16%), `
+  + `TTR ${style.ttr.toFixed(3)} (эталон 0,785), `
+  + `восклицания ${style.excl.toFixed(1)} на 100 предл. (эталон 13,1), `
+  + `кавычки ${style.quotes.toFixed(1)} на 100 предл. (эталон 0,7)`,
 );
