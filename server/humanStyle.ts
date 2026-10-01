@@ -578,7 +578,7 @@ export function segmentStyle(text: string): SegmentStyle {
  * TTR 0,785, 13,1 восклицания и 0,7 «» на 100 предложений): на всём тексте целиком
  * TTR другой шкалы (0,48–0,55), и сегментным порогом 0,83 его мерить нельзя.
  */
-export function segmentStyleAverage(text: string, size = 1050): SegmentStyle {
+export function segmentStyleWindows(text: string, size = 1050): string[] {
   const windows: string[] = [];
   let buffer = "";
   for (const sentence of splitSentences(text)) {
@@ -589,6 +589,11 @@ export function segmentStyleAverage(text: string, size = 1050): SegmentStyle {
     }
   }
   if (buffer.trim()) windows.push(buffer.trim());
+  return windows;
+}
+
+export function segmentStyleAverage(text: string, size = 1050): SegmentStyle {
+  const windows = segmentStyleWindows(text, size);
   if (!windows.length) return segmentStyle(text);
   const styles = windows.map((window) => segmentStyle(window));
   const average = (list: number[]) => list.reduce((sum, value) => sum + value, 0) / list.length;
@@ -630,6 +635,27 @@ export function styleIssues(text: string, minSentences = STYLE_MIN_SENTENCES): s
   if (style.sentences >= 8 && style.exclamationRate < EXCLAMATION_RATE_LIMIT) {
     issues.push(`восклицания: ${Math.round(style.exclamationRate)} на 100 предложений, у автора 13 — в прямой речи `
       + `допускай окрики, удивление и восклицания там, где они уместны, а не только ровные утверждения`);
+  }
+  return issues;
+}
+
+/**
+ * Те же замечания, но по окнам ≈1050 знаков — нарезкой калибровки. Порог TTR 0,83
+ * отмерен именно на таких кусках, а на всей сцене сразу (2000–3000 знаков) повторность
+ * из-за длины ниже, и левер почти не срабатывал бы. Одно замечание на левер: сцена
+ * из двух-трёх окон не получает три строки «повтор слов» подряд.
+ */
+export function styleIssuesByWindows(text: string, size = 1050): string[] {
+  const windows = segmentStyleWindows(text, size);
+  const seen = new Set<string>();
+  const issues: string[] = [];
+  for (const source of windows.length ? windows : [text]) {
+    for (const issue of styleIssues(source)) {
+      const key = issue.slice(0, issue.indexOf(":") + 1);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      issues.push(issue);
+    }
   }
   return issues;
 }

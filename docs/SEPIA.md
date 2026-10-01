@@ -16,35 +16,36 @@
 
 | Правило sepia | Файл:строка | Как проверяется |
 |---|---|---|
-| **Три слоя: narrative → discourse → style; правь самый глубокий первым** | `server/chapterGenerate.ts:704` (`runArchitectureRepair`, `ARCHITECTURE_PHASE_CHUNK_CHARS = 14_000` на `:699`), фазы стиля — `PHASE_CHUNK_CHARS = 7_000` на `:662` | Архитектурный проход идёт до цикла фаз (`:817` → `:826`), чанки для метрик считаются после него |
-| **Workflow A: самодиагностика рубрикой перед правкой** | `server/sepiaRubric.ts:256` (`runSepiaRubric`), вызов `server/chapterGenerate.ts:817` | `tests/sepiaRubric.test.ts` |
+| **Три слоя: narrative → discourse → style; правь самый глубокий первым** | `server/chapterGenerate.ts:934` (`runArchitectureRepair`, `ARCHITECTURE_PHASE_CHUNK_CHARS = 14_000` на `:929`), фазы стиля — `PHASE_CHUNK_CHARS = 7_000` на `:892` | Архитектурный проход идёт до цикла фаз (`:1047` → `:1056`), чанки для метрик считаются после него |
+| **Workflow A: самодиагностика рубрикой перед правкой** | `server/sepiaRubric.ts:256` (`runSepiaRubric`), вызов `server/chapterGenerate.ts:1047` | `tests/sepiaRubric.test.ts` |
 | **Рубрика 30 признаков в 5 группах, чтение по одной группе за раз** | `server/sepiaRubric.ts:49` (каталог), `:189` (`groupSystemInstruction` — «Читаешь ТОЛЬКО эту группу») | тест «у каждого вызова свой systemInstruction»: в задании ровно `features.length` строк «Как судить:» |
 | **no quote — no signal**, без вероятностей и общего счёта | `server/sepiaRubric.ts:234` (наблюдение без цитаты отбрасывается), запреты — в `:189` | `tests/sepiaRubric.test.ts` («мусор отбрасывается») |
 | **Сбой группы — это не «группа чистая»** | `server/sepiaRubric.ts:288` → `failedGroups`, `passes` | тест «упавшая группа попадает в failedGroups» |
 | **Двухэтапный refactor: сначала список дефектов, потом правка** | `server/sepiaRubric.ts:345` (`rubricDefectBlock`), порядок слоёв архитектура → связность → поверхность | тест «слои идут сверху вниз» |
 | **Over-correction advisory** (значение у края — новый отпечаток правки) | `server/sepiaRubric.ts:209` (`normalizeKind`), вынос отдельным блоком «НЕ усиливай» в `:356` | тест «перекоррекция вынесена отдельно»; в `defects` её нет |
-| **Calibration: 3–5 приёмов на историю, а не на сцену** | `server/sepiaMoves.ts:154` (`buildChapterMovePlan`), каталоги `:24` / `:37` / `:52`, карта сценам — `server/chapterGenerate.ts:1255`, `:2496`, итог в лог `:2501` | `tests/sepiaMoves.test.ts` (8 тестов) |
+| **Calibration: 3–5 приёмов на историю, а не на сцену** | `server/sepiaMoves.ts:154` (`buildChapterMovePlan`), каталоги `:24` / `:37` / `:52`, карта сценам — `server/chapterGenerate.ts:2789`, итог в лог `:2794` | `tests/sepiaMoves.test.ts` (8 тестов) |
 | **Leave slack** (часть сцен вообще без приёмов) | `server/sepiaMoves.ts:199` (`quietScenes`), `movePlanSummary` `:245` | `tests/sepiaMoves.test.ts` |
 | **Deletion beats addition (74 / 18 / 8); repair ≠ growth** | `server/editRevert.ts:158` (`editMixRatios` — доли replace/delete/insert по LCS слов) | `tests/editRevert.test.ts` (5 тестов: вставка, замена, удаление, пустой кандидат) |
-| Тот же замер в фазовой приёмке | `server/chapterGenerate.ts:913` (`insert > 0.25` → отклонение), `:921` (`growthCap` 1.06 / 1.08 вместо прежних 1.12 / 1.3), `:927` | отклонение печатается в заметке фазы |
+| Тот же замер в фазовой приёмке | `server/chapterGenerate.ts:1143` (`insert > 0.25` → отклонение), `:1151` (`growthCap` 1.06 / 1.08 вместо прежних 1.12 / 1.3), `:1159` | отклонение печатается в заметке фазы |
 | **Слои правятся, а не шлифуются поверх** | возврат незаработанных правок — `server/editRevert.ts:32` (`revertUnearnedEdits`) | `tests/editRevert.test.ts` |
 | **Model identity: версия = точный тег, prior vs operative** | `server/humanStyleEnhanced.ts:878` (`modelFingerprintGuidance`): DeepSeek V4/V3.2, Gemini 3/3.0/3.1 → *operative*, 3.5/3.8 → *prior*; без измеренного отпечатка — пустая строка («consulted, not guessed») | `tests/chapterArchitecture.test.ts` (тик в промпте сцены) |
 | **Never invent specifics / whitelists / protected ranges** | `src/lib/directLlmClient.ts:1474` (`sepiaGuardrailsBlock`), подключён в `humanizeDirective()` `:1450`: 3–5 приёмов на весь текст, замена вместо вставки, нерегуляризованная прямая речь и цитаты, whitelist на чистую грамматику | правки промпта; проверяется прогоном `npm test` |
 | **Гейт, который слышит внешний детектор** | `server/humanStyleEnhanced.ts:721` (`runMultiDetectorGate`), метрики `:245` (CV абзацев), `:267` (разброс длин предложений), `:299` (пассив), `:312` (TTR), `:333` (коннекторы) | `tests/humanStyleEnhanced.test.ts`, `tests/architectureAudit.test.ts` |
-| Пороги гейта в конвейере | `server/chapterGenerate.ts:609`/`:613` и `:997`/`:1001`; дефолты `server/humanStyleEnhanced.ts:741`/`:747` | калибровка, раздел 2 |
-| **Стаккато мерится при написании сцены, а не только на собранной главе** | пороги `server/humanStyle.ts:404` (`STACCATO_WORD_LIMIT = 6`, `SHARE = 0.38`, `CHAIN = 4`), замер `staccatoIssue` `:418`, вызов в петле попыток сцены `server/chapterGenerate.ts:2739` (только `attempt === 0` — цена ограничена одним повтором на сцену; заметка уходит в `emitChapterStep` → в «Копировать журнал») | `tests/humanStyle.test.ts:480`, `tests/chapterGenerate.test.ts:377` |
-| **Стаккато-проход имеет право сработать при пройденном gate** | подавление `break` `server/chapterGenerate.ts:2161` и `:2217`, сам проход `:2261`, выбор абзацев `staccatoBlocks` `server/humanStyle.ts:435`, отдельная приёмка `isAcceptableStaccatoRewrite` `server/chapterGenerate.ts:347` (общая требует, чтобы score не вырос, а склейка сама снижает разброс — удачные склейки отвергались) | `tests/chapterGenerate.test.ts:101` |
-| **Ритм-инструкция без метронома** | `RHYTHM_DIRECTIVE` `server/chapterGenerate.ts:2012`: прежняя «одна фраза ≤6 слов, одна длинная» задавала механическое чередование — ровно тот рисунок, который детектор помечает AI; теперь «коротких не больше трети и никогда не три подряд» | входит в промпты touchup-проходов, проверяется прогоном `npm test` |
-| **Стаккато стоит в целях батча «переписать AI-сегменты»** | `detectorSegmentIssues` `server/chapterGenerate.ts:424` = `blockHumanizeIssues` + `staccatoIssue(…, STACCATO_BLOCK_MIN_SENTENCES)`: раньше `rhythmIssues` молчал при burstiness 0,69, а у сегментов без штампов список issues был пуст вовсе — модель правила «что не названо» | `tests/chapterGenerate.test.ts` («detectorSegmentIssues и приёмка сегмента учитывают стаккато») |
-| **Приёмка сегмента не пропускает ни вырождение в стаккато, ни пустую склейку** | `isAcceptableDetectorSegmentRewrite` `server/chapterGenerate.ts:451`: правка, проходящая по штампам, отвергается при `staccatoRegressed` (`:432`); правка, не проходящая по штампам, но склеивающая рубленость, принимается через `isAcceptableStaccatoRewrite` | тот же тест (обе ветки) |
-| **Длинный хвост: 15–30% предложений 25+ слов** | метрика `longTailStats` / `longTailIssue` `server/humanStyle.ts:463` / `:480`, пороги `LONG_SENTENCE_WORDS = 25`, `LONG_TAIL_SHARE_LIMIT = 0,15`, `LONG_TAIL_MIN_SENTENCES = 10`, `LONG_TAIL_SHARE_TARGET = 0,12` (`:444`–`:452`). Куда входит: `rhythmIssues` `:948` (абзац от 6 фраз), петля попыток сцены `server/chapterGenerate.ts:2856` (только `attempt === 0` и только «ни одного длинного», `minShare = 0,01`), цели батча через `detectorSegmentIssues` `:424`, правило 21 `humanStyleDirectives()` `server/humanStyle.ts:904`, `RHYTHM_RULE` `:545`, `RHYTHM_DIRECTIVE` `:2120`, `STACCATO_DIRECTIVE` `:2123` | `tests/humanStyle.test.ts` («longTailIssue ловит…», «rhythm issues дополняются…»), `tests/chapterGenerate.test.ts` («detectorSegmentIssues и приёмка требуют хвост…»); замер отчёта — `scripts/probeStaccato.ts` (колонка `tail=`) |
-| **Приёмка требует, чтобы хвост вырос** | `longTailAdded` `server/chapterGenerate.ts:385` — правка, проходящая по общему критерию, обязана добавить длинное предложение и достичь `0,12` от длины куска, иначе отвергается; `longTailRegressed` `:371` — убрать хвост нельзя ни одной правкой; запасная ветка `isAcceptableLongTailRewrite` `:399` принимает правку, провалившую общую приёмку по burstiness, но явно добавившую длинные фразы | тот же тест (все три ветки) |
-| **Пост-проход склейки обновляет `blocks`, а не только `text`** | `rewriteDetectorAiSegments` `server/chapterGenerate.ts:3232`: AI-сегменты, оставшиеся стаккато-горячими после батча, склеиваются ещё раз (`STACCATO_DIRECTIVE`), счётчик `staccatoMergedSegments`; панель вставляет в главу именно `blocks` — поэтому проход, который пишет только в `text`, в документ не попадал | `tests/chapterGenerate.test.ts`, `tests/pairJudge.test.ts` («склейку стаккато, отвергнутую судьёй, не несёт в blocks») |
+| Пороги гейта в конвейере | `server/chapterGenerate.ts:839` и `:1227`; дефолты `server/humanStyleEnhanced.ts:741`/`:747` | калибровка, раздел 2 |
+| **Стаккато мерится при написании сцены, а не только на собранной главе** | пороги `server/humanStyle.ts:404` (`STACCATO_WORD_LIMIT = 6`, `SHARE = 0.38`, `CHAIN = 4`), замер `staccatoIssue` `:418`, вызов в петле попыток сцены `server/chapterGenerate.ts:2939` (только `attempt === 0` — цена ограничена одним повтором на сцену; заметка уходит в `emitChapterStep` → в «Копировать журнал») | `tests/humanStyle.test.ts:480`, `tests/chapterGenerate.test.ts:377` |
+| **Стаккато-проход имеет право сработать при пройденном gate** | подавление `break` `server/chapterGenerate.ts:2362` и `:2417`, сам проход `:2256`, выбор абзацев `staccatoBlocks` `server/humanStyle.ts:669`, отдельная приёмка `isAcceptableStaccatoRewrite` `server/chapterGenerate.ts:357` (общая требует, чтобы score не вырос, а склейка сама снижает разброс — удачные склейки отвергались) | `tests/chapterGenerate.test.ts:101` |
+| **Ритм-инструкция без метронома** | `RHYTHM_DIRECTIVE` `server/chapterGenerate.ts:2210`: прежняя «одна фраза ≤6 слов, одна длинная» задавала механическое чередование — ровно тот рисунок, который детектор помечает AI; теперь «коротких не больше трети и никогда не три подряд» | входит в промпты touchup-проходов, проверяется прогоном `npm test` |
+| **Стаккато стоит в целях батча «переписать AI-сегменты»** | `detectorSegmentIssues` `server/chapterGenerate.ts:503` = `blockHumanizeIssues` + `staccatoIssue(…, STACCATO_BLOCK_MIN_SENTENCES)`: раньше `rhythmIssues` молчал при burstiness 0,69, а у сегментов без штампов список issues был пуст вовсе — модель правила «что не названо» | `tests/chapterGenerate.test.ts` («detectorSegmentIssues и приёмка сегмента учитывают стаккато») |
+| **Приёмка сегмента не пропускает ни вырождение в стаккато, ни пустую склейку** | `isAcceptableDetectorSegmentRewrite` `server/chapterGenerate.ts:530`: правка, проходящая по штампам, отвергается при `staccatoRegressed` (`:511`, вызов `:533`); правка, не проходящая по штампам, но склеивающая рубленость, принимается через `isAcceptableStaccatoRewrite` | тот же тест (обе ветки) |
+| **Длинный хвост: 15–30% предложений 25+ слов** | метрика `longTailStats` / `longTailIssue` `server/humanStyle.ts:463` / `:480`, пороги `LONG_SENTENCE_WORDS = 25`, `LONG_TAIL_SHARE_LIMIT = 0,15`, `LONG_TAIL_MIN_SENTENCES = 10`, `LONG_TAIL_SHARE_TARGET = 0,12` (`:444`–`:452`). Куда входит: `rhythmIssues` `:948` (абзац от 6 фраз), петля попыток сцены `server/chapterGenerate.ts:2946` (только `attempt === 0` и только «ни одного длинного», `minShare = 0,01`), цели батча через `detectorSegmentIssues` `:503`, правило 21 `humanStyleDirectives()` `server/humanStyle.ts:1049`, `RHYTHM_RULE` `server/chapterGenerate.ts:626`, `RHYTHM_DIRECTIVE` `:2210`, `STACCATO_DIRECTIVE` `:2213` | `tests/humanStyle.test.ts` («longTailIssue ловит…», «rhythm issues дополняются…»), `tests/chapterGenerate.test.ts` («detectorSegmentIssues и приёмка требуют хвост…»); замер отчёта — `scripts/probeStaccato.ts` (колонка `tail=`) |
+| **Приёмка требует, чтобы хвост вырос** | `longTailAdded` `server/chapterGenerate.ts:395` — правка, проходящая по общему критерию, обязана добавить длинное предложение и достичь `0,12` от длины куска, иначе отвергается; `longTailRegressed` `:381` — убрать хвост нельзя ни одной правкой; запасная ветка `isAcceptableLongTailRewrite` `:409` принимает правку, провалившую общую приёмку по burstiness, но явно добавившую длинные фразы | тот же тест (все три ветки) |
+| **Пост-проход склейки обновляет `blocks`, а не только `text`** | `rewriteDetectorAiSegments` `server/chapterGenerate.ts:3275`: AI-сегменты, оставшиеся стаккато-горячими после батча, склеиваются ещё раз (`STACCATO_DIRECTIVE`), счётчик `staccatoMergedSegments`; панель вставляет в главу именно `blocks` — поэтому проход, который пишет только в `text`, в документ не попадал | `tests/chapterGenerate.test.ts`, `tests/pairJudge.test.ts` («склейку стаккато, отвергнутую судьёй, не несёт в blocks») |
 | **Подстановка сегмента не схлопывает абзацы главы** | `src/lib/detectorApply.ts`: `findDetectorSegmentRange` глотает пунктуацию на границах, но не переносы строк; `mergeBlockIntoRange` раскладывает блок обратно по абзацам заменяемого диапазона и держит заголовок отдельным абзацем. Без этого кнопка «Очеловечить AI-сегменты» превращала абзацы AI-сегментов в простыню (проверено: 4 → 1), потому что сегменты отчёта приходят вовсе без `\n` | `tests/detectorApply.test.ts` (6 тестов) |
 | **Правка кнопкой видна в журнале** | `emitChapterStep` в `rewriteDetectorAiSegments`: «Переписка AI-сегментов: N из M», «Батч принял X правок», «Стаккато-склейка: …» — иначе в «Копировать журнал» не видно, запускался ли пост-проход | прогон `npm test` |
-| **Леверы отмерены прямым A/B «книга против главы»** | `segmentStyle` `server/humanStyle.ts:549` / `styleIssues` `:613` и пороги `OPENER_SHARE_LIMIT = 0,16`, `WORD_REPEAT_TTR_LIMIT = 0,83`, `EXCLAMATION_RATE_LIMIT = 3` (`:511`–`:515`): книга, прогоненная детектором целиком (32/32 HUMAN), разошлась с нашей главой по кавычкам (z=1,70), повторности (1,33), зачинам (1,28) и восклицаниям (0,91); ритмовые метрики дали \|z\| < 0,55. Замечания идут в `detectorSegmentIssues` `server/chapterGenerate.ts:502`, флаг `anyStyle` — в цели батча, правило 22 — в `humanStyleDirectives()` | `tests/humanStyle.test.ts` («styleIssues: четыре левера…», «styleIssues ловит однотипные зачины…»); калибровка — раздел 2.5 |
-| **Приёмка требует ухода хотя бы одного дефекта и не прощает новых** | `hasStyleDefect` / `styleDefectFixed` / `styleDefectWorsened` / `isAcceptableStyleRewrite` `server/chapterGenerate.ts:445`–`:484`: «ушёл» меряется по метрике (иначе короткий кусок снимал бы замечание одним лишь делением), новый дефект блокирует правку даже у чистого источника; ветка `isAcceptableStyleRewrite` принимает правку, провалившую общую приёмку по burstiness | `tests/chapterGenerate.test.ts` («приёмка 108: снятие кавычек…»), старые тесты 107 проходят без изменений |
-| **Измеримость отчёта** | `rubric` в отчёте: `server/chapterGenerate.ts:2900`, `:3201`, `:3288` (`passes / defects / overCorrections / failedGroups`) | `tests/sepiaRubric.test.ts` |
+| **Леверы отмерены прямым A/B «книга против главы»** | `segmentStyle` `server/humanStyle.ts:549` / `styleIssues` `:618` / `styleIssuesByWindows` `:648` и пороги `OPENER_SHARE_LIMIT = 0,16`, `WORD_REPEAT_TTR_LIMIT = 0,83`, `EXCLAMATION_RATE_LIMIT = 3` (`:511`–`:515`): книга, прогоненная детектором целиком (32/32 HUMAN), разошлась с нашей главой по кавычкам (z=1,70), повторности (1,33), зачинам (1,28) и восклицаниям (0,91); ритмовые метрики дали \|z\| < 0,55. Замечания идут в `detectorSegmentIssues` `server/chapterGenerate.ts:503`, флаг `anyStyle` — в цели батча, правило 22 — в `humanStyleDirectives()` | `tests/humanStyle.test.ts` («styleIssues: четыре левера…», «styleIssues ловит однотипные зачины…»); калибровка — раздел 2.5 |
+| **Приёмка требует ухода хотя бы одного дефекта и не прощает новых** | `hasStyleDefect` / `styleDefectFixed` / `styleDefectWorsened` / `isAcceptableStyleRewrite` `server/chapterGenerate.ts:446`–`:485`: «ушёл» меряется по метрике (иначе короткий кусок снимал бы замечание одним лишь делением), новый дефект блокирует правку даже у чистого источника; ветка `isAcceptableStyleRewrite` принимает правку, провалившую общую приёмку по burstiness | `tests/chapterGenerate.test.ts` («приёмка 108: снятие кавычек…»), старые тесты 107 проходят без изменений |
+| **Сцена рождается человеческой: реплика с тире без «» и четыре левера меряются при написании** | промпт сцены: запрет «» в ЯЗЫК-блоке `server/chapterGenerate.ts:1652`, `AUTHOR_STYLE_RULE` `:634` (в тексте промпта `:1664`); замер в петле попыток `:2953` через `styleIssuesByWindows` `server/humanStyle.ts:648` (окна ≈1050 знаков — та же нарезка, что у калибровки, и одно замечание на левер); наблюдаемость — строка «Стиль при написании: …» `:3016` | `tests/chapterGenerate.test.ts` («стиль автора меряется при написании…»), `tests/humanStyle.test.ts` («styleIssuesByWindows…»); калибровка — раздел 2.6 |
+| **Измеримость отчёта** | `rubric` в отчёте: `server/chapterGenerate.ts:1319`, `:3226`, `:3644` (`passes / defects / overCorrections / failedGroups`) | `tests/sepiaRubric.test.ts` |
 | Проводка фаз, липкая модель, ротация ключей | `src/lib/directLlmClient.ts:148` (`GEMINI_STICKY_MS`), `:29` (`PHASE_MODEL_ROUTING = false`) | `tests/geminiKeyOrder.test.ts` |
 
 ---
@@ -298,6 +299,58 @@ REVIEW из-за CV абзацев — поднять/опустить поро�
 «Стиль: зачин-макс X% → Y% (эталон до 16%), TTR A → B (эталон 0,79), восклицаний C
 → D на 100 предл. (эталон 13), кавычки E → F предл.».
 
+
+### 2.6. Путь записи: сцена должна родиться человеческой (сборка 109, 01.10)
+
+Сборки 105–108 чинят текст **после** того, как он написан: гейт, батч
+«переписать AI-сегменты», пост-проходы. Внешний детектор видит собранный документ,
+но источник дефектов — промпт сцены. Поэтому на записи стояло три вещи, одна из
+которых прямо противоречила калибровке:
+
+- **уже было:** правило 22 `humanStyleDirectives()` в системной инструкции сцены
+  (те же четыре левера, что и в батче), `RHYTHM_RULE` (длинный хвост), голос автора
+  и few-shots из образца, стаккато и хвост в петле попыток на `attempt === 0`;
+- **было не так:** ЯЗЫК-блока требовал «каждая реплика — в ёлочках „…“ или с тире» и
+  объявлял браком реплику без кавычек, а few-shots показывают дефис. То есть главный
+  по силе сигнал (кавычки, z=1,70) разрешался самим требованием к модели;
+- **не было:** проверки леверов при написании — стаккато и хвост мерились, зачины,
+  повторность, кавычки и восклицания нет: сцена уходила в главу с дефектами, и их
+  потом чинил батч, когда переписать сцену уже нельзя.
+
+Решение 01.10 (вопросы пользователю): объём — «промпт + проверка на первой попытке»,
+формат реплики — «с тире, без „“».
+
+Что сделано в сборке 109:
+
+1. **Реплики только с тире, «» запрещены нигде** — ни у речи, ни у названий
+   (`server/chapterGenerate.ts:1652`): в книге 2 кавычки на 69 000 знаков, реплики
+   идут дефисом. Жёсткая проверка разметки речи (`speechFormattingIssue`)
+   тире в начале реплики принимает, поэтому в брак она такие куски не переводит.
+2. **`AUTHOR_STYLE_RULE`** (`:634`, в тексте промпта `:1664`) — то же, что правило 22,
+   но рядом с битом: возврат к уже названным словам вместо синонимичной подмены,
+   не больше шестой части предложений с одним зачином, окрики и восклицания в речи.
+3. **`styleIssuesByWindows` в петле попыток** (`:2953`, только `attempt === 0`) —
+   те же четыре левера, что и в батче, и **та же цена, что у стаккато и хвоста**:
+   одна проверка на первую попытку, максимум один перезапрос с названным нарушением.
+   Замечания измеряются по окнам ≈1050 знаков (`server/humanStyle.ts:648`): порог
+   TTR 0,83 отмерен на такой нарезке, а на всей сцене (2000–3000 знаков) повторность
+   из-за длины ниже, и левер почти не срабатывал бы; одно замечание на левер — сцена
+   из двух-трёх окон не получает три строки «повтор слов» подряд.
+4. **Наблюдаемость**: после склейки черновика в журнал уходит строка
+   «Стиль при написании: зачин-макс X%, TTR A, восклицаний B на 100 предл., кавычки
+   C на 100 предл. (эталон книги: 13%, 0,79, 13, 0,7)» (`:3016`) — по ней видно,
+   писалась ли глава по-человечески с первого раза или леверы не дошли от промпта до
+   текста. Плюс строки «Сцена N, попытка 1: перезапрос — …» в «Копировать журнал».
+
+Что на этом пути стоит намеренно: восклицания на сцене означают «хотя бы один „!“»
+(порог 3 на 100 предложений при 20 фразах = одна), а не «повтори 13 на 100» — потолка
+у левера нет, потому что на эталоне он не отмерен. Проверяется прогоном
+`npm test`: «стиль автора меряется при написании: реплика в кавычках даёт перезапрос»
+(чистая калибровочно сцена из 20 предложений с единственным дефектом — «» — уходит в
+один перезапрос и не остаётся в главе) и «styleIssuesByWindows: калибровочная нарезка и
+одно замечание на левер».
+
+---
 ---
 
 ## 3. Экономика и известные риски
@@ -313,6 +366,13 @@ REVIEW из-за CV абзацев — поднять/опустить поро�
   пробитом пороге. Если журнал начинает сплошь показывать «перезапрос — стаккато»,
   это либо честная рубленость генерации, либо сцена почти целиком из реплик и замер
   ведётся по малому числу предложений (`STACCATO_MIN_SENTENCES = 10`).
+- Стиль автора (сборка 109): заметка на сцене стоит **максимум +1 запрос на сцену**
+  (только на первой попытке, замечания не переизмеряются на второй — как у стаккато
+  и хвоста), батч — ничего сверх уже идущих запросов. Ловушка, куда не должны
+  свалиться: «восклицания» срабатывают на сцене без единого «!», а на эталоне этот
+  левер даёт 9 ложных срабатываний из 28 сегментов — если журнал начнёт сплошь
+  показывать «перезапрос — восклицания», освободить этот левер только для сцены
+  (пороги эталона не трогать).
 - Длинный хвост: заметка на сцене стоит **максимум +1 запрос на сцену** (только на
   первой попытке и только если в сцене нет ни одного длинного предложения), батч —
   ничего сверх уже идущих запросов (замечание просто попадает в существующие

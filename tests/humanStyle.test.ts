@@ -25,7 +25,9 @@ import {
   WORD_REPEAT_TTR_LIMIT,
   EXCLAMATION_RATE_LIMIT,
   segmentStyle,
+  segmentStyleWindows,
   styleIssues,
+  styleIssuesByWindows,
   speechFormattingStats,
   staccatoBlocks,
   staccatoIssue,
@@ -632,4 +634,19 @@ test("styleIssues ловит однотипные зачины, повторно
   assert.ok(style.openerShare > OPENER_SHARE_LIMIT);
   assert.ok(style.ttr > WORD_REPEAT_TTR_LIMIT);
   assert.ok(style.exclamationRate < EXCLAMATION_RATE_LIMIT);
+});
+
+test("styleIssuesByWindows: калибровочная нарезка и одно замечание на левер", () => {
+  // Порог TTR 0,83 отмерен на окнах ≈1050 знаков — на сцене целиком повторность
+  // из-за длины ниже, и левер почти не срабатывал бы. Сцена из четырёх копий куска
+  // с «» даёт несколько окон, но замечание про кавычки ровно одно.
+  const scene = Array.from({ length: 4 }, () => QUOTED_STYLE_SEGMENT).join(" ");
+  const windows = segmentStyleWindows(scene);
+  assert.ok(windows.length >= 2, `окон ${windows.length}`);
+  assert.ok(windows.filter((window) => window.includes("«")).length >= 2, "«» должны быть в двух окнах");
+  const issues = styleIssuesByWindows(scene);
+  assert.equal(issues.filter((issue) => issue.startsWith("кавычки:")).length, 1, JSON.stringify(issues));
+  // Короткий кусок без окон мерится как есть, и чистый эталон замечаний не даёт.
+  assert.ok(styleIssuesByWindows(QUOTED_STYLE_SEGMENT).some((issue) => issue.startsWith("кавычки:")));
+  assert.ok(!styleIssuesByWindows(DEPHRASED_STYLE_SEGMENT).some((issue) => issue.startsWith("кавычки:")));
 });
