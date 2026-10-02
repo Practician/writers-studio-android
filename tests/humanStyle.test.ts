@@ -4,6 +4,7 @@ import {
   AI_TELL_CATALOG,
   AI_TELL_CATALOG_V2_EXTRA,
   aiTellScore,
+  authorIdiolectBlock,
   blockQualityIssues,
   changedBlockShare,
   detectAiTells,
@@ -32,6 +33,7 @@ import {
   styleIssues,
   styleIssuesByWindows,
   speechFormattingStats,
+  speechMarkingRegressed,
   staccatoBlocks,
   staccatoIssue,
   resolveHumanizeDepth,
@@ -765,4 +767,33 @@ test("fuseShortSentencesForTail растит хвост без потери сл
   const tiny = fuseShortSentencesForTail("Он шагнул. Встал. Пошёл.");
   assert.equal(tiny.fused, 0, "три фразы склеивать не во что");
   assert.equal(tiny.text, "Он шагнул. Встал. Пошёл.");
+});
+
+test("speechMarkingRegressed ловит снос тире правкой (сборка 113)", () => {
+  const marked = "— Слушай, — сказал Васька, усаживаясь на камень. — Пошли к реке, пока не стемнело, — ответил он.";
+  const stripped = "Слушай, сказал Васька, усаживаясь на камень. Пошли к реке, пока не стемнело, ответил он.";
+  assert.ok(speechMarkingRegressed(marked, stripped), "снятые тире — регресс");
+  assert.ok(!speechMarkingRegressed(stripped, marked), "возврат тире — не регресс");
+  assert.ok(!speechMarkingRegressed(marked, marked), "тот же текст — не регресс");
+  assert.ok(
+    !speechMarkingRegressed("Он шёл вдоль стены и считал шаги.", "Он шёл вдоль стены. Он считал шаги."),
+    "без речи регресса нет",
+  );
+});
+
+test("authorIdiolectBlock майнит словарь голоса из образца (сборка 113)", () => {
+  const sample = [
+    "Вечер пятницы не задался с самого начала. Стоя под козырьком остановки, Васька обдумывал ситуацию.",
+    "Рюкзак давил на плечи, лямки врезались в кожу. До дома Ильи он добрался уже в сумерках.",
+    "— Илюха, ты дома? — крикнул Васька, барабаня в дверь. — Васька, заходи, — ответил Илья.",
+    "Рюкзак полетел в угол, Васька сбросил кроссовки. Блин, ну и денёк, подумал он.",
+    "Илюха выглянул из кухни с полотенцем. Короче, рассказывай, сказал Илья, пододвигая табуретку.",
+    "Васька ел молча. Рюкзак лежал у стены, напоминая о дороге через лес и горы.",
+  ].join("\n");
+  const block = authorIdiolectBlock(sample.repeat(4));
+  assert.ok(block.includes("СЛОВАРЬ ГОЛОСА АВТОРА"), "заголовок блока");
+  assert.ok(block.includes("васька"), "имя героя из образца");
+  assert.ok(block.includes("рюкзак"), "характерное слово из образца");
+  assert.equal(authorIdiolectBlock("Он шагнул. Встал."), "", "короткий образец — пусто");
+  assert.equal(authorIdiolectBlock(""), "", "пустой образец — пусто");
 });

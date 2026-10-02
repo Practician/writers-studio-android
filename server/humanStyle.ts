@@ -277,6 +277,21 @@ function isMarkedSpeech(sentence: string): boolean {
   return /[«»„“"”]/u.test(sentence);
 }
 
+/**
+ * Правка снесла разметку прямой речи (сборка 113). Живой прогон 02.10.2026:
+ * сцены писались с тире (промпт требует, приёмка сцен проверяет), а в готовую
+ * главу вошло 18 немаркированных реплик из 19 — тире снесли поздние проходы
+ * («сними кавычки, реплику отдели дефисом» модель поняла как «убери и кавычки,
+ * и тире»). Проверяется регресс, а не абсолют: у разных кусков разная доля речи.
+ */
+export function speechMarkingRegressed(source: string, candidate: string): boolean {
+  const before = speechFormattingStats(source);
+  const after = speechFormattingStats(candidate);
+  if (before.tagged < 2) return false;
+  if (before.markedShare >= 0.5 && after.markedShare < 0.5) return true;
+  return after.tagged >= 2 && after.unmarked > before.unmarked + 1;
+}
+
 export interface SpeechFormattingStats {
   /** Предложений с речевым тегом («сказал», «прошептал»). */
   tagged: number;
@@ -1429,6 +1444,109 @@ export function quantitativeVoiceBlock(sample: string): string {
     `- сравнения (будто, словно…): ~${stats.similesPerThousandWords.toFixed(1)} на 1000 слов`,
   ];
   return `ИЗМЕРИМЫЙ ПОРТРЕТ ГОЛОСА (статистика образца автора — держи текст в этих пределах, не копируя события):\n${lines.join("\n")}`;
+}
+
+const IDIOLECT_STOPWORDS = new Set([
+  "это", "этот", "эта", "эти", "того", "такой", "такая", "такие", "который", "которая", "которые",
+  "был", "была", "было", "были", "будет", "будут", "можно", "нельзя", "нужно", "надо", "очень", "самый", "самая", "просто",
+  "потом", "сейчас", "здесь", "там", "тут", "тогда", "когда", "потому", "поэтому", "однако", "только", "даже",
+  "почти", "снова", "опять", "вдруг", "сразу", "долго", "быстро", "медленно", "хорошо", "плохо", "время",
+  "человек", "глаза", "руки", "голос", "дверь", "окно", "дом", "ночь", "день", "вода", "огонь",
+  "него", "неё", "них", "меня", "тебя", "себя", "ничего", "что-то", "через", "сторону",
+]);
+
+/** Просторечные маркеры-кандидаты: в блок попадают только те, что автор реально употребляет. */
+const IDIOLECT_SLANG_CANDIDATES = [
+  "блин", "чёрт", "фиг", "фигня", "ништяк", "короче", "типа", "чё", "чо", "ага", "угу",
+  "эй", "слышь", "слушай", "глянь", "ого", "ладно", "давай", "прикинь", "жесть", "круто",
+  "понятно", "ясное", "васёк", "илюха",
+];
+
+export interface AuthorIdiolect {
+  /** Слова-маркеры автора: слово → число употреблений в образце. */
+  markers: Array<{ word: string; count: number }>;
+  /** Обращения/имена из образца. */
+  addresses: Array<{ word: string; count: number }>;
+  /** Частицы: частица → на 1000 слов. */
+  particles: Array<{ word: string; per1k: number }>;
+  /** Слов в образце. */
+  sampleWords: number;
+}
+
+/**
+ * Детерминированный майнинг идиолекта (сборка 113). Идея как у StashBase
+ * («point the agent at your past work»): не абстрактное «пиши живо», а конкретные
+ * слова автора, замеренные на его образце. Детекторы меряют предсказуемость слов
+ * (перплексию), а не длину фраз, — поэтому смена словаря бьёт точнее, чем смена
+ * пунктуации. В блок попадают только слова с частотой ≥2: единичное вхождение —
+ * шум, а не голос.
+ */
+export function mineAuthorIdiolect(sample: string): AuthorIdiolect {
+  const words = (sample.toLowerCase().match(/[а-яёa-z]+(?:-[а-яёa-z]+)*/giu) ?? []);
+  const freq = new Map<string, number>();
+  for (const word of words) freq.set(word, (freq.get(word) ?? 0) + 1);
+  // Обращения: заглавные внутри предложения (не в его начале).
+  const addressFreq = new Map<string, number>();
+  for (const sentence of sample.split(/(?<=[.!?…])\s+/u)) {
+    const tokens = sentence.trim().split(/\s+/u);
+    for (let index = 1; index < tokens.length; index += 1) {
+      const raw = tokens[index].replace(/^[«"(—–-]+|[,.;:!?)»"]+$/gu, "");
+      if (!/^[А-ЯЁ][а-яё]{2,}$/u.test(raw)) continue;
+      const key = raw.toLowerCase();
+      addressFreq.set(key, (addressFreq.get(key) ?? 0) + 1);
+    }
+  }
+  const addresses = [...addressFreq.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 8)
+    .map(([word, count]) => ({ word, count }));
+  const addressWords = new Set(addresses.map((entry) => entry.word));
+  const markers = [...freq.entries()]
+    .filter(([word, count]) => count >= 3 && word.length >= 4 && !IDIOLECT_STOPWORDS.has(word) && !addressWords.has(word))
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 12)
+    .map(([word, count]) => ({ word, count }));
+  const slang = IDIOLECT_SLANG_CANDIDATES
+    .map((word) => ({ word, count: freq.get(word) ?? 0 }))
+    .filter((entry) => entry.count >= 2)
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 8);
+  const particles = ["же", "ведь", "ну", "мол", "-то", "-ка"]
+    .map((word) => {
+      const count = word.startsWith("-")
+        ? (sample.toLowerCase().match(new RegExp(`[а-яёa-z]+${word.slice(1)}\\b`, "giu")) ?? []).length
+        : freq.get(word) ?? 0;
+      return { word, per1k: words.length ? Math.round((count / words.length) * 1000) : 0 };
+    })
+    .filter((entry) => entry.per1k >= 1);
+  return { markers: [...markers, ...slang], addresses, particles, sampleWords: words.length };
+}
+
+/**
+ * Блок словаря голоса для промпта сцены: вшивается при генерации, а не после.
+ * Пост-правки той же моделью перплексию почти не сдвигают (прогон 02.10.2026:
+ * локальный аудит 40→16 при внешнем вердикте без движения), а текст, изначально
+ * написанный словами автора, в модельном распределении менее предсказуем.
+ */
+export function authorIdiolectBlock(sample: string): string {
+  if (sample.trim().length < 1000) return "";
+  const idiolect = mineAuthorIdiolect(sample);
+  if (!idiolect.markers.length && !idiolect.addresses.length) return "";
+  const lines = [
+    `СЛОВАРЬ ГОЛОСА АВТОРА (замерен на ${idiolect.sampleWords} словах образца — вплетай эти слова и обороты в реплики и мысли героев естественно, не списком и не все сразу):`,
+  ];
+  if (idiolect.addresses.length) {
+    lines.push(`- так зовут своих: ${idiolect.addresses.map((entry) => `«${entry.word}» (${entry.count})`).join(", ")}`);
+  }
+  if (idiolect.markers.length) {
+    lines.push(`- характерные слова: ${idiolect.markers.slice(0, 12).map((entry) => `«${entry.word}» (${entry.count})`).join(", ")}`);
+  }
+  if (idiolect.particles.length) {
+    const parts = idiolect.particles.map((entry) => `«${entry.word}» ~${entry.per1k}/1000 слов`);
+    lines.push(`- частицы (держи ту же плотность): ${parts.join(", ")}`);
+  }
+  return lines.join("\n");
 }
 
 export function voicePersonaBlock(voiceSheet: unknown): string {

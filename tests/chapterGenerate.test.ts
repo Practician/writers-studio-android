@@ -1009,3 +1009,84 @@ test("enhanced-фазы пропускают чистые куски без за
 function countWordsForTest(text: string): number {
   return (text.match(/[\p{L}\p{N}]+/gu) || []).length;
 }
+
+test("проход расстановки тире чинит голые реплики, не меняя слов (сборка 113)", async () => {
+  // Живой прогон 02.10.2026: 18 немаркированных реплик из 19 в готовой главе.
+  const source = [
+    "Он подошёл к костру и сел рядом на холодный камень.",
+    "",
+    "Слушай, сказал Васька, усаживаясь рядом и доставая из кармана зажигалку. Пошли к реке, пока не стемнело, ответил Илья, поднимаясь на ноги.",
+    "",
+    "Ночь выдалась тихой и холодной, над лесом поднимался туман.",
+  ].join("\n");
+
+  const generate = async (params: { contents: string; responseMimeType?: string }) => {
+    if (params.contents.includes("speech-blocks") || params.responseMimeType === "application/json") {
+      const match = params.contents.match(/<DATA role="(?:speech-blocks|priority-blocks)">\n([\s\S]*?)\n<\/DATA>/);
+      if (match) {
+        const targets = JSON.parse(match[1]) as Array<{ text: string }>;
+        return JSON.stringify({
+          blocks: targets.map((target) =>
+            target.text
+              .replace("Слушай, сказал Васька,", "— Слушай, — сказал Васька,")
+              .replace("Пошли к реке, пока не стемнело, ответил Илья,", "— Пошли к реке, пока не стемнело, — ответил Илья,"),
+          ),
+        });
+      }
+    }
+    return source;
+  };
+
+  const result = await runTouchupPipeline(source, generate as any, {
+    model: "mock",
+    personaBlock: "сухо",
+    depth: resolveHumanizeDepth("balanced"),
+  });
+
+  assert.ok(result.text.includes("— Слушай, — сказал Васька,"), "тире у реплики");
+  assert.ok(result.text.includes("— Пошли к реке"), "тире у второй реплики");
+  assert.ok(
+    (result.cleanNote ?? "").includes("расстановка тире"),
+    `в отчёте проход тире: ${result.cleanNote}`,
+  );
+});
+
+test("доводка не принимает снос тире у реплик (сборка 113)", async () => {
+  const source = [
+    "Я шёл вдоль стены и считал шаги.",
+    "",
+    "Это был не просто коридор. — Стой, — сказал Васька. — Дальше я сам, — ответил Илья.",
+    "",
+    "Я достал ключ и вырезал метку на стене.",
+  ].join("\n");
+
+  const generate = async (params: { contents: string; responseMimeType?: string }) => {
+    if (params.responseMimeType === "application/json" || params.contents.includes("priority-blocks")) {
+      const match = params.contents.match(/<DATA role="(?:speech-blocks|priority-blocks)">\n([\s\S]*?)\n<\/DATA>/);
+      assert.ok(match, "ожидался payload блоков");
+      const targets = JSON.parse(match![1]) as Array<{ text: string }>;
+      // Вредитель: снимает и штамп, и тире разом — как поздние проходы 02.10.2026.
+      return JSON.stringify({
+        blocks: targets.map((target) =>
+          target.text
+            .replace(/Это был не просто коридор\.?\s*/iu, "Коридор был узкий. ")
+            .replace(/— /gu, ""),
+        ),
+      });
+    }
+    return source;
+  };
+
+  const result = await runTouchupPipeline(source, generate as any, {
+    model: "mock",
+    personaBlock: "сухо",
+    depth: resolveHumanizeDepth("balanced"),
+  });
+
+  assert.ok(result.text.includes("— Стой,"), "тире обязано уцелеть после доводки");
+  assert.ok(result.text.includes("— Дальше я сам,"), "второе тире обязано уцелеть");
+  assert.ok(
+    result.text.includes("не просто коридор"),
+    "правка-вредитель отклонена целиком: штамп остался вместе с тире",
+  );
+});
