@@ -26,6 +26,7 @@
  */
 
 import { countSilentMolds } from "./chapterVerdict";
+import { emptyChunkShare, EMPTY_CHUNK_SHARE_LIMIT, rhythmWindowIssues } from "./proseRegister";
 
 export interface CriticismFinding {
   id: string;
@@ -184,13 +185,16 @@ export function deterministicCriticism(text: string): CriticismFinding[] {
     olfactionRun = OLFACTION.test(sentence.text) ? olfactionRun + 1 : 0;
     bestRun = Math.max(bestRun, olfactionRun);
   }
-  if (bestRun >= 2) {
+  // Порог — ТРИ предложения подряд, а не два. Замер: на эталоне автора «запах»
+  // встречается дважды в соседних предложениях («Вкус леща, обильно сдобренный
+  // ароматом тропического…»), и это его живая деталь, а не след машины.
+  if (bestRun >= 3) {
     findings.push({
       id: "olfaction-dominance",
       label: `запах несёт деталь в ${bestRun} предложениях подряд`,
       quote: `«${sentences.find((sentence) => OLFACTION.test(sentence.text))?.text.slice(0, 90) ?? ""}»`,
       advice: "запах оставь один раз; остальное пусть видно и слышно",
-      severity: Math.min(bestRun / 4, 1),
+      severity: Math.min(bestRun / 6, 1),
     });
   }
 
@@ -225,6 +229,32 @@ export function deterministicCriticism(text: string): CriticismFinding[] {
         break;
       }
     }
+  }
+
+  // 9. Куски без длинных фраз (сборка 115). Главная находка калибровки по
+  //    отчёту детектора: AUC 0,82, кусков совсем без длинных фраз 3 из 8 у
+  //    HUMAN против 8 из 10 у AI. На главе целиком разница съедалась, потому что
+  //    детектор читает куски, а не главу.
+  const chunks = emptyChunkShare(text);
+  if (chunks.total && chunks.share > EMPTY_CHUNK_SHARE_LIMIT) {
+    findings.push({
+      id: "empty-chunks",
+      label: `в ${chunks.empty} кусках из ${chunks.total} нет ни одного предложения 25+ слов`,
+      quote: `«${firstSentence(sentences[0]?.text ?? "").slice(0, 90)}»`,
+      advice: "собери в этих кусках длинное предложение: срасти соседние фразы через союз или перенеси часть описания в одну фразу",
+      severity: Math.min((chunks.share - EMPTY_CHUNK_SHARE_LIMIT) / EMPTY_CHUNK_SHARE_LIMIT + 0.5, 1),
+    });
+  }
+
+  // 10. Оконные замечания регистра и ритма: те же метрики по нарезке детектора.
+  for (const issue of rhythmWindowIssues(text).slice(0, 3)) {
+    findings.push({
+      id: "window-metric",
+      label: issue.slice(0, 140),
+      quote: `«${firstSentence(sentences.find((sentence) => /словно|казалось|вроде/.test(sentence.text))?.text ?? sentences[0]?.text ?? "").slice(0, 90)}»`,
+      advice: "правь по этому куску, а не по главе целиком",
+      severity: 0.55,
+    });
   }
 
   // Находки регистра сюда НЕ переносятся намеренно: они измерены числами, а не

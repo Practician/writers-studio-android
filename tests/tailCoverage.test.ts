@@ -5,8 +5,8 @@ import {
   DETECTOR_WINDOW_CHARS,
   EMPTY_CHUNK_SHARE_LIMIT,
   emptyChunkShare,
-  rhythmWindowIssues,
   proseRegisterWindowIssues,
+  rhythmWindowIssues,
 } from "../server/proseRegister";
 import { fuseShortSentencesForTail } from "../server/humanStyle";
 import { HUMAN_SAMPLE, MACHINE_CHAPTER } from "./fixturesProseRegister";
@@ -137,22 +137,16 @@ test("оконные замечания ловят куски без длинн�
     `пустые куски должны быть названы; получено: ${JSON.stringify(issues)}`);
 });
 
-test("оконные замечания фильтров не срабатывают на живую прозу", () => {
-  // У автора «словно» и «как будто» — обычный оборот, и в отдельных окнах его
-  // до 180 на 10 тыс. слов. Порог окна (70) выше эталонного окна специально.
-  assert.deepEqual(proseRegisterWindowIssues(HUMAN_SAMPLE), [],
-    "эталон должен быть чист по оконным замечаниям");
-});
-
-test("оконные замечания находят фильтры в насыщенном куске", () => {
-  const wordy = new Array(4).fill([
-    "Илья осмотрел стену, словно искал что-то в швах.",
-    "Пыль лежала ровным слоем, казалось бы, по чьей-то команде.",
-    "Камень был подозрительно гладким, будто его шлифовали.",
-    "Он прикинул на глаз, чего здесь не хватает, и решил иначе.",
-  ].join(" ")).join("\n\n");
-  assert.ok(proseRegisterWindowIssues(wordy).some((issue) => issue.includes("фильтр")),
-    "фильтр-слова найдены");
+test("оконные замечания по фильтрам отключены: в окне метрика переворачивается", () => {
+  // Проверено на отчёте 04.10.2026 и на эталоне: в окне детектора у автора до
+  // 178 фильтров на 10 тыс. слов, у нашей главы 114. На главе целиком — наоборот,
+  // 46 против 134. Окно в 150 слов для плотностей слишком мало, поэтому эта
+  // метрика в окно не идёт: иначе правка идёт по ложным следам на живой прозе.
+  assert.deepEqual(proseRegisterWindowIssues(HUMAN_SAMPLE), []);
+  assert.deepEqual(proseRegisterWindowIssues(MACHINE_CHAPTER), [],
+    "и на машинном тексте она молчит — как и задумано");
+  assert.deepEqual(rhythmWindowIssues(HUMAN_SAMPLE), [],
+    "эталон не должен попадать под замечания о ритме");
 });
 
 test("окно детектора — около 1050 знаков, как в живых отчётах", () => {
