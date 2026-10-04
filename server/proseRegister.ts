@@ -25,6 +25,8 @@
  * эталон автора.
  */
 
+import { LONG_SENTENCE_WORDS } from "./humanStyle";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Эталон автора. Значения сняты scripts/measureProseRegister.ts.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +114,39 @@ export const HEDGE_SHARE_LIMIT = 0.16;
 export const HUMAN_VERBATIM_REPEAT_PER_10K = 34;
 /** Порог обеднения повторами. Эталон 34,3 — берём 75. */
 export const VERBATIM_REPEAT_PER_10K_LIMIT = 75;
+
+/**
+ * Доля кусков детектора, где длинных фраз нет. Главная метрика сборки 115:
+ * на отчёте 04.10.2026 — 3 из 8 у HUMAN против 8 из 10 у AI, AUC 0,82,
+ * и это единственная из шестнадцати измеренных метрик, которая разделяет
+ * классы надёжно. Порог 0,5 взят между классами: на эталоне автора доля 0,22,
+ * на главе 4 до покусковой склейки 0,43, после неё 0,14.
+ */
+export const EMPTY_CHUNK_SHARE_LIMIT = 0.5;
+
+/**
+ * Оконные пороги хвоста и восклицаний — по разделителю отчёта 04.10.2026
+ * (HUMAN 0,20 хвоста и 11,8 восклицаний против AI 0,08 и 4,1).
+ * Стоят МЕЖДУ классами, а не по эталону: в окне детектора колебание нормы
+ * слишком велико, чтобы требовать человеческого минимума, но слишком мало,
+ * чтобы пропускать 0,08 против 0,20. На эталоне автора оба порога проходят
+ * с запасом (0,24 и 13,1), то есть живая проза не пострадает.
+ */
+export const LONG_TAIL_WINDOW_LIMIT = 0.12;
+export const EXCLAMATION_WINDOW_LIMIT = 6;
+/**
+ * Порог фильтр-слов в окне. Разделитель отчёта — 44,6 (AI) против 14,7
+ * (HUMAN), но эталон автора в отдельных окнах даёт до 90: у него «словно» и
+ * «как будто» — обычный оборот, и порог ниже нормы ломал бы живую прозу.
+ * Поэтому здесь 70: выше эталонного окна, заметно ниже машинного.
+ */
+export const FILTER_WINDOW_LIMIT = 70;
+/**
+ * Доля окон, в которых «!» нет ни разу, при которой это уже замечание.
+ * Замер отчёта 04.10.2026: 38 % у HUMAN против 60 % у AI; эталон автора 0 %.
+ * «Половина окон» попадала в живую прозу и пропускала машину.
+ */
+export const EXCLAMATION_CALM_SHARE_LIMIT = 0.6;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Регулярные выражения. Широкие каркасы, а не списки клише.
@@ -539,6 +574,173 @@ export function proseRegisterSceneIssues(text: string, maxIssues = 2): string[] 
   // для сцены был лишним: он молчал там, где общий замер уже давал верный ответ,
   // и проверка на сцене расходилась с проверкой на собранной главе.
   return proseRegisterIssues(text, { minParagraphs: 4 }).slice(0, maxIssues);
+}
+
+
+/**
+ * Длина окна детектора. Отчёт режет рукопись на куски около 1050 знаков
+ * (сегменты в живых прогонах — 963–1146), и внутри такого куска разница между
+ * живым и машинным текстом видна, а на главе целиком сглаживается.
+ *
+ * Прямое измерение на отчёте result_2026-10-04T20-27-50.json (18 сегментов,
+ * 8 HUMAN против 10 AI, все измерены одним кодом в один день):
+ *
+ *   хвост 25+ слов     HUMAN 0,20   AI 0,08   (2,6×)
+ *   восклицаний /100   HUMAN 11,8   AI 4,1    (2,9×)
+ *   фильтр-слов /10 тыс HUMAN 14,7  AI 44,6   (3,0× в другую сторону)
+ *
+ * На главе целиком те же метрики давали 17 % / 7,5 / 51 — то есть разница
+ * съедалась. Причина одна: восемь из восемнадцати сегментов оказались диалогами,
+ * а на главе их доля не видна.
+ */
+export const DETECTOR_WINDOW_CHARS = 1050;
+
+/**
+ * Замечания по окнам детектора. Здесь, в отличие от главы целиком, порог
+ * ставится ВЫШЕ человеческого и близко к разделителю: в окне слишком короткого
+ * текста колебание нормы огромно, поэтому каждое замечание называет и цифру.
+ */
+export function proseRegisterWindowIssues(text: string, size = DETECTOR_WINDOW_CHARS): string[] {
+  const windows = proseWindows(text, size);
+  if (!windows.length) return [];
+  const issues: string[] = [];
+  const seen = new Set<string>();
+  for (const window of windows) {
+    const metrics = measureProseRegister(window);
+    // Окно короче 400 слов — показанияDensity шумны, но хвост и восклицания
+    // на таком объёме читаются: это счётные доли, а не оценка.
+    if (metrics.bodilyPer10k >= BODILY_PER_10K_LIMIT && metrics.words >= 120) {
+      add(`в этом куске эмоция только телесная (${metrics.bodilyPer10k} на 10 тыс. слов) — назови чувство словом`);
+    }
+    // Порог фильтров в окне поднят против главного: на эталоне автора встречаются
+    // окна по 90–120 на 10 тыс. слов («словно», «как будто» у него — обычный
+    // оборот), и главный порог 62 в окне давал бы ложное срабатывание на живой
+    // прозе. Разделитель отчёта 04.10.2026 — 44,6 у AI против 14,7 у HUMAN, то
+    // есть и он не годится как порог «ниже нормы»; берём 70.
+    if (metrics.filterPer10k >= FILTER_WINDOW_LIMIT) {
+      add(`в этом куске фильтр-слов ${metrics.filterPer10k} на 10 тыс. слов — убери «словно» и «казалось», покажи предмет`);
+    }
+    if (metrics.intensifierPer10k >= INTENSIFIER_PER_10K_LIMIT) {
+      add(`в этом куске оценочных прилагательных ${metrics.intensifierPer10k} на 10 тыс. слов — замени оценивание наблюдением`);
+    }
+    if (metrics.interiorShare < INTERIOR_SHARE_FLOOR && metrics.narrativeParagraphs >= 4) {
+      add("в этом куске нет внутренней речи — дай герою одно неозвученное решение");
+    }
+  }
+  return issues;
+
+  function add(issue: string): void {
+    const key = issue.slice(0, 28);
+    if (seen.has(key)) return;
+    seen.add(key);
+    issues.push(issue);
+  }
+}
+
+/** Окна той же нарезки, что у детектора: по предложениям, без разрывов абзацев. */
+function proseWindows(text: string, size = DETECTOR_WINDOW_CHARS): string[] {
+  const windows: string[] = [];
+  let buffer = "";
+  for (const sentence of sentences(text)) {
+    buffer = buffer ? `${buffer} ${sentence}` : sentence;
+    if (buffer.length >= size) {
+      windows.push(buffer);
+      buffer = "";
+    }
+  }
+  if (buffer.trim()) windows.push(buffer.trim());
+  return windows;
+}
+
+/**
+ * Хвост и восклицания по окнам детектора. Отдельная функция от регистра, потому
+ * что в окне работает иной порог: из отчёта 04.10.2026 разделителем оказалось
+ * не отсутствие длинных фраз вообще, а их нехватка ВНУТРИ куска (0,08 против
+ * 0,20). На главе целиком порог 0,15 не срабатывал никогда: 17 % на главе —
+ * это 0,17 в среднем, и два-три «богатых» куска перебивали пустые.
+ */
+export function rhythmWindowIssues(text: string, size = DETECTOR_WINDOW_CHARS): string[] {
+  const windows = proseWindows(text, size);
+  if (!windows.length) return [];
+  const issues: string[] = [];
+  const lowTail = windows.filter((window) => {
+    const stats = longTailShare(window);
+    return stats.total >= 6 && stats.share < LONG_TAIL_WINDOW_LIMIT;
+  });
+  const emptyShare = lowTail.length / windows.length;
+  // Замечание — только при превышении порога. Пороговые 50 % взяты между
+  // классами: доля пустых кусков 38 % у HUMAN против 80 % у AI на отчёте
+  // 04.10.2026, эталон автора даёт 29 %, наша глава после покусковой склейки 12 %.
+  if (emptyShare > EMPTY_CHUNK_SHARE_LIMIT) {
+    issues.push(
+      `длинных фраз нет в ${lowTail.length} кусках из ${windows.length} (${Math.round(emptyShare * 100)} %) `
+      + `— порог ${Math.round(EMPTY_CHUNK_SHARE_LIMIT * 100)} %; по разделителю отчёта 38 % у HUMAN против 80 % у AI, `
+      + `и доля пустых кусков 3 из 8 против 8 из 10 (AUC 0,82) — `
+      + `собери в них предложение в 25–40 слов: срасти соседние фразы через союз или перенеси часть описания в одну длинную`,
+    );
+  }
+  // Порог по доле окон, а не «половина». Замер отчёта: окон без «!» 38 % у
+  // HUMAN против 60 % у AI, а на эталоне автора — 0 %. То есть «половина окон»
+  // попадала в живую прозу, а машину пропускала; 0,6 стоит на разделителе.
+  const calm = windows.filter((window) => exclamationRate(window) < EXCLAMATION_WINDOW_LIMIT);
+  if (calm.length >= windows.length * EXCLAMATION_CALM_SHARE_LIMIT) {
+    issues.push(
+      `в ${calm.length} кусках из ${windows.length} нет ни одного «!» `
+      + `(по разделителю отчёта HUMAN 11,8 на 100 предложений против AI 4,1) — `
+      + `пусть персонаж хоть где-то вскрикнёт, окрикнуть или удивится вслух`,
+    );
+  }
+  return issues;
+}
+
+/**
+ * Доля кусков детектора, где нет ни одного предложения 25+ слов.
+ *
+ * Это главная метрика сборки 115 и единственная из шестнадцати, измеренных на
+ * отчёте детектора, которая разделяет классы надёжно (AUC 0,82): кусков совсем
+ * без длинных фраз 3 из 8 у HUMAN против 8 из 10 у AI. Остальные — фильтр-слова
+ * (0,73), восклицания (0,71), средняя длина фразы (0,71), оценочные прилагательные
+ * (0,70) — разделяют слабо, и ставить их в гейт с жёстким порогом значило бы
+ * ронять живую прозу.
+ */
+export function emptyChunkShare(
+  text: string,
+  size = DETECTOR_WINDOW_CHARS,
+): { share: number; total: number; empty: number } {
+  const measured = proseWindows(text, size)
+    .filter((chunk) => sentences(chunk).length >= 3)
+    .map((chunk) => {
+      const lengths = sentences(chunk)
+        .filter((sentence) => !/^\s*[—–-]\s/u.test(sentence))
+        .map((sentence) => words(sentence))
+        .filter((value) => value > 0);
+      if (!lengths.length) return -1;
+      return lengths.filter((value) => value >= LONG_SENTENCE_WORDS).length / lengths.length;
+    })
+    .filter((value) => value >= 0);
+  if (!measured.length) return { share: 0, total: 0, empty: 0 };
+  const empty = measured.filter((value) => value < LONG_TAIL_WINDOW_LIMIT).length;
+  return { share: empty / measured.length, total: measured.length, empty };
+}
+
+/** Доля фраз 25+ слов в куске (без реплик — как в longTailStats). */
+function longTailShare(window: string): { share: number; total: number } {
+  const measured = sentences(window)
+    .filter((sentence) => !/^[\s]*[—–-]\s/u.test(sentence))
+    .map((sentence) => (sentence.match(/[\p{L}\p{N}]+/gu) || []).length)
+    .filter((value) => value > 0);
+  if (!measured.length) return { share: 0, total: 0 };
+  return {
+    share: measured.filter((value) => value >= LONG_SENTENCE_WORDS).length / measured.length,
+    total: measured.length,
+  };
+}
+
+/** Восклицаний на 100 предложений. */
+function exclamationRate(window: string): number {
+  const measured = sentences(window);
+  if (measured.length < 6) return EXCLAMATION_WINDOW_LIMIT + 1;
+  return (measured.filter((sentence) => sentence.includes("!")).length / measured.length) * 100;
 }
 
 /** Короткая строка для журнала: «регистр: тело 42/10тыс (человек 5), наречия 25 (7)». */

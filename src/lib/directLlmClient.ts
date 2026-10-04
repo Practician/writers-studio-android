@@ -1547,6 +1547,16 @@ function maxAllowedGrowth(baseWords: number, ratio: number, wordBuffer = 80): nu
   return Math.max(Math.ceil(baseWords * ratio), baseWords + wordBuffer);
 }
 
+/**
+ * Событие шага главы: тот же канал, что у `emitChapterStep` в конвейере.
+ * Нужно для сообщений, которые не являются запросом (сводка моделей, сводка
+ * главы) — трассировать их через API-трассу нельзя, она ждёт хост и статус.
+ */
+function notifyChapterStep(message: string, level: "info" | "warn" = "info"): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("writers-studio-chapter-step", { detail: { message, level } }));
+}
+
 function notifyChapterVolume(words: number, segments: number, target: number, complete: boolean, stopReason?: string): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent("writers-studio-chapter-volume", { detail: { words, segments, target, complete, ...(stopReason ? { stopReason } : {}) } }));
@@ -1889,7 +1899,12 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             ? undefined
             : `литературный проход собрал ${humanizedSegments} сцен${topupScenes ? ` (включая ${topupScenes} доборных)` : ""} и остановился — до цели главы не хватило ${CHAPTER_TARGET_WORDS - words} слов`,
         );
-        if (modelNote) emitApiTrace(traceFor(credentials.provider === "auto" ? "nvidia" : credentials.provider, modelUse.primaryModels[0]?.model || modelUse.reserveModels[0]?.model || "", "", 1, 1, 200, modelWarning || modelNote, { chars: 0 }));
+        // Сводка идёт через канал шагов главы, а не через трассу API: трасса
+        // описывает конкретный запрос (хост, ключ, статус), и подставной провайдер
+        // выглядел бы в журнале как настоящий запрос к NVIDIA с gemini-моделью —
+        // то есть как ещё одна неисправность. Здесь пришлось выдумывать хост,
+        // потому что сводка запросом не является.
+        if (modelNote) notifyChapterStep(modelNote, modelWarning ? "warn" : "info");
         notifyHumanizePass(generated.humanizeReport.depth, generated.text.length, generated.text.length, {
           scoreBefore: generated.humanizeReport.scoreBefore,
           scoreAfter: generated.humanizeReport.scoreAfter,

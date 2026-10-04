@@ -17,7 +17,7 @@
 
 import { aiTellScore, heavyStampHits, humanizeGatePassed, HUMANIZE_DEPTHS, type HumanizeDepthConfig } from "./humanStyle";
 import { paragraphLengthCV, sentenceLengthSpread, humanProfileScore } from "./humanStyleEnhanced";
-import { measureProseRegister, proseRegisterFindings, type ProseRegister } from "./proseRegister";
+import { EMPTY_CHUNK_SHARE_LIMIT, emptyChunkShare, measureProseRegister, proseRegisterFindings, type ProseRegister } from "./proseRegister";
 import { architectureDiagnostics } from "./architectureAudit";
 import { punctuationHygieneNote } from "./textHygiene";
 
@@ -68,6 +68,8 @@ export interface ChapterVerdict {
   longTailShare: number;
   /** Регистр прозы. */
   register: ProseRegister;
+  /** Кусков детектора без длинных фраз: `empty` из `total`. */
+  emptyChunks: { share: number; total: number; empty: number };
   /** Нарушения потолков главы. */
   caps: ChapterCapCheck[];
   /** Находки регистра. */
@@ -118,6 +120,7 @@ export function verifyChapter(text: string, depth: HumanizeDepthConfig = HUMANIZ
   const paragraphCV = paragraphLengthCV(text);
   const spread = sentenceLengthSpread(text);
   const architecture = architectureDiagnostics(text);
+  const chunks = emptyChunkShare(text);
 
   const caps: ChapterCapCheck[] = [
     {
@@ -155,7 +158,9 @@ export function verifyChapter(text: string, depth: HumanizeDepthConfig = HUMANIZ
     `профиль ${profile.toFixed(2)} (эталон 2,41), `
     + `CV абзацев ${paragraphCV.toFixed(2)} (порог 0,60), `
     + `разброс фраз ${spread.toFixed(2)} (порог 0,46), `
-    + `хвост 25+ слов ${Math.round((score.longTailShare ?? 0) * 100)} % (человек 18–30 %)`,
+    + `хвост 25+ слов ${Math.round((score.longTailShare ?? 0) * 100)} % (человек 18–30 %), `
+    + `кусков без длинных фраз ${chunks.empty} из ${chunks.total} (${Math.round(chunks.share * 100)} %, `
+    + `норма ≤${Math.round(EMPTY_CHUNK_SHARE_LIMIT * 100)} %; эталон автора 29 %)`,
   );
   const breached = caps.filter((cap) => !cap.ok);
   if (breached.length) {
@@ -189,6 +194,7 @@ export function verifyChapter(text: string, depth: HumanizeDepthConfig = HUMANIZ
     sentenceSpread: spread,
     longTailShare: score.longTailShare ?? 0,
     register,
+    emptyChunks: chunks,
     caps,
     registerFindings,
     architectureScore: architecture.score,

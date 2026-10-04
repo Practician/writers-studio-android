@@ -552,10 +552,8 @@ function lowerFirst(word: string): string {
  * через союз предпочитается: у автора длинные фразы собраны на союзах, а не на
  * двоеточиях и запятых-точках.
  */
-export function fuseShortSentencesForTail(
-  text: string,
-  targetShare = LONG_TAIL_SHARE_TARGET,
-): FuseTailResult {
+/** Склейка внутри одного куска: возвращает текст и число склеек. */
+function fuseChunk(chunk: string, targetShare: number): { text: string; fused: number } {
   const joinPair = (a: string, b: string): string => {
     const clean = a.trim().replace(/\.$/u, "");
     const next = b.trim();
@@ -564,60 +562,130 @@ export function fuseShortSentencesForTail(
       return `${clean}, ${lowerFirst(next)}`;
     }
     // Две независимые клаузы: точка с запятой и строчная буква после неё.
+    // Буква ОБЯЗАТЕЛЬНО опускается: «фраза; Фраза» — след машинной склейки, в
+    // русском тексте такая конструкция не встречается (в эталоне автора ноль
+    // на 38 000 знаков, в старой главе 4 — двадцать одно).
     return `${clean}; ${lowerFirst(next)}`;
   };
+  let sents = splitSentences(chunk);
+  if (sents.length < 2) return { text: chunk, fused: 0 };
+  let fused = 0;
+  for (let pass = 0; pass < 6; pass += 1) {
+    const stat = longTailStats(sents.join(" "));
+    // Минимум — ДВА предложения, а не четыре. Прежний порог в четыре оставлял
+    // нетронутыми именно те куски, где склеивать и надо: кусок детектора — это
+    // восемь-десять предложений, но кусок АБЗАЦА часто содержит три, и при
+    // пороге четыре склейка в нём не запускалась ни разу (замер: 82 абзаца
+    // главы 4, из них 40 без реплик — склеек 0).
+    if (stat.share >= targetShare || stat.total < 2) break;
+    const usable = (sentence: string): number | null => {
+      const trimmed = sentence.trim();
+      if (isDialogueSentence(trimmed)) return null;
+      if (!/\.$/u.test(trimmed)) return null;
+      if (/[«»"„“;]/u.test(trimmed)) return null;
+      const count = wordsOf(trimmed).length;
+      if (count > 22) return null;
+      return count;
+    };
+    // Кандидаты — пары и тройки соседних фраз суммарной длиной 25–40 слов:
+    // при средней длине 10–12 слов пары до «длинной» не дотягивают, тройки —
+    // дотягивают. Выбираем вариант, ближайший к 30 словам.
+    let bestStart = -1;
+    let bestSpan = 0;
+    let bestScore = Infinity;
+    for (let i = 0; i < sents.length - 1; i += 1) {
+      const first = usable(sents[i]);
+      if (first === null) continue;
+      const counts: number[] = [first];
+      for (let span = 2; span <= 3 && i + span <= sents.length; span += 1) {
+        const count = usable(sents[i + span - 1]);
+        if (count === null) break;
+        counts.push(count);
+        if (counts.some((value) => value > 14) && span === 3) continue;
+        const sum = counts.reduce((total, value) => total + value, 0);
+        if (sum < LONG_SENTENCE_WORDS || sum > 40) continue;
+        const score = Math.abs(sum - 30);
+        if (score < bestScore) {
+          bestScore = score;
+          bestStart = i;
+          bestSpan = span;
+        }
+      }
+    }
+    if (bestStart < 0) break;
+    let merged = sents[bestStart].trim();
+    for (let k = 1; k < bestSpan; k += 1) {
+      merged = joinPair(merged, sents[bestStart + k]);
+    }
+    sents = [...sents.slice(0, bestStart), merged, ...sents.slice(bestStart + bestSpan)];
+    fused += 1;
+  }
+  return { text: sents.join(" "), fused };
+}
+
+/**
+ * Нарезать кусок на части по границам абзацев, каждая ближе к `size` знаков.
+ * Часть не разрывается посреди абзаца: резать предложение нельзя.
+ */
+function splitIntoTailChunks(chunk: string, size: number): string[] {
+  const units = chunk.split(/(?<=\.)\s+(?=[А-ЯЁ])/u);
+  const chunks: string[] = [];
+  let buffer = "";
+  for (const unit of units) {
+    if (buffer && buffer.length + unit.length + 1 > size) {
+      chunks.push(buffer);
+      buffer = unit;
+    } else {
+      buffer = buffer ? `${buffer} ${unit}` : unit;
+    }
+  }
+  if (buffer.trim()) chunks.push(buffer);
+  return chunks;
+}
+
+/**
+ * Детерминированная склейка коротких фраз в длинные (сборка 112, правки 114–115).
+ *
+ * Причина: модель (особенно слабая, после 503-фолбэка на flash-lite) раз за разом
+ * игнорирует замечание «нет хвоста длинных предложений» — в живом прогоне главы 4
+ * три попытки на сцену уходили впустую, грязный текст принимался как есть, а счёт
+ * шёл на 110 запросов. Склейка не требует модели вообще: пара соседних
+ * повествовательных фраз суммарной длиной 25–40 слов соединяется через союз или
+ * точку с запятой. Слова не меняются и не добавляются, реплики, вопросы,
+ * восклицания и цитаты не трогаются.
+ *
+ * Правка 114. Прежний вариант соединял независимые клаузы как `фраза; Фраза` —
+ * с заглавной буквы. Это не «грамматически чисто», как было написано в
+ * комментарии: в русском тексте такая конструкция не встречается, и на выходе
+ * главы 4 таких мест оказалось 21 при нуле в эталоне автора. Приложение вносило
+ * в текст собственный машинный отпечаток ровно в том проходе, который был нужен
+ * для его снятия. Теперь буква опускается, а склейка через союз предпочитается.
+ *
+ * Правка 115. `size > 0` заставляет склеивать ПОКУСКОВО, а не по главе.
+ * Длинный хвост — единственная из измеренных метрик, которая разделяет классы
+ * по отчёту детектора надёжно (AUC 0,82; кусков без хвоста 3 из 8 у HUMAN
+ * против 8 из 10 у AI). Склейка по главе давала 17 % длинных фраз и при этом
+ * оставляла восемь кусков из десяти пустыми: длинная фраза собиралась
+ * двумя-тремя кусками и не попадала в остальные.
+ */
+export function fuseShortSentencesForTail(
+  text: string,
+  targetShare = LONG_TAIL_SHARE_TARGET,
+  size = 0,
+): FuseTailResult {
   const parts = text.split(/(\n{2,})/u);
   let fused = 0;
   const fusedParts = parts.map((part) => {
     if (/^\n{2,}$/u.test(part)) return part;
-    let sents = splitSentences(part);
-    if (sents.length < 2) return part;
-    for (let pass = 0; pass < 6; pass += 1) {
-      const stat = longTailStats(sents.join(" "));
-      if (stat.share >= targetShare || stat.total < 4) break;
-      const usable = (sentence: string): number | null => {
-        const trimmed = sentence.trim();
-        if (isDialogueSentence(trimmed)) return null;
-        if (!/\.$/u.test(trimmed)) return null;
-        if (/[«»"„“;]/u.test(trimmed)) return null;
-        const count = wordsOf(trimmed).length;
-        if (count > 22) return null;
-        return count;
-      };
-      // Кандидаты — пары и тройки соседних фраз суммарной длиной 25–40 слов:
-      // при средней длине 10–12 слов пары до «длинной» не дотягивают, тройки —
-      // дотягивают. Выбираем вариант, ближайший к 30 словам.
-      let bestStart = -1;
-      let bestSpan = 0;
-      let bestScore = Infinity;
-      for (let i = 0; i < sents.length - 1; i += 1) {
-        const first = usable(sents[i]);
-        if (first === null) continue;
-        const counts: number[] = [first];
-        for (let span = 2; span <= 3 && i + span <= sents.length; span += 1) {
-          const count = usable(sents[i + span - 1]);
-          if (count === null) break;
-          counts.push(count);
-          if (counts.some((value) => value > 14) && span === 3) continue;
-          const sum = counts.reduce((total, value) => total + value, 0);
-          if (sum < LONG_SENTENCE_WORDS || sum > 40) continue;
-          const score = Math.abs(sum - 30);
-          if (score < bestScore) {
-            bestScore = score;
-            bestStart = i;
-            bestSpan = span;
-          }
-        }
-      }
-      if (bestStart < 0) break;
-      let merged = sents[bestStart].trim();
-      for (let k = 1; k < bestSpan; k += 1) {
-        merged = joinPair(merged, sents[bestStart + k]);
-      }
-      sents = [...sents.slice(0, bestStart), merged, ...sents.slice(bestStart + bestSpan)];
-      fused += 1;
+    if (size > 0) {
+      const chunked = splitIntoTailChunks(part, size);
+      const chunks = chunked.map((chunk) => fuseChunk(chunk, targetShare));
+      fused += chunks.reduce((sum, entry) => sum + entry.fused, 0);
+      return chunks.map((entry) => entry.text).join(" ");
     }
-    return sents.join(" ");
+    const whole = fuseChunk(part, targetShare);
+    fused += whole.fused;
+    return whole.text;
   });
   const out = fusedParts.join("");
   return { text: out, fused, share: longTailStats(out).share };

@@ -96,7 +96,7 @@ import { punctuationHygieneNote, sanitizeGeneratedText, type TextHygieneReport }
 import { chapterVerdictFixBlock, verifyChapter, type ChapterVerdict } from "./chapterVerdict";
 import { ARCHITECTURE_FIELDS, RARITY_MOVES, architecturePlannerPrompt, architectureSheetBlock, architectureSheetNote, parseArchitectureSheet, type ArchitectureSheet } from "./chapterArchitect";
 import { criticPrompt, criticismFixBlock, deterministicCriticism, parseCriticism, type CriticismFinding } from "./criticAgent";
-import { authorSpeechMark, proseRegisterFindings, proseRegisterNote, proseRegisterSceneIssues, speechMarkDirective } from "./proseRegister";
+import { authorSpeechMark, DETECTOR_WINDOW_CHARS, proseRegisterFindings, proseRegisterNote, proseRegisterSceneIssues, speechMarkDirective } from "./proseRegister";
 import { editMixRatios, meaningLossIssues, revertUnearnedEdits } from "./editRevert";
 import { filterByPairJudge, stripEditorNoise, type PairJudgeConfig, type PairJudgeStats } from "./pairJudge";
 import { computeStyleStats } from "../src/lib/authorAudit";
@@ -2633,7 +2633,13 @@ export async function runTouchupPipeline(
   // и не уронила ритм ниже пола.
   {
     if (longTailIssue(current)) {
-      const fused = fuseShortSentencesForTail(current);
+      // Сборка 115: покусковая склейка. Размер окна — длина куска детектора
+      // (proseRegister.DETECTOR_WINDOW_CHARS). Длинный хвост — единственная
+      // измеренная метрика, которая разделяет HUMAN и AI по отчёту детектора
+      // надёжно (AUC 0,82; кусков совсем без длинных фраз 3 из 8 у живых против
+      // 8 из 10 у машинных). Склейка по главе давала те же 17 % и при этом
+      // оставляла почти все куски пустыми.
+      const fused = fuseShortSentencesForTail(current, LONG_TAIL_SHARE_TARGET, DETECTOR_WINDOW_CHARS);
       if (fused.fused > 0) {
         const fusedRegressions = rewriteRegressionIssues(current, fused.text, options.lockedNarrationPerson ?? "unknown");
         const fusedStaccatoBad = staccatoRegressed(current, fused.text);

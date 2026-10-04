@@ -15,6 +15,7 @@ import { verifyChapter } from "../server/chapterVerdict";
 import { deterministicCriticism, criticismFixBlock, CRITIC_FIX_THRESHOLD } from "../server/criticAgent";
 import { sanitizeGeneratedText, punctuationHygieneNote } from "../server/textHygiene";
 import { modelTier } from "../server/modelTier";
+import { emptyChunkShare } from "../server/proseRegister";
 
 const [, , oursPath, humanPath] = process.argv;
 const defaultHuman = join(homedir(), "storage", "downloads", "Вася", "Вася.txt");
@@ -36,6 +37,7 @@ const row = (label: string, raw: string) => {
     "профиль (чел. 2,41)": verdict.humanProfileScore.toFixed(2),
     "CV абзацев (0,60)": verdict.paragraphCV.toFixed(2),
     "хвост 25+ (18–30 %)": `${Math.round(verdict.longTailShare * 100)} %`,
+    "куски без хвоста": `${verdict.emptyChunks.empty}/${verdict.emptyChunks.total}`,
     "пунктуация": hygiene.report.fixedPunctuationArtifacts,
     "молчаний (2)": verdict.caps.find((cap) => cap.id === "silence")?.actual ?? 0,
     "регистр": verdict.registerFindings.length,
