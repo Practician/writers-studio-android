@@ -19,6 +19,7 @@
  * направления, а не приговор: поэтому у каждого есть вес в баллах, а не флаг,
  * и порог общий, а не поимённый.
  */
+import { measureProseRegister, proseRegisterFindings } from "./proseRegister";
 
 export interface ArchitectureFinding {
   id: string;
@@ -47,6 +48,8 @@ export interface ArchitectureDiagnostics {
   stateOpeners: number;
   /** Доля сцен, закрытых одним и тем же ходом (действие с «и»-хвостом). */
   uniformEndingShare: number;
+  /** Находки регистра прозы (server/proseRegister.ts) — достраивают картину. */
+  registerFindings: Array<{ id: string; label: string; severity: number; advice: string }>;
   /** Итоговый балл 0–100: чем выше, тем ближе к машинной архитектуре. */
   score: number;
   findings: ArchitectureFinding[];
@@ -79,12 +82,14 @@ const CONCRETE_ANCHOR = new RegExp(
   + ")",
   "gu",
 );
-
-// ── Телесная реакция ────────────────────────────────────────────────────────
-const BODILY = /(?:холод(?:ок|а|ом)?\s+(?:по\s+)?(?:спине|телу|ногам)|капля\s+(?:пота|холодного\s+пота)|по\s+спине\s+прошёл\s+озноб|мурашки|(?:внутри|в\s+груди)\s+всё\s+сжалось|горло\s+(?:сжалось|пересохло)|костяшки\s+побелели|дрожь\s+прошла|сердце\s+(?:забилось|kolotilo|заколотило)|запахло\s+холодом)/iu;
-
-// ── Названное чувство (альтернатива телесному) ───────────────────────────────
-const NAMED_EMOTION = /(?:было\s+(?:страшно|тревожно|обидно|страшно\s+за\s+него)|он\s+(?:боялся|трусил|злился|обиделся|верил|не\s+верил|устал)|ей\s+было\s+(?:страшно|тревожно|стыдно|надоело)|мне\s+(?:было\s+)?(страшно|надоело|жаль|смешно))/iu;
+// ── Тело против названного чувства (сборка 114) ────────────────────────────────
+// Прежняя проверка здесь перечисляла двенадцать клише и потому была слепой к
+// разнообразной телесной лексике: наша глава 4 дала ноль попаданий при плотности
+// 42 телесных реакции на 10 000 слов против 5 у эталона. Теперь режим считается
+// по `server/proseRegister.ts`, где каркас широкий, а порог откалиброван на
+// авторском тексте. Импорт вверху файла, чтобы не было цикла: proseRegister
+// ничего не знает про архитектуру.
+const BODILY_ONLY_LIMIT = 9;
 
 // ── Абзац, открытый состоянием или сенсором, а не действием ─────────────────
 const STATE_OPENER = new RegExp(
@@ -201,17 +206,29 @@ export function architectureDiagnostics(text: string, words?: number): Architect
     });
   }
 
-  // 4. Эмоции только телесные: плотная цепочка реакций без поступка и без названного чувства.
-  const bodily = countMatches(text, BODILY);
-  const named = countMatches(text, NAMED_EMOTION);
-  const bodilyOnly = named === 0 && wordCount > 400 && bodily / Math.max(wordCount / 1000, 1) > 4;
+  // 4. Эмоции только телесные: плотность телесных реакций при нуле названных чувств.
+  const register = measureProseRegister(text);
+  const registerFindings = proseRegisterFindings(text);
+  const bodilyOnly = register.namedEmotionPer10k === 0
+    && wordCount > 400
+    && register.bodilyPer10k >= BODILY_ONLY_LIMIT;
   const bodilyReactionChains = bodilyOnly ? 1 : 0;
   if (bodilyOnly) {
     findings.push({
       id: "bodily-only",
-      label: "эмоции даны только телесными реакциями",
-      severity: Math.min(bodily / 12, 1),
+      label: `эмоции даны только телесными реакциями (${register.bodilyPer10k} на 10 тыс. слов)`,
+      severity: Math.min(register.bodilyPer10k / 24, 1),
       advice: "часть чувства назови словом или покажи поступком",
+    });
+  }
+  // Находки регистра достраивают картину. До сборки 114 архитектурный слой их не
+  // видел: глава 4 получала 3/100 при вердикте детектора 21 сегмент AI из 22.
+  for (const finding of registerFindings) {
+    findings.push({
+      id: `register:${finding.id}`,
+      label: finding.label,
+      severity: finding.severity * 0.8,
+      advice: finding.advice,
     });
   }
 
@@ -254,7 +271,7 @@ export function architectureDiagnostics(text: string, words?: number): Architect
     explanatoryTailShare * 22
     + (growthEnding && agencyShift === 0 ? 16 : 0)
     + (wordCount > 600 ? Math.max(0, (3 - concreteAnchorsPer1k) / 3) * 14 : 0)
-    + (bodilyOnly ? Math.min(bodily / 12, 1) * 16 : 0)
+    + (bodilyOnly ? Math.min(register.bodilyPer10k / 24, 1) * 16 : 0)
     + stateOpenerShare * 16
     + Math.max(0, uniformEndingShare - 0.5) / 0.5 * 16,
   ));
@@ -268,6 +285,7 @@ export function architectureDiagnostics(text: string, words?: number): Architect
     bodilyReactionChains,
     stateOpeners,
     uniformEndingShare,
+    registerFindings,
     score,
     findings: findings.sort((left, right) => right.severity - left.severity),
   };

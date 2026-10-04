@@ -85,6 +85,9 @@ export interface ChapterMovePlan {
   scenes: Record<number, string[]>;
   /** Сцены, которым ничего не назначено: их авторство — «leave slack». */
   quietScenes: number[];
+  /** Редкий приём, назначенный одной сцене. Агент-архитектор может подменить
+   *  seed-выбор (сборка 114): форма главы и её неожиданность — одно решение. */
+  rarity: string;
   beatCount: number;
 }
 
@@ -149,6 +152,9 @@ export interface BuildChapterMovePlanOptions {
   seed: string;
   /** id, выбранные моделью в плане битов; невалидные отбрасываются. */
   requested?: string[];
+  /** Редкий приём от агента-архитектора: форма главы и её неожиданность —
+   *  одно решение, поэтому при наличии агента seed-бросок не применяется. */
+  requestedRarity?: string;
 }
 
 export function buildChapterMovePlan(options: BuildChapterMovePlanOptions): ChapterMovePlan {
@@ -176,7 +182,9 @@ export function buildChapterMovePlan(options: BuildChapterMovePlanOptions): Chap
     ordinary = shuffled([...archPool, ...scenePool], random);
   }
 
-  const rarity = shuffled(RARITY_MOVE_CATALOG, random)[0];
+  const requestedRarity = String(options.requestedRarity || "").trim();
+  const rarity = (requestedRarity ? sepiaMoveById(requestedRarity) : undefined)
+    ?? shuffled(RARITY_MOVE_CATALOG, random)[0];
   const scenes = spreadScenes(beatCount, ordinary.length + 1, random);
   const moves: PlannedMove[] = ordinary.map((move, index) => ({
     id: move.id,
@@ -198,7 +206,7 @@ export function buildChapterMovePlan(options: BuildChapterMovePlanOptions): Chap
   for (let scene = 0; scene < beatCount; scene += 1) {
     if (!assignment[scene]) quietScenes.push(scene);
   }
-  return { source, moves, scenes: assignment, quietScenes, beatCount };
+  return { source, moves, scenes: assignment, quietScenes, rarity: rarity?.id ?? "", beatCount };
 }
 
 /** Блок промпта для одной сцены: только назначенные ей приёмы. Пустое назначение —

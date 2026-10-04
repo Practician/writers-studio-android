@@ -1,6 +1,7 @@
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import type { AuthorEditAudit, AuthorVoiceSheet, HumanizeReport } from "../types";
 import { GEMINI_LITERARY_MODELS } from "./llmSettings";
+import { modelDegradationWarning, modelUseNote, modelUseSummary, recordModelUse, resetModelUse } from "../../server/modelTier";
 import {
   AI_TELL_CATALOG,
   AI_TELL_CATALOG_EXTENDED,
@@ -1379,6 +1380,12 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
     if (response.ok) {
       try {
         const text = responseText(payload);
+        // Сборка 114: запоминаем, какая модель ФАКТИЧЕСКИ ответила. Ротация уводит
+        // прозу на резервные модели молча, и по журналу это видно только по
+        // отдельным строкам ротации; итог по прогону — нет. Из-за этого прогон,
+        // целиком написанный gemini-2.5-flash-lite (живой случай 04.10.2026),
+        // выглядел полностью рабочим.
+        recordModelUse(effectiveModel);
         emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, undefined, { chars: text.length, finishReason: finishReasonFor(payload) }));
         return text;
       } catch (error: any) {
@@ -1732,8 +1739,16 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
   // токен-профиль автору не виден. Если ключ один — судит тот же провайдер.
   // Включается полем pairJudge: true в теле запроса (по умолчанию выключен).
   const buildPairJudge = (): PairJudgeConfig | undefined => {
-    // Судья выключен по умолчанию: включается только явным pairJudge: true в теле запроса.
-    if (body?.pairJudge !== true) return undefined;
+    // Сборка 114: на глубине «Максимум» слепой судья включается по умолчанию.
+    // Он написан, покрыт тестами и почти не использовался: включался только
+    // явным флагом в теле запроса, а UI его не ставил. Между тем это единственный
+    // инструмент проекта, который отличает «переписал человек» от «написано
+    // машиной» — локальный аудит по каталогу штампов с внешним детектором не
+    // совпадает (живой прогон: аудит 14 → 2, детектор 24 → 32 флага из 62).
+    // Явный pairJudge: false оставляет выключенным, чтобы не тратить квоту.
+    const depthWantsJudge = normalizeHumanizeDepth(body?.humanizeDepth) === "maximum";
+    const wantsJudge = body?.pairJudge === false ? false : body?.pairJudge === true || depthWantsJudge;
+    if (!wantsJudge) return undefined;
     let writer: Exclude<DirectProvider, "auto">;
     try {
       writer = selectProvider(credentials.provider, credentials.keys, credentials.model);
@@ -1852,7 +1867,13 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           chapterCandidates: typeof body?.chapterCandidates === "number" ? body.chapterCandidates : undefined,
           model: credentials.model || "",
         };
+        // Сборка 114: счётчик моделей обнуляется на каждый прогон, иначе сводка
+        // копила бы модели за все главы сессии.
+        resetModelUse();
         const generated = await generateHumanizedChapter(input, pipelineGenerate, { phaseGenerate: buildPhaseGenerate() });
+        const modelUse = modelUseSummary();
+        const modelNote = modelUseNote(modelUse);
+        const modelWarning = modelDegradationWarning(modelUse);
         const words = countGeneratedWords(generated.text);
         const humanizedSegments = generated.humanizeReport.scenesGenerated || 1;
         const topupScenes = generated.humanizeReport.topupScenes || 0;
@@ -1868,6 +1889,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
             ? undefined
             : `литературный проход собрал ${humanizedSegments} сцен${topupScenes ? ` (включая ${topupScenes} доборных)` : ""} и остановился — до цели главы не хватило ${CHAPTER_TARGET_WORDS - words} слов`,
         );
+        if (modelNote) emitApiTrace(traceFor(credentials.provider === "auto" ? "nvidia" : credentials.provider, modelUse.primaryModels[0]?.model || modelUse.reserveModels[0]?.model || "", "", 1, 1, 200, modelWarning || modelNote, { chars: 0 }));
         notifyHumanizePass(generated.humanizeReport.depth, generated.text.length, generated.text.length, {
           scoreBefore: generated.humanizeReport.scoreBefore,
           scoreAfter: generated.humanizeReport.scoreAfter,
@@ -1887,6 +1909,7 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           chapterTargetWords: CHAPTER_TARGET_WORDS,
           chapterSegments: generated.humanizeReport.scenesGenerated || 1,
           model: credentials.model,
+          modelUse,
         });
       }
 

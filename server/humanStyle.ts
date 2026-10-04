@@ -521,17 +521,36 @@ export interface FuseTailResult {
   share: number;
 }
 
+/** Союзы, с которыми фраза склеивается запятой безошибочно. */
+const FUSABLE_CONJUNCTIONS = /^(?:И|А|Но|Зато|Однако|Причём|Причем|К тому же)\b/u;
+
 /**
- * Детерминированная склейка коротких фраз в длинные (сборка 112).
+ * Опустить первую букву фразы при склейке. Русская точка с запятой требует
+ * строчной буквы после неё, и в этом же состоит живая речь.
+ */
+function lowerFirst(word: string): string {
+  return `${word.charAt(0).toLowerCase()}${word.slice(1)}`;
+}
+
+/**
+ * Детерминированная склейка коротких фраз в длинные (сборка 112, правка 114).
  *
  * Причина: модель (особенно слабая, после 503-фолбэка на flash-lite) раз за разом
  * игнорирует замечание «нет хвоста длинных предложений» — в живом прогоне главы 4
  * три попытки на сцену уходили впустую, грязный текст принимался как есть, а счёт
  * шёл на 110 запросов. Склейка не требует модели вообще: пара соседних
- * повествовательных фраз суммарной длиной 25–40 слов соединяется либо запятой
- * (вторая начинается с союза «и/а/но» — грамматически чисто), либо точкой
- * с запятой (две независимые клаузы — тоже чисто). Слова не меняются и не
- * добавляются, реплики, вопросы, восклицания и цитаты не трогаются.
+ * повествовательных фраз суммарной длиной 25–40 слов соединяется через союз или
+ * точку с запятой. Слова не меняются и не добавляются, реплики, вопросы,
+ * восклицания и цитаты не трогаются.
+ *
+ * Правка 114. Прежний вариант соединял независимые клаузы как `фраза; Фраза` —
+ * с заглавной буквы после точки с запятой. Это не «грамматически чисто», как
+ * было написано в комментарии: в русском тексте такая конструкция не
+ * встречается, и на выходе главы 4 таких мест оказалось 21 при нуле в эталоне
+ * автора. Приложение вносило в текст собственный машинный отпечаток ровно в том
+ * проходе, который был нужен для его снятия. Теперь буква опускается, а склейка
+ * через союз предпочитается: у автора длинные фразы собраны на союзах, а не на
+ * двоеточиях и запятых-точках.
  */
 export function fuseShortSentencesForTail(
   text: string,
@@ -541,11 +560,11 @@ export function fuseShortSentencesForTail(
     const clean = a.trim().replace(/\.$/u, "");
     const next = b.trim();
     // Вторая фраза начинается с союза — запятая вместо точки грамматически чиста.
-    if (/^(И|А|Но|Зато|Однако|Причём|Причем)\b/u.test(next)) {
-      return `${clean}, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
+    if (FUSABLE_CONJUNCTIONS.test(next)) {
+      return `${clean}, ${lowerFirst(next)}`;
     }
-    // Две независимые клаузы через точку с запятой — тоже чисто.
-    return `${clean}; ${next}`;
+    // Две независимые клаузы: точка с запятой и строчная буква после неё.
+    return `${clean}; ${lowerFirst(next)}`;
   };
   const parts = text.split(/(\n{2,})/u);
   let fused = 0;
@@ -979,13 +998,23 @@ export function heavyStampHits(score: AiTellScore): AiTellHit[] {
   });
 }
 
+/**
+ * Сколько тяжёлых штампов (weight ≥ 3) текст может нести и всё же пройти гейт.
+ *
+ * Прежнее правило было `> 0`, то есть ни одного. Эталон автора содержит один
+ * («с одной / с другой»), поэтому по нему гейт не проходил никогда. Ноль —
+ * это не строгость, а калибровочная ошибка: гейт, который нельзя пройти живым
+ * текстом, не измеряет ничего. Один — это уровень эталона.
+ */
+export const HEAVY_STAMP_TOLERANCE = 1;
+
 export function humanizeGatePassed(
   score: AiTellScore,
   maxScore: number,
   minBurstiness = DEFAULT_MIN_BURSTINESS,
 ): boolean {
   if (score.score > maxScore) return false;
-  if (heavyStampHits(score).length > 0) return false;
+  if (heavyStampHits(score).length > HEAVY_STAMP_TOLERANCE) return false;
   // Для коротких текстов вызывающий код может передать minBurstiness=0.
   // Ритм спрашиваем только там, где он измерим: если объём известен и меньше
   // порога — низкий burstiness не повод считать gate непройденным.
@@ -1076,9 +1105,15 @@ export const HUMANIZE_DEPTHS: Record<HumanizeDepth, HumanizeDepthConfig> = {
     touchupRounds: 1,
     bestOfN: 1,
     chapterCandidates: 1,
-    scoreGate: 18,
+    // Сборка 114: пороги переставлены по человеческому баллу. Эталон автора
+    // (`Вася.txt`, 100 % HUMAN) даёт `aiTellScore` = 9 при одном штампе weight ≥ 3
+    // («с одной / с другой»). Старые 18/12/8 стояли НИЖЕ этого значения на
+    // глубинах «Баланс» и «Максимум», то есть гейт был недостижим по построению:
+    // живые прогоны честно писали «gate не пройден» на тексте, который человек бы
+    // принял. Теперь «Максимум» = 12 — выше человека и ниже машинной главы (20).
+    scoreGate: 20,
     minBurstiness: 0.4,
-    cleanScoreMax: 10,
+    cleanScoreMax: 20,
     proseTemperature: 0.85,
     sceneTemperature: 0.85,
     minAuthorSampleChars: 0,
@@ -1092,9 +1127,9 @@ export const HUMANIZE_DEPTHS: Record<HumanizeDepth, HumanizeDepthConfig> = {
     touchupRounds: 2,
     bestOfN: 1,
     chapterCandidates: 2,
-    scoreGate: 12,
+    scoreGate: 14,
     minBurstiness: 0.45,
-    cleanScoreMax: 10,
+    cleanScoreMax: 16,
     proseTemperature: 0.88,
     sceneTemperature: 0.9,
     minAuthorSampleChars: 0,
@@ -1112,9 +1147,9 @@ export const HUMANIZE_DEPTHS: Record<HumanizeDepth, HumanizeDepthConfig> = {
     // отбор (ранг различает первые два). Два черновика сохраняют выбор без
     // троекратной цены сценового маршрута.
     chapterCandidates: 2,
-    scoreGate: 8,
+    scoreGate: 12,
     minBurstiness: 0.5,
-    cleanScoreMax: 8,
+    cleanScoreMax: 14,
     proseTemperature: 0.9,
     sceneTemperature: 0.92,
     minAuthorSampleChars: 300,
