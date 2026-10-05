@@ -64,3 +64,21 @@ test("sanitizeGeneratedText снимает выделение внутри пр�
   const source = "Он крикнул: «**Беги!**» и подался назад.";
   assert.equal(sanitizeGeneratedText(source).text, "Он крикнул: «Беги!» и подался назад.");
 });
+
+test("sanitizeGeneratedText возвращает ё однозначным словам", () => {
+  const result = sanitizeGeneratedText("Костер развели не сразу. Все молчали.");
+
+  assert.equal(result.text, "Костёр развели не сразу. Все молчали.");
+  // «Все» — омограф (все/всё), его не трогаем: восстановлено только «Костер».
+  assert.equal(result.report.restoredYo, 1);
+  assert.match(result.report.punctuationNotes.join(" "), /ё восстановлено/);
+  assert.equal(result.report.changed, true);
+});
+
+test("sanitizeGeneratedText не трогает текст без кандидатов на ё", () => {
+  const source = "Обычный абзац без меток.";
+  const result = sanitizeGeneratedText(source);
+
+  assert.equal(result.text, source);
+  assert.equal(result.report.restoredYo, 0);
+});

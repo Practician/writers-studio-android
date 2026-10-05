@@ -1,3 +1,5 @@
+import { restoreYo } from "./yoRestore";
+
 export interface TextHygieneReport {
   /** Сколько удалено невидимых или управляющих символов. */
   removedHiddenCharacters: number;
@@ -9,6 +11,8 @@ export interface TextHygieneReport {
   fixedPunctuationArtifacts: number;
   /** Что именно исправлено — строки для журнала, пусто если чисто. */
   punctuationNotes: string[];
+  /** Сколько словам возвращена буква ё (сборка 120, server/yoRestore.ts). */
+  restoredYo: number;
   /** Итоговый текст отличается от исходного. */
   changed: boolean;
 }
@@ -228,7 +232,14 @@ export function sanitizeGeneratedText(input: string): TextHygieneResult {
     .replace(DISALLOWED_CONTROL, "")
     .replace(NONSTANDARD_SPACE, " ");
   const punctuation = fixPunctuationArtifacts(cleaned);
-  const text = punctuation.text;
+  // Сборка 120: ё возвращается после всех пунктуационных правок — они слов
+  // не меняют, а карта server/yoRestore.ts работает по целым словам.
+  const yo = restoreYo(punctuation.text);
+  const text = yo.text;
+  const punctuationNotes = [...punctuation.notes];
+  if (yo.restored > 0) {
+    punctuationNotes.push(`ё восстановлено ×${yo.restored} (${yo.samples.join(", ")})`);
+  }
 
   return {
     text,
@@ -237,7 +248,8 @@ export function sanitizeGeneratedText(input: string): TextHygieneResult {
       normalizedSpaces,
       normalizedLineEndings,
       fixedPunctuationArtifacts: punctuation.count,
-      punctuationNotes: punctuation.notes,
+      punctuationNotes,
+      restoredYo: yo.restored,
       changed: text !== input,
     },
   };
