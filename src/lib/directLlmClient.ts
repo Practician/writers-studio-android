@@ -590,6 +590,12 @@ function hasTruncatedFinishReason(payload: any): boolean {
 // провайдер это документирует; снимаем поле после 400; повторяем с удвоенным
 // бюджетом, если рассуждения всё равно съели вывод.
 const reasoningDisableUnsupported = new Set<string>();
+/**
+ * Провайдеры, которые в этом прогоне уже отказались из-за размера запроса.
+ * Сборка 117: без этого рекорда каскад повторял один и тот же слишком большой
+ * промпт на каждой следующей модели — на NVIDIA это ещё один круг на минуту.
+ */
+const oversizedProviders = new Set<string>();
 const REASONING_RETRY_MAX_TOKENS = 32_768;
 
 function reasoningModelLikely(model: string): boolean {
@@ -768,6 +774,179 @@ function shouldRotateProviderKey(provider: DirectProvider, status: number): bool
 }
 
 /**
+ * «Запрос не влезает» — 413 (лимит токенов в минуту) и 400 «context length
+ * exceeded». Это НЕ проблема модели и НЕ проблема ключа: запрос просто больше,
+ * чем провайдер готов принять.
+ *
+ * Живой сбой 05.10.2026, 02:31: сцена 7 ушла в каскад, потому что Groq отвечает
+ * «Request too large ... TPM: Limit 8000, Requested 8326». Ротация ключей и
+ * провайдеров тут бессильна: те же 8326 токена не примет ни одна следующая
+ * модель того же провайдера, а каскад на NVIDIA и OpenRouter сжёг две минуты
+ * на четыре отказа, после чего сцена всё равно не была написана.
+ *
+ * Что делаем: один раз ужимаем промпт до отведённой доли и повторяем. Если и
+ * ужатый не влезает — провайдер помечается как негодный для длинных запросов,
+ * и каскад идёт дальше без повторов по нему.
+ */
+export function isRequestTooLarge(status: number, payload?: unknown): boolean {
+  if (status === 413) return true;
+  if (status !== 400) return false;
+  const error = (payload as any)?.error ?? payload ?? {};
+  const text = [error?.code, error?.status, error?.error, error?.message].filter(Boolean).join(" ");
+  return /context length|context_length|too many tokens|maximum context|reduce the length|prompt is too long|token limit/i.test(text);
+}
+
+/**
+ * Разбор пула ключей Gemini для журнала: сколько ключей реально годно и почему
+ * остальные пропущены.
+ *
+ * Зачем. В живом прогоне 05.10.2026 весь запрос ушёл на «ключ 1/3», и в журнале
+ * не было ни одной строки про второй и третий — выглядело так, будто они молча
+ * испорчены или не сработали. На деле всё сложнее: ключ может быть на паузе,
+ * у него могут быть помечены недоступными почти все модели цепочки, и тогда
+ * `orderGeminiKeys` уводит его в конец. При этом квота у Gemini считается по
+ * ПРОЕКТУ, а не по ключу: три ключа одного проекта — это одна и та же квота
+ * трижды, и «запасной ключ» не даёт ни одного дополнительного запроса.
+ */
+export function describeGeminiKeyPool(keys: string | undefined, primaryModel: string): string[] {
+  const pool = splitApiKeyPool(keys);
+  if (pool.length < 2) return [];
+  const lines: string[] = [`Ключей Gemini: ${pool.length}. Разбор по ключам:`];
+  const now = Date.now();
+  const projects = new Set<string>();
+  let usable = 0;
+  pool.forEach((key, index) => {
+    const tail = key.slice(-4);
+    // Проект ключа виден в его префиксе: «AIzaSy<номер>-…». Квота считается по нему.
+    const project = key.match(/^AIzaSy([A-Za-z0-9_-]{6,})-/u)?.[1];
+    if (project) projects.add(project);
+    const pauseUntil = geminiKeyPauseUntil(key);
+    const plan = geminiModelChain(primaryModel, key);
+    const head = plan.order[0] ?? "—";
+    const dead = plan.skipped.filter((item) => item.until > now);
+    const usableHere = plan.order.length > 0 && pauseUntil <= now;
+    if (usableHere) usable += 1;
+    const reasons: string[] = [];
+    if (pauseUntil > now) reasons.push(`на паузе до ${timeLabel(pauseUntil)}`);
+    if (dead.length) {
+      const byReason = new Map<string, number>();
+      dead.forEach((item) => byReason.set(item.reason, (byReason.get(item.reason) || 0) + 1));
+      reasons.push(`моделей недоступно: ${dead.length} из ${geminiModelChain(primaryModel, key).order.length + dead.length}`
+        + ` (${[...byReason.entries()].map(([reason, count]) => `${reason}${count > 1 ? ` ×${count}` : ""}`).join(", ")})`);
+    }
+    if (plan.exhausted) reasons.push("все модели цепочки сняты — ключ пропускается целиком");
+    if (!plan.order.length && !plan.exhausted) reasons.push("нет доступных моделей");
+    lines.push(
+      `  ключ ${index + 1}/${pool.length} (…${tail}): ${usableHere ? `годен, первая модель ${head}` : `пропущен — ${reasons.join("; ") || "причина не определена"}`}`
+      + (project ? ` · проект ${project.slice(0, 6)}…` : ""),
+    );
+  });
+  lines.push(`  годных ключей для этой главы: ${usable} из ${pool.length}.`);
+  if (projects.size === 1 && pool.length > 1) {
+    lines.push(
+      "  ВНИМАНИЕ: все ключи от одного проекта Google. Дневная квота у Gemini считается "
+      + "по проекту, поэтому запасные ключи НЕ дают дополнительных запросов — они дают "
+      + "только устойчивость к отзыву отдельного ключа.",
+    );
+  } else if (projects.size > 1) {
+    lines.push(`  Проектов: ${projects.size} — дневные квоты у них раздельные.`);
+  }
+  return lines;
+}
+
+/**
+ * Ужать промпт сцены под лимит провайдера.
+ *
+ * Порядок изъятия выбран по цене для качества: сначала справочное, что модель
+ * при нужде достроит сама, затем история, затем авторские выдержки. Задачу,
+ * требования и канон не трогаем — без них сцена бессмысленна.
+ *
+ * Метки берутся из самого промпта (`buildScenePrompt`, `buildBeatPlanPrompt`),
+ * а не выдумываются: первая версия сжатия искала блоки `<DATA role=…>`, которых
+ * в промпте нет вовсе, и потому не вырезала ничего — то есть тихо повторяла
+ * тот же запрос, который уже отвергли.
+ */
+export type ShrinkStep = { label: string; before: number; after: number };
+
+/** Ужать блок `"""\n…"""`, который идёт сразу после указанной метки, оставив его конец:
+ *  стык с предыдущим куском держится на последних предложениях, а не на первых.
+ *  Только этот блок: общий проход по всем `"""…"""` срезал бы ещё и образец
+ *  авторской манеры, то есть голос — раньше, чем канон. */
+function shortenQuotedBlockAfter(text: string, marker: string, keep: number): string {
+  const at = text.indexOf(marker);
+  if (at < 0) return text;
+  const open = text.indexOf('"""\n', at + marker.length);
+  if (open < 0) return text;
+  const bodyStart = open + 4;
+  const close = text.indexOf('\n"""', bodyStart);
+  if (close < 0) return text;
+  const body = text.slice(bodyStart, close);
+  if (body.length <= keep) return text;
+  return `${text.slice(0, bodyStart)}…\n${body.slice(-keep)}${text.slice(close)}`;
+}
+
+/** Обрезать значение до конца СТРОКИ, а не до конца промпта: строка канона в
+ *  реальном промпте — последняя в своём блоке, и обрезка «до конца текста» уносила
+ *  вместе с каноном библию мира, образец манеры и требования. */
+function truncateAfter(text: string, marker: string, keep: number): string {
+  const at = text.indexOf(marker);
+  if (at < 0) return text;
+  const start = at + marker.length;
+  const lineEnd = text.indexOf("\n", start);
+  const end = lineEnd < 0 ? text.length : lineEnd;
+  if (end - start <= keep) return text;
+  return `${text.slice(0, start)}${text.slice(start, start + keep)}…${text.slice(end)}`;
+}
+
+/**
+ * Нижняя граница сжатия. Ниже неё резать бессмысленно: задача, голос и
+ * требования уже не помещаются, и провайдер всё равно не примет промпт — вместо
+ * порчи текста честнее пометить провайдера как негодный для этого размера.
+ */
+export const SHRINK_FLOOR_CHARS = 6_000;
+
+export function shrinkPromptDetailed(prompt: string, keepRatio = 0.72): { text: string; steps: ShrinkStep[] } {
+  const budget = Math.max(SHRINK_FLOOR_CHARS, Math.floor(prompt.length * keepRatio));
+  let text = prompt;
+  const steps: ShrinkStep[] = [];
+  const apply = (label: string, next: string) => {
+    if (next.length >= text.length) return;
+    steps.push({ label, before: text.length, after: next.length });
+    text = next;
+  };
+
+  // 1. Хвост предыдущей главы: стык держится на последних предложениях.
+  apply("хвост предыдущей главы урезан до 600 знаков", shortenQuotedBlockAfter(text, "Продолжай сразу после этого хвоста", 600));
+  // 2. Канон и библия мира: имена и правила мира важнее подробностей.
+  apply("замок канона урезан до 1400 знаков", truncateAfter(text, "- Замок канона (фрагмент): ", 1_400));
+  apply("библия мира урезана до 800 знаков", truncateAfter(text, "- Библия мира (фрагмент): ", 800));
+  // 3. Запрет повторов копится по ходу главы, но выводится и из канона.
+  apply("запрет повторов снят", text.replace(/ЗАПРЕТ ПОВТОРОВ \(уже было[^\n]*\n[\s\S]*?(?=\nКанон и контекст:)/u, ""));
+  // 4. Авторские выдержки — это голос. Убираем последними и только если иначе не влезло.
+  if (text.length > budget) {
+    apply("образец авторской манеры снят",
+      text.replace(/ОБРАЗЕЦ АВТОРСКОЙ МАНЕРЫ[^\n]*\n"""\n[\s\S]*?\n"""/u, ""));
+  }
+
+  if (text.length <= budget) return { text, steps };
+  // Совсем не помогло: оставляем начало (задача и голос) и конец (требования).
+  const head = Math.floor(budget * 0.55);
+  steps.push({ label: "середина промпта снята", before: text.length, after: budget });
+  text = `${text.slice(0, head)}\n[…сокращено из-за лимита провайдера…]\n${text.slice(text.length - (budget - head))}`;
+  return { text, steps };
+}
+
+export function shrinkPrompt(prompt: string, keepRatio = 0.72): string {
+  return shrinkPromptDetailed(prompt, keepRatio).text;
+}
+
+/** Итог сжатия одной строкой для журнала: что именно ушло из запроса. */
+export function describeShrink(steps: readonly ShrinkStep[]): string {
+  if (!steps.length) return "промпт укладывается в лимит без сжатия";
+  return steps.map((step) => `${step.label}: ${step.before} → ${step.after} знаков`).join("; ");
+}
+
+/**
  * Google отклоняет САМ ключ тремя статусами: 401/403 (проект отозван или заблокирован)
  * и 400 «API key not valid» (журнал 29.09.2026: третий ключ в пуле заканчивался мусором
  * `…  }')`, каждый запрос начинался с него и падал — «Gemini исчерпала ротацию моделей;
@@ -793,7 +972,12 @@ function pickRewriteProvider(primary: DirectProvider, keys: ApiKeys): DirectProv
   const candidates: DirectProvider[] = primary === "gemini"
     ? ["openrouter", "groq", "nvidia"]
     : ["gemini", "groq", "openrouter", "nvidia"];
-  return candidates.find((candidate) => candidate !== primary && splitApiKeyPool(keys[candidate]).length > 0) || primary;
+  return candidates.find((candidate) =>
+    candidate !== primary
+    // Провайдер, уже отвергший этот размер, повторно не предлагается: судью
+    // разметки он всё равно не отработает (сборка 117).
+    && !oversizedProviders.has(candidate)
+    && splitApiKeyPool(keys[candidate]).length > 0) || primary;
 }
 
 function nvidiaModelChain(primary: string): string[] {
@@ -832,7 +1016,10 @@ function nextFallbackProvider(
   tried: readonly Exclude<DirectProvider, "auto">[],
   keys: ApiKeys,
 ): Exclude<DirectProvider, "auto"> | undefined {
-  return PROVIDER_FALLBACK_ORDER.find((candidate) => !tried.includes(candidate) && hasProviderKey(keys, candidate));
+  return PROVIDER_FALLBACK_ORDER.find((candidate) =>
+    !tried.includes(candidate)
+    && !oversizedProviders.has(candidate)
+    && hasProviderKey(keys, candidate));
 }
 
 export function isAutonomousApk(): boolean {
@@ -895,13 +1082,45 @@ function responseText(payload: any): string {
     || contentToText(choice?.text)
     || contentToText(payload?.candidates?.[0]?.content?.parts)
     || contentToText(payload?.output_text);
-  if (!text.trim()) throw new Error("Провайдер вернул HTTP 200, но не передал текст ответа.");
+  // Причина пустого ответа — самая полезная часть сообщения: без неё журнал
+  // 05.10.2026 показал «HTTP 200, но не передал текст ответа» четыре раза подряд
+  // на четырёх провайдерах, и было неясно, это фильтр, лимит или пустой вывод.
+  const reason = finishReasonFor(payload);
+  if (!text.trim()) {
+    throw new Error(reason
+      ? `Провайдер вернул HTTP 200, но не передал текст ответа (причина провайдера: ${reason}).`
+      : "Провайдер вернул HTTP 200, но не передал текст ответа.");
+  }
   return text.trim();
 }
 
 function finishReasonFor(payload: any): string | undefined {
   const reason = payload?.choices?.[0]?.finish_reason || payload?.candidates?.[0]?.finishReason;
   return typeof reason === "string" && reason.trim() ? reason.trim() : undefined;
+}
+
+/**
+ * Доля промпта, которую провайдер готов принять, если он назвал числа сам.
+ *
+ * Groq в ответе 413 пишет предел и запрошенное: «TPM: Limit 8000, Requested
+ * 8326». Это точное отношение: без него сжатие работало «на глаз» (0.72), и на
+ * живом промпте сцены в 16 844 знака вырезало образец авторской манеры там, где
+ * хватило бы отнять 5 %. Голос — то самое, ради чего глава и пишется, поэтому
+ * собственный предел провайдера важнее нашего округления.
+ */
+export function tooLargeRatio(payload?: unknown): number | undefined {
+  const error = (payload as any)?.error ?? payload ?? {};
+  const text = [error?.code, error?.status, error?.error, error?.message].filter(Boolean).join(" ");
+  const tpm = text.match(/Limit\s+(\d[\d_]*)[^;.]*Requested\s+(\d[\d_]*)/iu);
+  const context = text.match(/maximum context length is\s+(\d[\d_]*)\s*tokens[\s\S]{0,120}?requested\s+(\d[\d_]*)/iu);
+  const pair = tpm || context;
+  if (!pair) return undefined;
+  const limit = Number(String(pair[1]).replace(/_/gu, ""));
+  const requested = Number(String(pair[2]).replace(/_/gu, ""));
+  if (!Number.isFinite(limit) || !Number.isFinite(requested) || requested <= 0 || limit <= 0) return undefined;
+  // 5 % запаса: оценка числа токенов у нас своя, и повтор ровно «в лимит»
+  // рискует снова упереться.
+  return Math.min(1, (limit / requested) * 0.95);
 }
 
 /** Причина блокировки ЗАПРОСА фильтром Google (HTTP 200 без кандидатов и без текста). */
@@ -1077,7 +1296,9 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
 
     // OpenAI-совместимый запрос вынесен в одну функцию: он нужен и на первом шаге,
     // и при повторе без поля отключения размышлений, и при повторе с большим бюджетом.
-    const callOpenAiCompat = (budget: number, extraFields: Record<string, unknown>) => fetchWithTimeout(endpointFor(provider, effectiveModel, key), {
+    // Сборка 117: промпт можно ужать. Раньше функция брала только бюджет и поля,
+    // поэтому повтор «запрос не влезает» был невозможен: сокращать было нечем.
+    const callOpenAiCompat = (budget: number, extraFields: Record<string, unknown>, promptOverride?: string) => fetchWithTimeout(endpointFor(provider, effectiveModel, key), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1086,7 +1307,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       },
       body: JSON.stringify({
         model: effectiveModel,
-        messages: [{ role: "system", content: systemForCall }, { role: "user", content: request.prompt }],
+        messages: [{ role: "system", content: systemForCall }, { role: "user", content: promptOverride ?? request.prompt }],
         temperature: request.temperature ?? 0.75,
         max_tokens: budget,
         ...(request.json ? { response_format: { type: "json_object" } } : {}),
@@ -1142,27 +1363,75 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
 
     payload = await response.json().catch(() => ({}));
 
-    // Поле отключения размышлений не поддержано (400) — снимаем его и повторяем один
-    // раз, иначе лечение «пустого раунда» само стало бы причиной отказа.
-    if (provider !== "gemini" && isReasoningDisableError(response.status, payload)) {
-      reasoningDisableUnsupported.add(`${provider}:${String(effectiveModel).toLowerCase()}`);
-      emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `${providerLabel(provider)} «${effectiveModel}» не принимает поле отключения размышлений: повтор без него.`, { chars: 0 }));
-      response = await callOpenAiCompat(maxTokens, {});
-      payload = await response.json().catch(() => ({}));
-    }
+    // Сборка 117: лечебный проход по ответу. Вынесен в функцию и вызывается после
+    // КАЖДОЙ попытки, а не только после первой.
+    //
+    // Живой сбой 05.10.2026, 02:32–02:33: NVIDIA отдал nemotron с HTTP 200,
+    // finish_reason=length и нулём знаков, OpenRouter — то же самое на
+    // openrouter/free. Обе попытки пришли из ротации моделей, а блоки лечения стояли
+    // выше по коду и выполнялись только для первого вызова: ротация уводила на
+    // заведомо худшую попытку, и её пустой ответ уходил прямо в «провайдер
+    // исчерпал ротацию». Тот же дефект касался и «запрос не влезает»: у
+    // резервной модели лимит по токенам в минуту свой, и 413 приходил уже после
+    // того, как лечение закончилось.
+    //
+    // Шаги выполняются по одному разу за проход и не зацикливаются: пустой ответ
+    // после удвоенного бюджета означает «модель не пишет», а не «ещё раз».
+    let recoveryRounds = 0;
+    let currentBudget: number | undefined;
+    const recover = async (after: string): Promise<void> => {
+      if (provider === "gemini" || recoveryRounds >= 2) return;
+      const note = (message: string, extra: Record<string, unknown> = {}) => emitApiTrace(traceFor(
+        provider, effectiveModel, key, index + 1, keyPool.length, response.status,
+        `${message} (после: ${after})`, { chars: 0, ...extra },
+      ));
 
-    // HTTP 200 и пустая проза: у reasoning-моделей весь бюджет ушёл в скрытые
-    // рассуждения (finish_reason=length). Один повтор с удвоенным бюджетом —
-    // вместо потерянного раунда доводки.
-    if (provider !== "gemini" && response.ok && !hasVisibleResponseText(payload)) {
-      const emptyFinish = finishReasonFor(payload) || "?";
-      const bigger = reasoningRetryBudget(provider, maxTokens);
-      if (bigger > maxTokens) {
-        emitApiTrace(traceFor(provider, effectiveModel, key, index + 1, keyPool.length, response.status, `Пустой ответ (${emptyFinish}): размышления съели бюджет вывода — повтор с ${bigger} токенами.`, { chars: 0, finishReason: String(emptyFinish) }));
+      // Поле отключения размышлений не поддержано (400) — снимаем его и повторяем
+      // один раз, иначе лечение «пустого раунда» само стало бы причиной отказа.
+      if (isReasoningDisableError(response.status, payload)) {
+        reasoningDisableUnsupported.add(`${provider}:${String(effectiveModel).toLowerCase()}`);
+        recoveryRounds += 1;
+        note(`${providerLabel(provider)} «${effectiveModel}» не принимает поле отключения размышлений: повтор без него.`);
+        response = await callOpenAiCompat(maxTokens, {});
+        payload = await response.json().catch(() => ({}));
+        return;
+      }
+
+      // Запрос не влезает в лимит провайдера (413 «tokens per minute» или
+      // «context length exceeded»). Один повтор с ужатым промптом; если и он не
+      // влез — провайдер помечается, и каскад больше на него не тратит время.
+      if (isRequestTooLarge(response.status, payload)) {
+        // Провайдер, назвавший предел, получает сжатие ровно по его числу; иначе —
+        // округлённый 0.72, который на живой сцене вырезал голос ради 5 % лишнего.
+        const keepRatio = tooLargeRatio(payload) ?? 0.72;
+        const shrink = shrinkPromptDetailed(request.prompt, keepRatio);
+        recoveryRounds += 1;
+        if (shrink.text.length < request.prompt.length) {
+          note(`Запрос не влезает в лимит ${providerLabel(provider)} (${request.prompt.length} → ${shrink.text.length} знаков): повтор с ужатым промптом — ${describeShrink(shrink.steps)}.`);
+          response = await callOpenAiCompat(maxTokens, reasoningDisableFields(provider, effectiveModel), shrink.text);
+          payload = await response.json().catch(() => ({}));
+        }
+        if (isRequestTooLarge(response.status, payload)) {
+          oversizedProviders.add(provider);
+          note(`${providerLabel(provider)} не берёт даже ужатый запрос (${request.prompt.length} знаков) — провайдер пропускается в этом прогоне.`);
+        }
+        return;
+      }
+
+      // HTTP 200 и пустая проза: у reasoning-моделей весь бюджет ушёл в скрытые
+      // рассуждения (finish_reason=length). Один повтор с увеличенным бюджетом —
+      // вместо потерянного раунда доводки.
+      if (response.ok && !hasVisibleResponseText(payload)) {
+        const emptyFinish = finishReasonFor(payload) || "?";
+        const bigger = reasoningRetryBudget(provider, Math.min(maxTokens, currentBudget ?? maxTokens));
+        recoveryRounds += 1;
+        note(`Пустой ответ (${emptyFinish}): бюджет вывода ${Math.min(maxTokens, currentBudget ?? maxTokens)} токенов ушёл в размышления — повтор с ${bigger} токенами.`, { finishReason: String(emptyFinish) });
+        currentBudget = bigger;
         response = await callOpenAiCompat(bigger, reasoningDisableFields(provider, effectiveModel));
         payload = await response.json().catch(() => ({}));
       }
-    }
+    };
+    await recover("первый вызов");
 
     // Ключ/модель не понимают thinkingConfig (400 Invalid JSON payload) — помечаем
     // модель и повторяем ровно один раз без поля. Иначе лечение обрезки само стало
@@ -1245,6 +1514,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         await sleep(retryAfterMs + 250);
         response = await callOpenAiCompat(maxTokens, reasoningDisableFields(provider, effectiveModel));
         payload = await response.json().catch(() => ({}));
+        await recover(`ожидание лимита ${retryAfterMs} мс`);
       }
     }
 
@@ -1320,11 +1590,18 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
             model: effectiveModel,
             messages: [{ role: "system", content: systemForCall }, { role: "user", content: request.prompt }],
             temperature: request.temperature ?? 0.75,
-            max_tokens: Math.min(maxTokens, 4_096),
+            // Сборка 117: зажим до 4096 был верен для обычных чатов, но для
+            // reasoning-моделей это ровно тот случай из живого журнала
+            // (nemotron-3-super, 02:32): 4096 токенов целиком ушли в скрытые
+            // размышления, вернулся HTTP 200 с finish_reason=length и нулём
+            // знаков, и сцена не была написана. Резервной модели даём тот же
+            // бюджет, что и основной, а поднять его сможет лечебный проход.
+            max_tokens: maxTokens,
             ...(request.json ? { response_format: { type: "json_object" } } : {}),
           }),
         });
         payload = await response.json().catch(() => ({}));
+        await recover(`ротация NVIDIA на ${nextModel}`);
       }
     }
 
@@ -1350,6 +1627,7 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
       ));
       effectiveModel = OPENROUTER_FREE_ROUTER;
       notifyOpenRouterFallback(model, OPENROUTER_FREE_ROUTER);
+      currentBudget = undefined;
       response = await fetchWithTimeout(OPENROUTER_URL, {
         method: "POST",
         headers: {
@@ -1367,6 +1645,10 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
         }),
       });
       payload = await response.json().catch(() => ({}));
+      // openrouter/free в живом журнале 05.10.2026, 02:33 ответил ровно так же,
+      // как nemotron: HTTP 200, finish_reason=length, ноль знаков. Без лечебного
+      // прохода этот ответ сразу объявлял каскад исчерпанным.
+      await recover(`переключение на ${OPENROUTER_FREE_ROUTER}`);
     }
 
     const rawProviderMessage = payload?.error?.message || payload?.error || `Ошибка ${providerLabel(provider)} (${response.status})`;
@@ -1399,11 +1681,24 @@ export async function directGenerate(request: DirectRequest): Promise<string> {
           continue;
         }
         const nextProvider = nextFallbackProvider(triedSoFar, request.apiKeys || {});
-        const exhaustedNote = provider === "nvidia" || provider === "gemini" ? ` ${providerLabel(provider)} исчерпала ротацию моделей;` : "";
+        // «Исчерпала ротацию моделей» при блокировке запроса неправда: при
+        // blockReason перебор моделей НЕ выполняется (одна и та же просьба фильтр
+        // отклонит и на следующей модели). В живом журнале 05.10.2026 так и было
+        // написано про PROHIBITED_CONTENT, хотя ни одна модель не пробовалась.
+        const exhaustedNote = provider === "nvidia" || (provider === "gemini" && !blockReason)
+          ? ` ${providerLabel(provider)} исчерпала ротацию моделей;`
+          : "";
         const blockNote = blockReason ? ` Запрос заблокирован фильтром Google (blockReason=${blockReason}): смена ключа или модели не поможет.` : "";
+        // Последняя попытка каскада: автор должен видеть не «текст не пришёл», а весь
+        // пройденный путь. В журнале 05.10.2026 цепочка из четырёх провайдеров
+        // закончилась строкой без перечисления — и выглядела как обрыв, а не как
+        // исчерпание всех ключей.
+        const routeNote = nextProvider
+          ? ""
+          : ` Исчерпаны все провайдеры каскада: ${triedSoFar.map((item) => providerLabel(item)).join(" → ")}.`;
         const message = nextProvider
           ? `${error?.message || `${providerLabel(provider)} не передала текст.`}${blockNote}${exhaustedNote} переход к ${providerLabel(nextProvider)}.`
-          : `${error?.message || "Успешный ответ без текста."}${blockNote}`;
+          : `${error?.message || "Успешный ответ без текста."}${blockNote}${routeNote}`;
         const trace = traceFor(
           provider,
           effectiveModel,
@@ -1878,8 +2173,17 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
           model: credentials.model || "",
         };
         // Сборка 114: счётчик моделей обнуляется на каждый прогон, иначе сводка
-        // копила бы модели за все главы сессии.
+        // копила бы модели за все главы сессии. Сборка 117: там же сбрасывается
+        // рекорд «провайдер не берёт этот размер» — он про конкретный промпт.
         resetModelUse();
+        oversizedProviders.clear();
+        // Разбор пула ключей — до первой сцены. Раньше автор видел в журнале
+        // «ключ 1/3» на каждом запросе и не понимал, что со вторым и третьим:
+        // они молча уходили в конец очереди, если для них модели помечены
+        // недоступными или ключ на паузе.
+        for (const line of describeGeminiKeyPool(credentials.keys.gemini, input.model || GEMINI_FALLBACK_MODELS[0])) {
+          notifyChapterStep(line, line.includes("ВНИМАНИЕ") ? "warn" : "info");
+        }
         const generated = await generateHumanizedChapter(input, pipelineGenerate, { phaseGenerate: buildPhaseGenerate() });
         const modelUse = modelUseSummary();
         const modelNote = modelUseNote(modelUse);
