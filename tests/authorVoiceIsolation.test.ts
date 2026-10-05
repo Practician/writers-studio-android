@@ -17,6 +17,8 @@ import {
   LABYRINTH_AUTHOR_SAMPLE,
   LABYRINTH_AUTHOR_SAMPLE_MARKER,
   LABYRINTH_STORY_ID,
+  borrowedLabyrinthSample,
+  isLabyrinthSampleMarker,
   ownsLabyrinthAuthorSample,
   shouldSeedLabyrinthAuthorProfile,
 } from "../src/data/labyrinthCanon";
@@ -82,6 +84,31 @@ test("shouldSeedLabyrinthAuthorProfile: чужой загруженный обр
     }),
     false,
   );
+});
+
+// Сборка 119. Первая версия проверки в модалке смотрела «любое имя файла без
+// префикса user:» и ругалась на автора без причины: кнопка «Выбрать файл» пишет
+// голое имя (`Вася.txt`), а префикс `user:` ставится только при ручном вводе.
+// Живой случай 05.10.2026: собствен��ый образец на 38 326 знаков, а в модалке
+// «ВНИМАНИЕ: этот образец помечен как принадлежащий другой книге».
+test("предупреждение не срабатывает на собственном образце автора", () => {
+  assert.equal(borrowedLabyrinthSample("Вася.txt", "story-vasyapered"), false);
+  assert.equal(borrowedLabyrinthSample("user:vasya.txt", "story-vasyapered"), false);
+  assert.equal(borrowedLabyrinthSample("мой стиль.txt", "story-1"), false);
+  // Образца нет вовсе — тоже не повод ругаться.
+  assert.equal(borrowedLabyrinthSample("", "story-1"), false);
+  assert.equal(borrowedLabyrinthSample(undefined, undefined), false);
+});
+
+test("предупреждение срабатывает только на канонном маркере в чужой книге", () => {
+  // Именно та подмена, которую мы закрываем: голос «Лабиринта» в другой книге.
+  assert.equal(borrowedLabyrinthSample(LABYRINTH_AUTHOR_SAMPLE_MARKER, "story-vasyapered"), true);
+  // И у своей книги канонный маркер — не подмена.
+  assert.equal(borrowedLabyrinthSample(LABYRINTH_AUTHOR_SAMPLE_MARKER, LABYRINTH_STORY_ID), false);
+  // Отличаем маркер от обычного имени файла.
+  assert.equal(isLabyrinthSampleMarker(LABYRINTH_AUTHOR_SAMPLE_MARKER), true);
+  assert.equal(isLabyrinthSampleMarker("Вася.txt"), false);
+  assert.equal(isLabyrinthSampleMarker("user:lab.txt"), false);
 });
 
 test("голос канона и голос автора — разные тексты, и это измеримо", () => {

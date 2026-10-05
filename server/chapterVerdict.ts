@@ -38,6 +38,41 @@ const FREEZE_MOLD = new RegExp(`${START}(?:замер|застыл|остолб�
 /** Сравнение — по числу союзов «словно», «как будто», «будто», «как», «точь-в-точь». */
 const SIMILE_MARK = new RegExp(`${START}(?:словно|как будто|будто|точь-в-точь|как)\\p{L}*`, "giu");
 
+/**
+ * Потолок доли абзацев-реплик.
+ *
+ * Эталон автора — 37 % (`Вася.txt`, главы 1–3: 63 реплики из 170 блоков).
+ * Глава 4 сборки 119 дала 55 % (54 из 99). Порог 0,50 — выше человеческого:
+ * реплик у автора не мало, и требовать меньше было бы ровно тем ловушечным
+ * «улучшением», которым уже страдал проект (см. комментарий у `simile`).
+ */
+const SPEECH_SHARE_LIMIT = 0.5;
+
+/**
+ * Блоки текста для сверки формы: абзацы, а если в тексте почти нет пустых строк
+ * (так устроены авторские рукописи: `Вася.txt` — 170 строк и всего 8 пустых) —
+ * то непустые строки.
+ *
+ * Без второй ветки доля реплик у самого автора считалась как 0 %: девять блоков
+ * по 100–700 слов, ни один не начинается со знака реплики, и метрика уезжала
+ * врать именно на том тексте, с которым сверялась.
+ */
+function formBlocks(text: string): string[] {
+  const source = String(text || "");
+  const paragraphs = source.split(/\n{2,}/u).map((block) => block.trim()).filter(Boolean);
+  if (paragraphs.length >= 8) return paragraphs;
+  const lines = source.split(/\n/u).map((line) => line.trim()).filter(Boolean);
+  return lines.length > paragraphs.length ? lines : paragraphs;
+}
+
+/** Доля абзацев, начинающихся со знака реплики (тире или дефис), 0…1. */
+export function speechParagraphShare(text: string): number {
+  const blocks = formBlocks(text);
+  if (!blocks.length) return 0;
+  const speech = blocks.filter((block) => /^[ \t]*[—–―-]\s/u.test(block)).length;
+  return speech / blocks.length;
+}
+
 export interface ChapterCapCheck {
   id: string;
   label: string;
@@ -121,6 +156,7 @@ export function verifyChapter(text: string, depth: HumanizeDepthConfig = HUMANIZ
   const spread = sentenceLengthSpread(text);
   const architecture = architectureDiagnostics(text);
   const chunks = emptyChunkShare(text);
+  const speechShare = Math.round(speechParagraphShare(text) * 100);
 
   const caps: ChapterCapCheck[] = [
     {
@@ -150,6 +186,20 @@ export function verifyChapter(text: string, depth: HumanizeDepthConfig = HUMANIZ
       limit: 20,
       ok: words ? (countSimileMarks(text) * 1000) / words <= 20 : true,
       advice: "сравнение должно быть редким; проверь, не подменяет ли оно наблюдение",
+    },
+    {
+      // Доля абзацев-реплик. Эталон 37 % (`Вася.txt`, главы 1–3), глава 4
+      // сборки 119 дала 55 %. Метрика не была в потолках вовсе, хотя
+      // `dialogueShare` считывался и печатался в отчёте: раздутый диалог
+      // проходил незамеченным. Порог выше человеческого — отнимать у автора
+      // право на диалог нельзя, но и за пределами эталонного коридора это
+      // уже «роуминг реплик», а не сцена.
+      id: "speech-share",
+      label: "реплик среди абзацев",
+      actual: speechShare,
+      limit: Math.round(SPEECH_SHARE_LIMIT * 100),
+      ok: speechShare <= Math.round(SPEECH_SHARE_LIMIT * 100),
+      advice: "собери две соседние реплики в один абзац и добавь между ними одно действие",
     },
   ];
 

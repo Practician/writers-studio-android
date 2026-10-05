@@ -97,7 +97,7 @@ import { proseModel } from "./modelTier";
 import { chapterVerdictFixBlock, verifyChapter, type ChapterVerdict } from "./chapterVerdict";
 import { ARCHITECTURE_FIELDS, RARITY_MOVES, architecturePlannerPrompt, architectureSheetBlock, architectureSheetNote, parseArchitectureSheet, type ArchitectureSheet } from "./chapterArchitect";
 import { criticPrompt, criticismFixBlock, deterministicCriticism, parseCriticism, type CriticismFinding } from "./criticAgent";
-import { authorSpeechMark, DETECTOR_WINDOW_CHARS, proseRegisterFindings, proseRegisterNote, proseRegisterSceneIssues, speechMarkDirective } from "./proseRegister";
+import { authorSpeechMark, DETECTOR_WINDOW_CHARS, proseRegisterFindings, proseRegisterNote, proseRegisterSceneIssues, speechMarkDirective, speechMarkMismatch } from "./proseRegister";
 import { editMixRatios, meaningLossIssues, revertUnearnedEdits } from "./editRevert";
 import { filterByPairJudge, stripEditorNoise, type PairJudgeConfig, type PairJudgeStats } from "./pairJudge";
 import { computeStyleStats } from "../src/lib/authorAudit";
@@ -1728,6 +1728,16 @@ ${moveCatalogPrompt()}
 - Верни JSON по схеме.`;
 }
 
+/**
+ * Кавычки в прозе. Знак реплики сюда не входит: он задаётся образцом автора
+ * (`speechMarkDirective`), потому что одни книги пишут реплики дефисом, другие
+ * тире, и требование «с тире» в промпте сцены заставляло модель менять author's
+ * манеру (живой случай 05.10.2026: 54 тире против нуля дефисов у автора).
+ */
+const SPEECH_NO_QUOTES_RULE = "Кавычки-ёлочки «…» не ставь нигде — ни у реплик, ни у названий и слов: "
+  + "у автора книги 2 кавычки на 69 000 знаков, и в отчёте нейродетектора наши кавычки — самый сильный признак машинного текста. "
+  + "Реплика без знака — брак, кусок будет перезапрошен.";
+
 export function buildScenePrompt(
   input: ChapterGenerateInput,
   beat: ChapterBeat,
@@ -1743,6 +1753,13 @@ export function buildScenePrompt(
 ): string {
   const focus = SCENE_FOCUSES[beatIndex % SCENE_FOCUSES.length];
   const characterNotes = buildCharacterNotes(input);
+  // Сборка 119: знак реплики берётся из образца автора, а не задаётся тире.
+  // Здесь было жёстко «ПРЯМАЯ РЕЧЬ С ТИРЕ», при этом директива по образцу
+  // (`speechMarkDirective`) была написана, покрыта тестом и НИ РАЗУ не
+  // вызывалась: импорт в chapterGenerate.ts был, обращения не было. Живой
+  // результат 05.10.2026: у автора 63 реплики дефисом и ноль тире, а в
+  // готовой главе — 54 тире и ни одного дефиса.
+  const speechRule = speechMarkDirective(String(input.authorSample || ""));
   return `Напиши фрагмент главы (бит ${beatIndex + 1} из ${beatCount}).
 
 ЯЗЫК (жёстко):
@@ -1750,7 +1767,7 @@ export function buildScenePrompt(
 - ЗАПРЕЩЕНЫ английские слова, латиница, транслит вроде «level», «ok», «phone», «wall», «corridor».
 - Цифры и «%» допустимы. Имена из канона — по-русски.
 - Не смешивай алфавиты в одном предложении.
-- ПРЯМАЯ РЕЧЬ С ТИРЕ, БЕЗ КАВЫЧЕК: каждая реплика начинается с тире (— Слышал?), слова автора после реплики — тоже с тире: — Сруби свет, — сказал он. Ёлочки «…» не ставь нигде — ни у реплик, ни у названий и слов: у автора книги 2 кавычки на 69 000 знаков, и в отчёте нейродетектора наши кавычки — самый сильный признак машинного текста. Реплика без тире — брак, кусок будет перезапрошен.
+${speechRule} ${SPEECH_NO_QUOTES_RULE}
 ${povDirective ? `\n${povDirective}\n` : ""}
 ${characterNotes ? `\n${characterNotes}\n` : ""}
 Бит:
@@ -3259,6 +3276,11 @@ export async function generateScenesDraft(
         // нечего, и именно так в финальные главы попадали «идеально ровная
         // поверхность» и четыре «не оборачиваясь» подряд.
         soft.push(...proseRegisterSceneIssues(cleaned));
+        // Сборка 119: знак реплики сверяется с образцом автора. На сцене это
+        // ловится за один перезапрос, пока текст ещё можно переписать; в
+        // собранной главе это уже не лечится.
+        const markMismatch = speechMarkMismatch(cleaned, sample);
+        if (markMismatch) soft.push(markMismatch);
       }
       softNotes = [...quota, ...soft];
       // Держим самую чистую из забракованных попыток: если это плановый бит и брак

@@ -9,7 +9,7 @@ import {
   loadGlobalAuthorProfile,
   saveAuthorProfile,
 } from "../lib/authorStorage";
-import { ownsLabyrinthAuthorSample } from "../data/labyrinthCanon";
+import { borrowedLabyrinthSample } from "../data/labyrinthCanon";
 
 interface AuthorProfileModalProps {
   open: boolean;
@@ -202,17 +202,20 @@ export default function AuthorProfileModal({
 
   const sampleLength = sample.trim().length;
   const canBuild = sampleLength >= 300;
-  // Сборка 118: образец, помеченный маркером `labyrinth-canon-*`, принадлежит
-  // книге «Лабиринт». Если такой маркер стоит в профиле ДРУГОЙ книги — значит,
-  // голос подставился из чужой книги (так было до починки: искали книгу по
-  // названию, и любая «Лабиринт...» получала чужой образец). Показываем это
-  // прямо: профиль выглядит заполненным, и без явного предупреждения подмена
-  // неотличима от нормального образца.
-  const borrowedSample = Boolean(
-    sampleFileName
-    && !sampleFileName.startsWith("user:")
-    && !ownsLabyrinthAuthorSample({ id: effectiveStoryId }),
-  );
+  // Сборка 118: образец, помеченный канонным маркером `labyrinth-canon-*`,
+  // принадлежит книге «Лабиринт». Если такой маркер стоит в профиле ДРУГОЙ
+  // книги — значит, голос подставился из чужой книги (так было до починки:
+  // книга канона искалась ещё и по названию, и любая «Лабиринт...» получала
+  // чужой образец). Показываем это прямо: профиль выглядит заполненным, и без
+  // явного предупреждения подмена неотличима от нормального образца.
+  //
+  // Проверяется ИМЕННО канонный маркер, а не «любое имя без префикса user:».
+  // Первая версия смотрела именно так и ругалась на автора без причины: при
+  // загрузке своего файла кнопкой «Выбрать файл» в поле попадает голое имя
+  // (`Вася.txt`), без префикса `user:`, который ставится только ручной вводной.
+  // Живой случай 05.10.2026: у книги «Вейпер Вася» с собственным образцом из
+  // 38 326 знаков вылезло «этот образец помечен как принадлежащий другой книге».
+  const borrowedSample = borrowedLabyrinthSample(sampleFileName, effectiveStoryId);
 
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="author-profile-modal-title">

@@ -263,6 +263,30 @@ export const LABYRINTH_VOICE_SHEET: AuthorVoiceSheet = {
 };
 
 /**
+ * Канонный маркер образца: `labyrinth-canon-ch1-v13` и следующие.
+ * Только он означает «это голос книги "Лабиринт"». Обычное имя файла, загруженного
+ * автором (`Вася.txt`), канонным маркером не является.
+ */
+export function isLabyrinthSampleMarker(sampleFileName: string | undefined | null): boolean {
+  return /^\s*labyrinth-canon-/u.test(String(sampleFileName || ""));
+}
+
+/**
+ * Заимствован ли образец: в профиле книги стоит канонный маркер «Лабиринта»,
+ * а сама книга — не «Лабиринт».
+ *
+ * Ловит ровно одну подмену: голос книги «Лабиринт», оказавшийся в чужой книге из-за
+ * поиска по названию. Обратное (голос «Лабиринта» у его книги) — не подмена.
+ */
+export function borrowedLabyrinthSample(
+  sampleFileName: string | undefined | null,
+  storyId: string | undefined | null,
+): boolean {
+  if (!isLabyrinthSampleMarker(sampleFileName)) return false;
+  return !ownsLabyrinthAuthorSample(storyId ? { id: storyId } : null);
+}
+
+/**
  * Кому принадлежит канонный образец голоса.
  *
  * Только книга с точным `LABYRINTH_STORY_ID`. Раньше книга искалась ещё и по

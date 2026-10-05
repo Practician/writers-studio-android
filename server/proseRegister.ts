@@ -746,7 +746,7 @@ export function proseRegisterNote(text: string): string {
  * в текст чужой отпечаток. Здесь знак берётся из образца автора.
  */
 export function authorSpeechMark(sample: string): { mark: "—" | "-"; long: number; short: number } {
-  const lines = paragraphs(sample).filter(isSpeechLine);
+  const lines = formBlocks(sample).filter(isSpeechLine);
   // Образца нет — сравнение 0 >= 0 объявляло бы знаком автора дефис, которого в
   // образце нет. При отсутствии данных поведение по умолчанию — длинное тире,
   // как пишет живая русская проза вообще.
@@ -766,4 +766,51 @@ export function speechMarkDirective(sample: string): string {
   return `РЕПЛИКИ: каждая прямая речь начинается со знака «${mark}» — так пишет автор `
     + `(в образце ${short} реплик дефисом и ${long} длинным тире). `
     + `Кавычки-ёлочки не ставить. Вид: ${example}`;
+}
+
+/**
+ * Блоки для сверки формы. У живого автора абзац — это строка (`Вася.txt`: 170
+ * строк, 8 пустых), поэтому делить только по пустым строкам нельзя: на его же
+ * тексте это даёт девять блоков по сотне слов и ложную долю реплик.
+ */
+function formBlocks(text: string): string[] {
+  const source = String(text || "");
+  const paragraphs = source.split(/\n{2,}/u).map((block) => block.trim()).filter(Boolean);
+  if (paragraphs.length >= 8) return paragraphs;
+  const lines = source.split(/\n/u).map((line) => line.trim()).filter(Boolean);
+  return lines.length > paragraphs.length ? lines : paragraphs;
+}
+
+/** Начинается ли абзац со знака реплики (тире или дефис). */
+export function startsWithSpeechMark(paragraph: string): boolean {
+  return /^[ \t]*[—–―-]\s/u.test(paragraph);
+}
+
+/**
+ * Реплики, написанные не тем знаком, каким пишет автор.
+ *
+ * Зачем. `isMarkedSpeech` (humanStyle.ts) считает тире и дефис одинаково
+ * размеченной репликой — для проверки «а размечена ли речь» это верно. Но для
+ * проверки «это author's манера» — нет: книга, где автор пишет реплики дефисом
+ * (63 реплики дефисом и ноль тире в `Вася.txt`), выходит из конвейера с тире
+ * на каждой реплике, и гейт этого не видит. Живой случай 05.10.2026: 54 тире
+ * и 0 дефисов в готовой главе против 63 дефисов у автора.
+ *
+ * Молча сменить знак нельзя — это правка текста, а не метрика, — поэтому
+ * расхождение возвращается как замечание и в промпт, и в отчёт.
+ */
+export function speechMarkMismatch(text: string, sample: string): string {
+  const expected = authorSpeechMark(sample);
+  // Образца нет или в нём нет реплик: сверять не с чем, и это не брак.
+  if (!expected.long && !expected.short) return "";
+  const wrongMark = expected.mark === "-" ? "—" : "-";
+  const blocks = formBlocks(text);
+  const wrong = blocks.filter(
+    (block) => startsWithSpeechMark(block) && block.trimStart().startsWith(wrongMark),
+  ).length;
+  const total = blocks.filter(isSpeechLine).length;
+  // Расхождение половины и больше — уже не «манера», а другой знак.
+  if (total < 3 || wrong < total * 0.5) return "";
+  return `знак реплики не тот, что у автора: ${wrong} реплик с «${wrongMark}» и ${total - wrong} с «${expected.mark}», `
+    + `а в образце ${expected.short} дефисом и ${expected.long} тире — пиши реплики со знаком «${expected.mark}»`;
 }
