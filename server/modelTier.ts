@@ -79,10 +79,19 @@ export interface ModelUseSummary {
 
 const useTally = new Map<string, { primary: number; reserve: number; models: Map<string, number> }>();
 
+/**
+ * Модель, ответившая последней. Нужна конвейеру прозы: гайд по тикам и температура
+ * берутся по модели, а ротация происходит ниже, в слое запроса, — на момент
+ * сборки промпта ещё неизвестно, кто ответит. Между сценами главы это уже известно,
+ * поэтому промпт второй и следующих сцен можно строить под фактического писателя.
+ */
+let lastAnsweringModel = "";
+
 /** Записать, какая модель фактически ответила на запрос. */
 export function recordModelUse(model: string): void {
   const id = String(model || "").trim();
   if (!id) return;
+  lastAnsweringModel = id;
   const tier = modelTier(id);
   const entry = useTally.get(tier) ?? { primary: 0, reserve: 0, models: new Map<string, number>() };
   if (tier === "primary") entry.primary += 1;
@@ -94,6 +103,24 @@ export function recordModelUse(model: string): void {
 /** Обнулить счётчики перед новым прогоном. */
 export function resetModelUse(): void {
   useTally.clear();
+  lastAnsweringModel = "";
+}
+
+/**
+ * Модель, которой писать промпт: фактически ответившая, если она известна,
+ * иначе запрошенная.
+ *
+ * Зачем. Живой прогон главы 4 (05.10.2026, 09:23): запрошена `gemini-3.8-flash`,
+ * а 82 запроса из 88 выполнила `gemini-3.1-flash-lite` (основные модели отдали
+ * 503 и 429 по дневной квоте). Промпт сцены строился по 3.8, поэтому гайд
+ * `modelFingerprintGuidance` уходил не тому писателю: у Gemini Lite есть
+ * отдельный блок против ровных кусков одинаковой длины, и в промпт он не попал
+ * именно потому, что модель подменилась уже после сборки промпта. Симптомы
+ * совпали с симптомами блока: куски по 147–181 слово (CV 0,06 против 1,19 у
+ * автора), одна интонация на главу, 2,0 конкретных деталей на 1000 слов.
+ */
+export function proseModel(requested: string): string {
+  return lastAnsweringModel || String(requested || "");
 }
 
 /** Сводка по текущему прогону. */

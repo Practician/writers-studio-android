@@ -262,6 +262,24 @@ export const LABYRINTH_VOICE_SHEET: AuthorVoiceSheet = {
   ],
 };
 
+/**
+ * Кому принадлежит канонный образец голоса.
+ *
+ * Только книга с точным `LABYRINTH_STORY_ID`. Раньше книга искалась ещё и по
+ * названию (`/лабиринт/i.test(title) && /путь домой/i.test(title)`), и этого
+ * было достаточно, чтобы голос одной книги попал в другую: у пользователя
+ * несколько книг, и любая, названная со словом «Лабиринт», получала образец
+ * `labyrinth-canon-ch1-v13` и паспорт голоса с чужими отметками. Подмена голоса
+ * не видна в интерфейсе — профиль выглядит обычным, и книга молча пишется не
+ * тем голосом, который автор выбрал.
+ *
+ * Эвристика `isLabyrinthStory` остаётся там, где нужна для восстановления
+ * слотов глав и канона, но голос она больше не раздаёт.
+ */
+export function ownsLabyrinthAuthorSample(story: Pick<Story, "id"> | null | undefined): boolean {
+  return Boolean(story && story.id === LABYRINTH_STORY_ID);
+}
+
 /** Профиль автора для IndexedDB: образец = авторская глава 1. */
 export function buildLabyrinthAuthorProfile(now = Date.now()): AuthorProfileRecord {
   return {

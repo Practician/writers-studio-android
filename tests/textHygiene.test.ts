@@ -37,3 +37,30 @@ test("humanizeProseDraft always runs final Unicode hygiene", async () => {
   assert.equal(result.humanizeReport.textHygiene.removedHiddenCharacters, 1);
   assert.equal(result.humanizeReport.textHygiene.changed, true);
 });
+
+// Сборка 118. Живой DOCX главы 4 (05.10.2026) содержал 8 буквальных `**`
+// на 19 300 знаков: `боясь спугнуть **трепет**`, `от **тревоги**`.
+test("sanitizeGeneratedText снимает markdown-выделение в прозе", () => {
+  const source = "Васька промолчал, боясь спугнуть **трепет**; воздух стал плотнее.";
+  const result = sanitizeGeneratedText(source);
+
+  assert.equal(result.text, "Васька промолчал, боясь спугнуть трепет; воздух стал плотнее.");
+  assert.equal(result.report.fixedPunctuationArtifacts, 1);
+  assert.match(result.report.punctuationNotes.join(" "), /markdown-выделение снято/);
+});
+
+test("sanitizeGeneratedText не трогает знак ударения и знак умножения", () => {
+  // Живая речь пишет ударение без пробела, а «2 ** 3» — не выделение.
+  const stress = "Он смотрел на тём* небо и не двигался.";
+  assert.equal(sanitizeGeneratedText(stress).text, stress);
+
+  const multiply = "Умножение 2 ** 3 даёт шесть.";
+  assert.equal(sanitizeGeneratedText(multiply).text, multiply);
+
+  assert.equal(sanitizeGeneratedText("Обычный абзац.").report.fixedPunctuationArtifacts, 0);
+});
+
+test("sanitizeGeneratedText снимает выделение внутри прямой речи", () => {
+  const source = "Он крикнул: «**Беги!**» и подался назад.";
+  assert.equal(sanitizeGeneratedText(source).text, "Он крикнул: «Беги!» и подался назад.");
+});

@@ -14,7 +14,9 @@ import {
   countSimileMarks,
   verifyChapter,
 } from "../server/chapterVerdict";
-import { modelTier, shortModelName } from "../server/modelTier";
+import { modelTier, proseModel, recordModelUse, resetModelUse, shortModelName } from "../server/modelTier";
+import { modelFingerprintGuidance } from "../server/humanStyleEnhanced";
+import { providerOfModel } from "../server/chapterGenerate";
 import { HUMAN_SAMPLE, MACHINE_CHAPTER } from "./fixturesProseRegister";
 
 // ── Регистр: различает ли человеческое и машинное ────────────────────────────
@@ -121,4 +123,41 @@ test("modelTier: резервные модели отделены от осно�
 test("shortModelName: в журнале — короткое имя, а не идентификатор", () => {
   assert.equal(shortModelName("gemini-2.5-flash-lite"), "2.5-flash-lite");
   assert.equal(shortModelName("deepseek/deepseek-v3.2"), "deepseek-v3.2");
+});
+
+// ── Сборка 118: гайд по тикам уходит модели, которая фактически пишет ────────
+//
+// Живой прогон главы 4 (05.10.2026, 09:23): запрошена gemini-3.8-flash, а 82
+// запроса из 88 выполнила gemini-3.1-flash-lite. Промпт сцены строился по
+// настроенной 3.8, поэтому Lite-блок («куски одинаковой длины», «описывай место
+// двумя деталями», «не держи одну интонацию») в промпт не попал — а симптомы
+// совпали с его симптомами один в один.
+test("proseModel: до первого ответа берём запрошенную модель", () => {
+  resetModelUse();
+  assert.equal(proseModel("gemini-3.8-flash"), "gemini-3.8-flash");
+});
+
+test("proseModel: после ответа резервной модели гайд строится под неё", () => {
+  resetModelUse();
+  recordModelUse("gemini-3.1-flash-lite");
+
+  assert.equal(proseModel("gemini-3.8-flash"), "gemini-3.1-flash-lite");
+  const liteGuide = modelFingerprintGuidance(providerOfModel(proseModel("gemini-3.8-flash")), proseModel("gemini-3.8-flash"));
+  const configuredGuide = modelFingerprintGuidance("gemini", "gemini-3.8-flash");
+
+  // Блок против ровных кусков — ровно то, чего не хватало в живой главе.
+  assert.match(liteGuide, /Твои куски выходят одинаковой длины/);
+  assert.doesNotMatch(configuredGuide, /Твои куски выходят одинаковой длины/);
+
+  // И наоборот: гайд настроенной модели не должен содержать Lite-признаки.
+  assert.doesNotMatch(configuredGuide, /Gemini Lite/);
+});
+
+test("proseModel: новый прогон обнуляет память о писавшей модели", () => {
+  resetModelUse();
+  recordModelUse("gemini-3.1-flash-lite");
+  assert.equal(proseModel("gemini-3.8-flash"), "gemini-3.1-flash-lite");
+
+  resetModelUse();
+  assert.equal(proseModel("gemini-3.8-flash"), "gemini-3.8-flash");
 });

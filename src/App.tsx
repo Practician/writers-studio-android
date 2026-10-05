@@ -65,11 +65,11 @@ import {
   buildLabyrinthAuthorProfile,
   ensureLabyrinthChapterSlots,
   mergeLabyrinthCanonIntoStories,
+  ownsLabyrinthAuthorSample,
   shouldSeedLabyrinthAuthorProfile,
 } from "./data/labyrinthCanon";
 import {
   loadAuthorProfile,
-  migrateGlobalAuthorProfileToStories,
   saveAuthorProfile,
 } from "./lib/authorStorage";
 import {
@@ -671,14 +671,14 @@ export default function App() {
   // 1. Initial Load and Seeding (+ влитие канона «Лабиринт» в bible/plan/гл.5–6)
   useEffect(() => {
     const seedAuthorStyle = (storiesList: Story[]) => {
-      // Образец голоса из Word-гл.6 → IndexedDB, чтобы «Максимум»/generate продолжали паттерны
-      const lab =
-        storiesList.find((s) => s.id === LABYRINTH_STORY_ID) ||
-        storiesList.find(
-          (s) => /лабиринт/i.test(s.title || "") && /путь\s*домой/i.test(s.title || ""),
-        );
+      // Сборка 118: образец голоса сеется ТОЛЬКО книге с точным storyId канона.
+      // Раньше здесь был запасной поиск по названию («лабиринт» + «путь домой»),
+      // и при нескольких книгах голос «Лабиринта» попадал в чужую книгу:
+      // профиль выглядел обычным, но паспорт голоса и отметки реплик были от
+      // другой книги. Совпадение по названию не должно решать, чей это голос.
+      const lab = storiesList.find((s) => ownsLabyrinthAuthorSample(s));
       if (!lab) return;
-      // Профиль теперь хранится для конкретной книги: сеем образец голоса
+      // Профиль хранится для конкретной книги: сеем образец голоса
       // только в её собственную запись (storyId этой книги).
       void loadAuthorProfile(lab.id)
         .then((existing) => {
@@ -697,9 +697,6 @@ export default function App() {
           setStories(merged);
           localStorage.setItem("writers_studio_stories", JSON.stringify(merged));
           seedAuthorStyle(merged);
-          // Однократная миграция: у существующих книг появляется своя копия
-          // legacy-общего профиля, чтобы их голос не потерялся после обновления.
-          void migrateGlobalAuthorProfileToStories(merged.map((s: any) => s.id)).catch(() => {});
 
           const savedStoryId = localStorage.getItem("writers_studio_selected_story_id");
           const savedChapterId = localStorage.getItem("writers_studio_selected_chapter_id");

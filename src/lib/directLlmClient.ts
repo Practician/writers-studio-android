@@ -2208,7 +2208,18 @@ export async function directApi(path: string, init?: RequestInit): Promise<Respo
         // выглядел бы в журнале как настоящий запрос к NVIDIA с gemini-моделью —
         // то есть как ещё одна неисправность. Здесь пришлось выдумывать хост,
         // потому что сводка запросом не является.
+        //
+        // Сборка 118: предупреждение о деградации снова печатается. В сборке 115
+        // сводку перенесли из трассы в шаги главы, и строка стала
+        // `notifyChapterStep(modelNote, modelWarning ? "warn" : "info")` — текст
+        // предупреждения использовался как флаг уровня и в журнал больше не
+        // попадал. Живой прогон 05.10.2026, 09:23: 82 запроса из 88 выполнила
+        // gemini-3.1-flash-lite, а в журнале нет ни слова о том, что проза
+        // резервная. `modelUseNote` показывает числа, но не называет причину:
+        // «резервные 82» без пояснения читается как часть сводки, а не как
+        // предупреждение о качестве.
         if (modelNote) notifyChapterStep(modelNote, modelWarning ? "warn" : "info");
+        if (modelWarning) notifyChapterStep(modelWarning, "warn");
         notifyHumanizePass(generated.humanizeReport.depth, generated.text.length, generated.text.length, {
           scoreBefore: generated.humanizeReport.scoreBefore,
           scoreAfter: generated.humanizeReport.scoreAfter,

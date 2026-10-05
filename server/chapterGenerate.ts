@@ -93,6 +93,7 @@ import {
   type RubricReport,
 } from "./sepiaRubric";
 import { punctuationHygieneNote, sanitizeGeneratedText, type TextHygieneReport } from "./textHygiene";
+import { proseModel } from "./modelTier";
 import { chapterVerdictFixBlock, verifyChapter, type ChapterVerdict } from "./chapterVerdict";
 import { ARCHITECTURE_FIELDS, RARITY_MOVES, architecturePlannerPrompt, architectureSheetBlock, architectureSheetNote, parseArchitectureSheet, type ArchitectureSheet } from "./chapterArchitect";
 import { criticPrompt, criticismFixBlock, deterministicCriticism, parseCriticism, type CriticismFinding } from "./criticAgent";
@@ -1763,7 +1764,7 @@ ${characterNotes ? `\n${characterNotes}\n` : ""}
 ${process.env.RHYTHM_RULE_OFF ? "" : (process.env.RHYTHM_RULE_OLD ? OLD_RHYTHM_RULE : RHYTHM_RULE)}
 ${AUTHOR_STYLE_RULE}
 
-${architectureNotes(beatIndex, movePlan, architectureSheet)}${modelFingerprintGuidance(providerOfModel(input.model), input.model)}
+${architectureNotes(beatIndex, movePlan, architectureSheet)}${modelFingerprintGuidance(providerOfModel(proseModel(input.model)), proseModel(input.model))}
 
 ${previousTail ? `Продолжай сразу после этого хвоста (не повторяй его дословно и не пересказывай теми же фразами):\n"""\n${previousTail}\n"""\n` : "Это начало главы после предыдущих событий канона.\n"}
 ${scenePlan.seamNotes ? `${scenePlan.seamNotes}\n` : ""}

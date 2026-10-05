@@ -9,6 +9,7 @@ import {
   loadGlobalAuthorProfile,
   saveAuthorProfile,
 } from "../lib/authorStorage";
+import { ownsLabyrinthAuthorSample } from "../data/labyrinthCanon";
 
 interface AuthorProfileModalProps {
   open: boolean;
@@ -201,6 +202,17 @@ export default function AuthorProfileModal({
 
   const sampleLength = sample.trim().length;
   const canBuild = sampleLength >= 300;
+  // Сборка 118: образец, помеченный маркером `labyrinth-canon-*`, принадлежит
+  // книге «Лабиринт». Если такой маркер стоит в профиле ДРУГОЙ книги — значит,
+  // голос подставился из чужой книги (так было до починки: искали книгу по
+  // названию, и любая «Лабиринт...» получала чужой образец). Показываем это
+  // прямо: профиль выглядит заполненным, и без явного предупреждения подмена
+  // неотличима от нормального образца.
+  const borrowedSample = Boolean(
+    sampleFileName
+    && !sampleFileName.startsWith("user:")
+    && !ownsLabyrinthAuthorSample({ id: effectiveStoryId }),
+  );
 
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="author-profile-modal-title">
@@ -221,6 +233,13 @@ export default function AuthorProfileModal({
         </div>
 
         <div className="flex-1 space-y-5 overflow-y-auto p-6">
+          {borrowedSample && (
+            <p className="rounded-lg border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">
+              ВНИМАНИЕ: этот образец помечен как принадлежащий другой книге («{sampleFileName}»).
+              Пока он здесь, генерация этой книги идёт не вашим голосом. Загрузите свой образец
+              или очистите поле — тогда книга начнёт писать собственной манерой.
+            </p>
+          )}
           <div className="rounded-xl border border-slate-800 bg-slate-950/35 p-4">
             <div className="mb-2 flex items-center justify-between gap-3">
               <div>

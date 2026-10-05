@@ -173,26 +173,26 @@ export async function adoptGlobalAuthorProfile(storyId: string): Promise<AuthorP
 }
 
 /**
- * Одноразовая миграция при обновлении со старой версии: у всех УЖЕ
- * существующих книг появляется собственная копия общего профиля, чтобы их
- * голос не потерялся. Книги, созданные после миграции, ничего не наследуют.
+ * Автоматический перенос общего (legacy) профиля по книгам УДАЛЁН — сборка 118.
+ *
+ * Здесь был код, который брал один глобальный профиль — а он принадлежал
+ * конкретной книге, у которой он был единственной — и копировал его во все
+ * книги, у которых своей записи не было. При нескольких книгах это означало,
+ * что книга, созданная второй, писалась голосом первой: и образец стиля, и
+ * паспорт голоса, и знак реплики. Профиль при этом выглядел заполненным,
+ * поэтому подмену нельзя было заметить ни в интерфейсе, ни по журналу.
+ *
+ * Почему не вернули в виде «перенести в единственную книгу без профиля». Такое
+ * правило выглядит безобидным, но при двух книгах, у одной из которых профиль
+ * уже есть, безголосая книга всегда оказывается «единственным претендентом» и
+ * получает голос первой — то есть ровно то, что требовалось запретить. Это
+ * вскрылось только тестом на мультикнижность; молчаливый перенос чужого голоса
+ * опаснее его отсутствия, потому что при отсутствии книга просто пишет по своим
+ * главам или без образца, и это видно.
+ *
+ * Копирование осталось, но только явным действием автора: кнопка «Использовать
+ * общий профиль» в модалке профиля — `adoptGlobalAuthorProfile` ниже.
  */
-export async function migrateGlobalAuthorProfileToStories(storyIds: string[]): Promise<boolean> {
-  if (typeof localStorage === "undefined") return false;
-  const flagKey = "writers_studio_author_perbook_migrated_v1";
-  if (localStorage.getItem(flagKey)) return false;
-  localStorage.setItem(flagKey, "1");
-  const global = await readProfile(GLOBAL_AUTHOR_PROFILE_ID);
-  if (!global) return false;
-  for (const storyId of storyIds) {
-    if (!storyId || storyId === GLOBAL_AUTHOR_PROFILE_ID) continue;
-    const existing = await readProfile(storyId);
-    if (!existing) {
-      await saveAuthorProfile({ ...global, storyId, updatedAt: Date.now() });
-    }
-  }
-  return true;
-}
 
 export async function saveAuthorRevision(revision: AuthorRevisionRecord): Promise<void> {
   const database = await openDatabase();
