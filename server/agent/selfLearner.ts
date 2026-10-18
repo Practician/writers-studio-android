@@ -4,10 +4,8 @@
 // Извлекает паттерны правок и обновляет DeepStyleProfile.
 
 import { Type } from "@google/genai";
-import { llmGenerate, llmTextOrThrow } from "../llmProvider.js";
-import { parseJsonResponse } from "../authorPipeline.js";
 import { EpisodeRecord, AuthorEditDiff, normalizedLevenshtein } from "./memory.js";
-import { DeepStyleProfile, StyleExemplar } from "./styleProfiler.js";
+import type { DeepStyleProfile, StyleExemplar } from "./styleProfiler.js";
 
 export interface EditPattern {
     type: 'deletion' | 'addition' | 'rephrasing' | 'restructuring';
@@ -116,6 +114,8 @@ ${JSON.stringify(diff.categorizedChanges, null, 2)}`;
         }
     };
 
+    const { llmGenerate, llmTextOrThrow } = await import("../llmProvider.js");
+    const { parseJsonResponse } = await import("../authorPipeline.js");
     const response = await llmGenerate({
         model,
         contents: prompt,
@@ -240,3 +240,10 @@ export async function consolidateMemory(
 
     return consolidatedProfile;
 }
+
+export {
+    extractDeterministicLessons,
+    recordAuthorEditLesson,
+    learnedRulesPromptBlock,
+} from "../../src/lib/selfLearnerLessons.js";
+

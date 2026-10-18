@@ -423,150 +423,324 @@ export function measureProseRegister(text: string): ProseRegister {
   };
 }
 
-/**
- * Замечания по регистру: строки для промпта и журнала. Каждое замечание называет
- * измеренную величину и эталон — по правилу sepia «no quote — no signal» без
- * цифры замечание не считается.
- */
-export function proseRegisterIssues(text: string, options: { minParagraphs?: number } = {}): string[] {
-  const metrics = measureProseRegister(text);
-  const issues: string[] = [];
-  if (metrics.words < 120) return issues;
-  const minParagraphs = options.minParagraphs ?? 6;
+export interface CalibratedProseBounds {
+  bodilyLimit: number;
+  filterLimit: number;
+  intensifierLimit: number;
+  negationMoldLimit: number;
+  oneSentenceShareLimit: number;
+  interiorShareFloor: number;
+  hedgeShareLimit: number;
+  verbatimRepeatLimit: number;
+  humanBodily: number;
+  humanFilter: number;
+  humanIntensifier: number;
+  humanNegationMold: number;
+  humanOneSentenceShare: number;
+  humanInteriorShare: number;
+  humanHedgeShare: number;
+}
 
-  if (metrics.bodilyPer10k >= BODILY_PER_10K_LIMIT) {
+/**
+ * Динамическая калибровка порогов регистра по образцу автора (`authorSample`).
+ * Если образец не передан или слишком короток (< 150 слов), возвращаются
+ * базовые константы, откалиброванные на эталоне `Вася.txt`.
+ * Если образец передан, пороги адаптируются так, чтобы собственный текст автора
+ * гарантированно проходил без замечаний, но превышение его нормы в 1,6–2 раза ловилось.
+ */
+export function calibrateProseRegisterBounds(authorSample?: string): CalibratedProseBounds {
+  const defaults: CalibratedProseBounds = {
+    bodilyLimit: BODILY_PER_10K_LIMIT,
+    filterLimit: FILTER_PER_10K_LIMIT,
+    intensifierLimit: INTENSIFIER_PER_10K_LIMIT,
+    negationMoldLimit: NEGATION_MOLD_PER_10K_LIMIT,
+    oneSentenceShareLimit: ONE_SENTENCE_SHARE_LIMIT,
+    interiorShareFloor: INTERIOR_SHARE_FLOOR,
+    hedgeShareLimit: HEDGE_SHARE_LIMIT,
+    verbatimRepeatLimit: VERBATIM_REPEAT_PER_10K_LIMIT,
+    humanBodily: HUMAN_BODILY_PER_10K,
+    humanFilter: HUMAN_FILTER_PER_10K,
+    humanIntensifier: HUMAN_INTENSIFIER_PER_10K,
+    humanNegationMold: HUMAN_NEGATION_MOLD_PER_10K,
+    humanOneSentenceShare: HUMAN_ONE_SENTENCE_PARAGRAPH_SHARE,
+    humanInteriorShare: HUMAN_INTERIOR_SHARE,
+    humanHedgeShare: HUMAN_HEDGE_SHARE,
+  };
+  if (!authorSample || typeof authorSample !== "string") return defaults;
+  const sampleMetrics = measureProseRegister(authorSample);
+  if (sampleMetrics.words < 150) return defaults;
+
+  return {
+    bodilyLimit: Math.max(BODILY_PER_10K_LIMIT, Math.round(sampleMetrics.bodilyPer10k * 1.5 + 8)),
+    filterLimit: Math.max(FILTER_PER_10K_LIMIT, Math.round(sampleMetrics.filterPer10k * 1.5 + 15)),
+    intensifierLimit: Math.max(INTENSIFIER_PER_10K_LIMIT, Math.round(sampleMetrics.intensifierPer10k * 1.5 + 20)),
+    negationMoldLimit: Math.max(NEGATION_MOLD_PER_10K_LIMIT, Math.round(sampleMetrics.negationMoldPer10k * 1.6 + 10)),
+    oneSentenceShareLimit: sampleMetrics.narrativeParagraphs >= 6
+      ? Math.min(ONE_SENTENCE_SHARE_LIMIT, Math.max(0.05, Math.round(sampleMetrics.oneSentenceParagraphShare * 0.4 * 100) / 100))
+      : ONE_SENTENCE_SHARE_LIMIT,
+    interiorShareFloor: sampleMetrics.narrativeParagraphs >= 6
+      ? Math.min(INTERIOR_SHARE_FLOOR, Math.max(0.01, Math.round(sampleMetrics.interiorShare * 0.5 * 1000) / 1000))
+      : INTERIOR_SHARE_FLOOR,
+    hedgeShareLimit: sampleMetrics.narrativeParagraphs >= 6
+      ? Math.max(HEDGE_SHARE_LIMIT, Math.round((sampleMetrics.hedgeShare * 1.5 + 0.04) * 100) / 100)
+      : HEDGE_SHARE_LIMIT,
+    verbatimRepeatLimit: Math.max(VERBATIM_REPEAT_PER_10K_LIMIT, Math.round(sampleMetrics.verbatimRepeatPer10k * 1.5 + 20)),
+    humanBodily: sampleMetrics.bodilyPer10k,
+    humanFilter: sampleMetrics.filterPer10k,
+    humanIntensifier: sampleMetrics.intensifierPer10k,
+    humanNegationMold: sampleMetrics.negationMoldPer10k,
+    humanOneSentenceShare: sampleMetrics.oneSentenceParagraphShare || HUMAN_ONE_SENTENCE_PARAGRAPH_SHARE,
+    humanInteriorShare: sampleMetrics.interiorShare || HUMAN_INTERIOR_SHARE,
+    humanHedgeShare: sampleMetrics.hedgeShare || HUMAN_HEDGE_SHARE,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Фильтр «Слово живое и мёртвое» (Нора Галь): канцелярит, отглагольные
+// существительные (-ение/-ание/-ость), цепочки родительного падежа и англицизмы-кальки.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Цепочка из 3+ существительных в родительном/отглагольном падеже подряд («процесс формирования ощущения безопасности»). */
+const NORA_GAL_GENITIVE_CHAIN = new RegExp(
+  "(?<![\\p{L}])(?:процесс|уровень|степень|результат|необходимость|возможность|осуществление|формирование|выполнение|обеспечение|состояние|наличие|отсутствие|возникновение|появление|проявление|сохранение|изменение|достижение)\\p{L}*\\s+"
+  + "[а-яё]{4,}(?:ия|ения|ания|тия|ости|ести|ства|ации|яции)\\s+"
+  + "[а-яё]{4,}(?:ия|ения|ания|тия|ости|ести|ства|ов|ев|ей|ам|ами)(?![\\p{L}])",
+  "giu",
+);
+
+/** Канцелярские связки с отглагольными существительными вместо живого глагола. */
+const NORA_GAL_VERBAL_NOUN_CLUTTER = new RegExp(
+  "(?<![\\p{L}])(?:"
+  + "(?:прив[её]л[аои]?|приводит|способствовал[аои]?)\\s+к\\s+[а-яё]{4,}(?:ению|анию|тию|ости)"
+  + "|(?:осуществля\\p{L}*|производ\\p{L}*|проводил\\p{L}*|выполня\\p{L}*)\\s+[а-яё]{4,}(?:ение|ание|тие|ость|ку)"
+  + "|(?:появление|возникновение|формирование|наличие|отсутствие)\\s+(?:ощущения|чувства|мысли|понимания|осознания|необходимости|возможности)"
+  + ")(?![\\p{L}])",
+  "giu",
+);
+
+/** Переводные англицизмы-кальки («took a second to», «looked tired», «made sense», «felt like»). */
+const NORA_GAL_TRANSLATION_CALQUES = new RegExp(
+  "(?<![\\p{L}])(?:"
+  + "взял[аи]?\\s+(?:секунду|минуту|момент|паузу)\\s*,?\\s*чтобы"
+  + "|выглядел[аои]?\\s+(?:так,\\s*словно|уставш\\p{L}*|испуганн\\p{L}*|растерянн\\p{L}*|обеспокоенн\\p{L}*|бледн\\p{L}*|странн\\p{L}*)"
+  + "|звучал[аои]?\\s+(?:убедительн\\p{L}*|неуверенн\\p{L}*|странн\\p{L}*|знаком\\p{L}*|угрожающ\\p{L}*)"
+  + "|почувствовал[аи]?\\s+себя\\s+так,\\s*(?:словно|будто)"
+  + "|(?:это\\s+)?имело\\s+смысл"
+  + "|сделал[аи]?\\s+мысленн(?:ую|ый)\\s+(?:заметку|пометку)"
+  + ")(?![\\p{L}])",
+  "giu",
+);
+
+export interface NoraGalReport {
+  genitiveChains: number;
+  verbalNounClutter: number;
+  translationCalques: number;
+  totalPer10k: number;
+  samples: string[];
+}
+
+export function measureNoraGal(text: string): NoraGalReport {
+  const body = String(text || "");
+  const wordCount = Math.max(words(body), 1);
+  const collect = (pattern: RegExp): string[] => {
+    const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+    return [...body.matchAll(new RegExp(pattern.source, flags))].map((m) => m[0]);
+  };
+  const chains = collect(NORA_GAL_GENITIVE_CHAIN);
+  const clutter = collect(NORA_GAL_VERBAL_NOUN_CLUTTER);
+  const calques = collect(NORA_GAL_TRANSLATION_CALQUES);
+  const all = [...chains, ...clutter, ...calques];
+  const totalPer10k = Math.round(((all.length * 10000) / wordCount) * 10) / 10;
+  return {
+    genitiveChains: chains.length,
+    verbalNounClutter: clutter.length,
+    translationCalques: calques.length,
+    totalPer10k,
+    samples: all.slice(0, 5),
+  };
+}
+
+export function noraGalIssues(text: string): string[] {
+  const report = measureNoraGal(text);
+  const issues: string[] = [];
+  if (report.genitiveChains > 0 || report.verbalNounClutter > 0) {
+    const sampleStr = report.samples.slice(0, 3).map((s) => `«${s}»`).join(", ");
     issues.push(
-      `эмоция дана только телом: телесных реакций ${metrics.bodilyPer10k} на 10 тыс. слов против ${HUMAN_BODILY_PER_10K} у человека, `
-      + `названных чувств ${metrics.namedEmotionPer10k} — назови чувство словом там, где сейчас только ощущение `
-      + `(холодок, дрожь, сжалось внутри), и оставь телесным не больше двух пиков`,
+      `канцелярит и отглагольные существительные по Норе Галь (${report.genitiveChains + report.verbalNounClutter} шт.: ${sampleStr}) — `
+      + `разомкни цепочки родительного падежа и замени существительные на «-ение/-ание/-ость» живым глаголом (что кто сделал)`,
     );
   }
-  if (metrics.filterPer10k >= FILTER_PER_10K_LIMIT) {
+  if (report.translationCalques > 0) {
+    const sampleStr = report.samples.slice(0, 3).map((s) => `«${s}»`).join(", ");
     issues.push(
-      `фильтр-слов ${metrics.filterPer10k} на 10 тыс. слов против ${HUMAN_FILTER_PER_10K} у человека `
-      + `(«словно», «казалось», «вроде», «похоже», «едва») — убери фильтр и покажи предмет или поступок; `
-      + `верни простые связки «потому что», «так», «ну», «просто»`,
-    );
-  }
-  if (metrics.intensifierPer10k >= INTENSIFIER_PER_10K_LIMIT) {
-    issues.push(
-      `давление оценочных прилагательных ${metrics.intensifierPer10k} на 10 тыс. слов `
-      + `против ${HUMAN_INTENSIFIER_PER_10K} у человека («идеально», «аккуратно», «необычно», «заметно») — `
-      + `замени треть из них конкретным наблюдением: что именно видно и чем это отличается`,
-    );
-  }
-  if (metrics.negationMoldPer10k >= NEGATION_MOLD_PER_10K_LIMIT) {
-    issues.push(
-      `повтор одного отрицательного каркаса «не + глагол»: ${metrics.negationMoldPer10k} на 10 тыс. слов `
-      + `против ${HUMAN_NEGATION_MOLD_PER_10K} у человека — третьему такому месту дай другое действие, `
-      + `а не ещё одно молчание`,
-    );
-  }
-  if (metrics.narrativeParagraphs >= minParagraphs) {
-    if (metrics.oneSentenceParagraphShare <= ONE_SENTENCE_SHARE_LIMIT && metrics.modalSentenceCountShare >= 0.45) {
-      issues.push(
-        `форма абзаца однотипна: однофразных абзацев ${Math.round(metrics.oneSentenceParagraphShare * 100)} % `
-        + `против ${Math.round(HUMAN_ONE_SENTENCE_PARAGRAPH_SHARE * 100)} % у человека, `
-        + `у ${Math.round(metrics.modalSentenceCountShare * 100)} % абзацев ровно ${metrics.modalSentenceCount} фразы — `
-        + `часть абзацев оставь из одной фразы, часть разбей`,
-      );
-    }
-    if (metrics.interiorShare < INTERIOR_SHARE_FLOOR) {
-      issues.push(
-        `нет внутренней речи: мысль героя («подумал», «решил») стоит в `
-        + `${Math.round(metrics.interiorShare * 100)} % абзацев против ${Math.round(HUMAN_INTERIOR_SHARE * 100)} % у человека — `
-        + `дай герою одно решение внутри, которое он не озвучивает`,
-      );
-    }
-    if (metrics.hedgeShare >= HEDGE_SHARE_LIMIT) {
-      issues.push(
-        `избыток оговорок: «может», «вроде», «похоже», «казалось» в `
-        + `${Math.round(metrics.hedgeShare * 100)} % абзацев против ${Math.round(HUMAN_HEDGE_SHARE * 100)} % у человека — `
-        + `убери оговорку там, где автор знает, что происходит`,
-      );
-    }
-  }
-  if (metrics.verbatimRepeatPer10k >= VERBATIM_REPEAT_PER_10K_LIMIT && metrics.verbatimSamples.length) {
-    issues.push(
-      `дословный повтор одного образа: ${metrics.verbatimRepeatPer10k} на 10 тыс. слов `
-      + `(«${metrics.verbatimSamples[0]}») — второй раз эта картинка не нужна, дай другое наблюдение`,
+      `переводные англицизмы-кальки (${report.translationCalques} шт.: ${sampleStr}) — `
+      + `замени кальки («выглядел уставшим», «взял секунду, чтобы», «имело смысл») естественным русским оборотом`,
     );
   }
   return issues;
 }
 
-/** Находки для блока «АРХИТЕКТУРА» и для журнала: то же, что issues, но с баллом. */
-export function proseRegisterFindings(text: string): ProseRegisterFinding[] {
+/**
+ * Замечания по регистру: строки для промпта и журнала. Каждое замечание называет
+ * измеренную величину и эталон — по правилу sepia «no quote — no signal» без
+ * цифры замечание не считается.
+ */
+export function proseRegisterIssues(
+  text: string,
+  options: { minParagraphs?: number; authorSample?: string } = {},
+): string[] {
   const metrics = measureProseRegister(text);
+  const bounds = calibrateProseRegisterBounds(options.authorSample);
+  const issues: string[] = [];
+  if (metrics.words < 120) return issues;
+  const minParagraphs = options.minParagraphs ?? 6;
+
+  if (metrics.bodilyPer10k >= bounds.bodilyLimit) {
+    issues.push(
+      `эмоция дана только телом: телесных реакций ${metrics.bodilyPer10k} на 10 тыс. слов против ${bounds.humanBodily} у человека, `
+      + `названных чувств ${metrics.namedEmotionPer10k} — назови чувство словом там, где сейчас только ощущение `
+      + `(холодок, дрожь, сжалось внутри), и оставь телесным не больше двух пиков`,
+    );
+  }
+  if (metrics.filterPer10k >= bounds.filterLimit) {
+    issues.push(
+      `фильтр-слов ${metrics.filterPer10k} на 10 тыс. слов против ${bounds.humanFilter} у человека `
+      + `(«словно», «казалось», «вроде», «похоже», «едва») — убери фильтр и покажи предмет или поступок; `
+      + `верни простые связки «потому что», «так», «ну», «просто»`,
+    );
+  }
+  if (metrics.intensifierPer10k >= bounds.intensifierLimit) {
+    issues.push(
+      `давление оценочных прилагательных ${metrics.intensifierPer10k} на 10 тыс. слов `
+      + `против ${bounds.humanIntensifier} у человека («идеально», «аккуратно», «необычно», «заметно») — `
+      + `замени треть из них конкретным наблюдением: что именно видно и чем это отличается`,
+    );
+  }
+  if (metrics.negationMoldPer10k >= bounds.negationMoldLimit) {
+    issues.push(
+      `повтор одного отрицательного каркаса «не + глагол»: ${metrics.negationMoldPer10k} на 10 тыс. слов `
+      + `против ${bounds.humanNegationMold} у человека — третьему такому месту дай другое действие, `
+      + `а не ещё одно молчание`,
+    );
+  }
+  if (metrics.narrativeParagraphs >= minParagraphs) {
+    if (metrics.oneSentenceParagraphShare <= bounds.oneSentenceShareLimit && metrics.modalSentenceCountShare >= 0.45) {
+      issues.push(
+        `форма абзаца однотипна: однофразных абзацев ${Math.round(metrics.oneSentenceParagraphShare * 100)} % `
+        + `против ${Math.round(bounds.humanOneSentenceShare * 100)} % у человека, `
+        + `у ${Math.round(metrics.modalSentenceCountShare * 100)} % абзацев ровно ${metrics.modalSentenceCount} фразы — `
+        + `часть абзацев оставь из одной фразы, часть разбей`,
+      );
+    }
+    if (metrics.interiorShare < bounds.interiorShareFloor) {
+      issues.push(
+        `нет внутренней речи: мысль героя («подумал», «решил») стоит в `
+        + `${Math.round(metrics.interiorShare * 100)} % абзацев против ${Math.round(bounds.humanInteriorShare * 100)} % у человека — `
+        + `дай герою одно решение внутри, которое он не озвучивает`,
+      );
+    }
+    if (metrics.hedgeShare >= bounds.hedgeShareLimit) {
+      issues.push(
+        `избыток оговорок: «может», «вроде», «похоже», «казалось» в `
+        + `${Math.round(metrics.hedgeShare * 100)} % абзацев против ${Math.round(bounds.humanHedgeShare * 100)} % у человека — `
+        + `убери оговорку там, где автор знает, что происходит`,
+      );
+    }
+  }
+  if (metrics.verbatimRepeatPer10k >= bounds.verbatimRepeatLimit && metrics.verbatimSamples.length) {
+    issues.push(
+      `дословный повтор одного образа: ${metrics.verbatimRepeatPer10k} на 10 тыс. слов `
+      + `(«${metrics.verbatimSamples[0]}») — второй раз эта картинка не нужна, дай другое наблюдение`,
+    );
+  }
+  for (const noraIssue of noraGalIssues(text)) {
+    issues.push(noraIssue);
+  }
+  return issues;
+}
+
+/** Находки для блока «АРХИТЕКТУРА» и для журнала: то же, что issues, но с баллом. */
+export function proseRegisterFindings(text: string, authorSample?: string): ProseRegisterFinding[] {
+  const metrics = measureProseRegister(text);
+  const bounds = calibrateProseRegisterBounds(authorSample);
   const findings: ProseRegisterFinding[] = [];
   const push = (id: string, label: string, severity: number, advice: string) => {
     if (severity > 0.15) findings.push({ id, label, severity: Math.min(severity, 1), advice });
   };
 
-  if (metrics.bodilyPer10k >= BODILY_PER_10K_LIMIT) {
+  if (metrics.bodilyPer10k >= bounds.bodilyLimit) {
     push(
       "emotion-embodied",
-      `эмоция только телесная (${metrics.bodilyPer10k} на 10 тыс. слов против ${HUMAN_BODILY_PER_10K})`,
-      (metrics.bodilyPer10k - BODILY_PER_10K_LIMIT) / Math.max(BODILY_PER_10K_LIMIT, 1),
+      `эмоция только телесная (${metrics.bodilyPer10k} на 10 тыс. слов против ${bounds.humanBodily})`,
+      (metrics.bodilyPer10k - bounds.bodilyLimit) / Math.max(bounds.bodilyLimit, 1),
       "назови чувство словом в двух-трёх местах, оставь телесным только пик",
     );
   }
-  if (metrics.filterPer10k >= FILTER_PER_10K_LIMIT) {
+  if (metrics.filterPer10k >= bounds.filterLimit) {
     push(
       "filter-words",
-      `фильтр-слов ${metrics.filterPer10k} против ${HUMAN_FILTER_PER_10K}`,
-      (metrics.filterPer10k - FILTER_PER_10K_LIMIT) / Math.max(FILTER_PER_10K_LIMIT, 1),
+      `фильтр-слов ${metrics.filterPer10k} против ${bounds.humanFilter}`,
+      (metrics.filterPer10k - bounds.filterLimit) / Math.max(bounds.filterLimit, 1),
       "убери фильтр, покажи предмет или поступок",
     );
   }
-  if (metrics.intensifierPer10k >= INTENSIFIER_PER_10K_LIMIT) {
+  if (metrics.intensifierPer10k >= bounds.intensifierLimit) {
     push(
       "intensifier-pressure",
-      `давление оценочных прилагательных (${metrics.intensifierPer10k} против ${HUMAN_INTENSIFIER_PER_10K})`,
-      (metrics.intensifierPer10k - INTENSIFIER_PER_10K_LIMIT) / Math.max(INTENSIFIER_PER_10K_LIMIT, 1),
+      `давление оценочных прилагательных (${metrics.intensifierPer10k} против ${bounds.humanIntensifier})`,
+      (metrics.intensifierPer10k - bounds.intensifierLimit) / Math.max(bounds.intensifierLimit, 1),
       "замени оценивание наблюдением",
     );
   }
-  if (metrics.negationMoldPer10k >= NEGATION_MOLD_PER_10K_LIMIT) {
+  if (metrics.negationMoldPer10k >= bounds.negationMoldLimit) {
     push(
       "negation-mold",
-      `повтор каркаса «не + глагол» (${metrics.negationMoldPer10k} против ${HUMAN_NEGATION_MOLD_PER_10K})`,
-      (metrics.negationMoldPer10k - NEGATION_MOLD_PER_10K_LIMIT) / Math.max(NEGATION_MOLD_PER_10K_LIMIT, 1),
+      `повтор каркаса «не + глагол» (${metrics.negationMoldPer10k} против ${bounds.humanNegationMold})`,
+      (metrics.negationMoldPer10k - bounds.negationMoldLimit) / Math.max(bounds.negationMoldLimit, 1),
       "на третий такой молчаний дай поступок, вопрос или перебивание",
     );
   }
   if (metrics.narrativeParagraphs >= 6) {
-    if (metrics.oneSentenceParagraphShare <= ONE_SENTENCE_SHARE_LIMIT && metrics.modalSentenceCountShare >= 0.45) {
+    if (metrics.oneSentenceParagraphShare <= bounds.oneSentenceShareLimit && metrics.modalSentenceCountShare >= 0.45) {
       push(
         "uniform-paragraph-shape",
-        `однотипная форма абзаца (однофразных ${Math.round(metrics.oneSentenceParagraphShare * 100)} % против ${Math.round(HUMAN_ONE_SENTENCE_PARAGRAPH_SHARE * 100)} %)`,
+        `однотипная форма абзаца (однофразных ${Math.round(metrics.oneSentenceParagraphShare * 100)} % против ${Math.round(bounds.humanOneSentenceShare * 100)} %)`,
         (0.45 - metrics.oneSentenceParagraphShare) / 0.45,
         "оставь часть абзацев из одной фразы, часть разбей",
       );
     }
-    if (metrics.interiorShare < INTERIOR_SHARE_FLOOR) {
+    if (metrics.interiorShare < bounds.interiorShareFloor) {
       push(
         "no-interior-voice",
-        `нет внутренней речи (${Math.round(metrics.interiorShare * 100)} % абзацев против ${Math.round(HUMAN_INTERIOR_SHARE * 100)} %)`,
-        Math.min(1 - metrics.interiorShare / Math.max(HUMAN_INTERIOR_SHARE, 0.01), 1),
+        `нет внутренней речи (${Math.round(metrics.interiorShare * 100)} % абзацев против ${Math.round(bounds.humanInteriorShare * 100)} %)`,
+        Math.min(1 - metrics.interiorShare / Math.max(bounds.humanInteriorShare, 0.01), 1),
         "дай герою одно неозвученное решение",
       );
     }
-    if (metrics.hedgeShare >= HEDGE_SHARE_LIMIT) {
+    if (metrics.hedgeShare >= bounds.hedgeShareLimit) {
       push(
         "hedge-overload",
-        `избыток оговорок (${Math.round(metrics.hedgeShare * 100)} % абзацев против ${Math.round(HUMAN_HEDGE_SHARE * 100)} %)`,
-        (metrics.hedgeShare - HEDGE_SHARE_LIMIT) / Math.max(HEDGE_SHARE_LIMIT, 0.01),
+        `избыток оговорок (${Math.round(metrics.hedgeShare * 100)} % абзацев против ${Math.round(bounds.humanHedgeShare * 100)} %)`,
+        (metrics.hedgeShare - bounds.hedgeShareLimit) / Math.max(bounds.hedgeShareLimit, 0.01),
         "убери оговорку, где автор знает",
       );
     }
   }
-  if (metrics.verbatimRepeatPer10k >= VERBATIM_REPEAT_PER_10K_LIMIT) {
+  if (metrics.verbatimRepeatPer10k >= bounds.verbatimRepeatLimit) {
     push(
       "verbatim-image-repeat",
       `образ повторён дословно (${metrics.verbatimSamples[0] || "—"})`,
-      (metrics.verbatimRepeatPer10k - VERBATIM_REPEAT_PER_10K_LIMIT) / Math.max(VERBATIM_REPEAT_PER_10K_LIMIT, 1),
+      (metrics.verbatimRepeatPer10k - bounds.verbatimRepeatLimit) / Math.max(bounds.verbatimRepeatLimit, 1),
       "замени второе вхождение другим наблюдением",
+    );
+  }
+  const nora = measureNoraGal(text);
+  if (nora.genitiveChains + nora.verbalNounClutter + nora.translationCalques > 0) {
+    push(
+      "nora-gal-clutter",
+      `канцелярит/кальки по Норе Галь (${nora.totalPer10k} на 10 тыс. слов: ${nora.samples[0] || "—"})`,
+      Math.min((nora.genitiveChains + nora.verbalNounClutter + nora.translationCalques) * 0.25, 1),
+      "замени отглагольные существительные и переводные кальки живым глаголом",
     );
   }
   return findings.sort((left, right) => right.severity - left.severity);
@@ -580,11 +754,11 @@ export function proseRegisterFindings(text: string): ProseRegisterFinding[] {
  * здесь меньше признаков и не больше двух замечаний за раз — иначе перезапрос
  * превращается в переписывание сцены по списку и стоит дороже, чем даёт.
  */
-export function proseRegisterSceneIssues(text: string, maxIssues = 2): string[] {
+export function proseRegisterSceneIssues(text: string, maxIssues = 2, authorSample?: string): string[] {
   // Минимум замера — общий (120 слов, см. proseRegisterIssues). Отдельный порог
   // для сцены был лишним: он молчал там, где общий замер уже давал верный ответ,
   // и проверка на сцене расходилась с проверкой на собранной главе.
-  return proseRegisterIssues(text, { minParagraphs: 4 }).slice(0, maxIssues);
+  return proseRegisterIssues(text, { minParagraphs: 4, authorSample }).slice(0, maxIssues);
 }
 
 
@@ -825,3 +999,57 @@ export function speechMarkMismatch(text: string, sample: string): string {
   return `знак реплики не тот, что у автора: ${wrong} реплик с «${wrongMark}» и ${total - wrong} с «${expected.mark}», `
     + `а в образце ${expected.short} дефисом и ${expected.long} тире — пиши реплики со знаком «${expected.mark}»`;
 }
+
+export interface AuthorQuotePolicy {
+  /** Сколько предложений с «» на 100 предложений в образце автора. */
+  quotesPer100Sentences: number;
+  /** Допустимы ли кавычки-ёлочки (true, если в образце автора > 1,5 кавычки на 100 предложений). */
+  allowQuotes: boolean;
+  /** Верхний порог кавычек на окно (~10–12 предложений), после которого выдаётся замечание. */
+  windowQuoteLimit: number;
+}
+
+/**
+ * Определяет политику кавычек «…» по образцу автора.
+ * Если у автора кавычек почти нет (≤ 1,5 на 100 предложений, как в `Вася.txt` — 0,7),
+ * действует строгий запрет (`windowQuoteLimit = 0`). Если автор активно использует «…»
+ * для мыслей, вывесок или названий (> 1,5 на 100 предложений), порог масштабируется под автора.
+ */
+export function authorQuotePolicy(sample = ""): AuthorQuotePolicy {
+  const sents = sentences(String(sample || ""));
+  if (sents.length < 10) {
+    return { quotesPer100Sentences: 0, allowQuotes: false, windowQuoteLimit: 0 };
+  }
+  const quoteSents = sents.filter((s) => s.includes("«")).length;
+  const rate = Math.round(((quoteSents / sents.length) * 100) * 10) / 10;
+  if (rate <= 1.5) {
+    return { quotesPer100Sentences: rate, allowQuotes: false, windowQuoteLimit: 0 };
+  }
+  const windowLimit = Math.max(1, Math.ceil((rate / 100) * 12 * 1.5));
+  return {
+    quotesPer100Sentences: rate,
+    allowQuotes: true,
+    windowQuoteLimit: windowLimit,
+  };
+}
+
+/**
+ * Динамическое правило по кавычкам и прямой речи для промптов генерации и доводки.
+ * Заменяет жёсткий глобальный бан кавычек там, где автор сам пишет с «…».
+ */
+export function quotesDirective(sample = ""): string {
+  const { mark } = authorSpeechMark(sample);
+  const policy = authorQuotePolicy(sample);
+  const dashName = mark === "-" ? "дефис «-»" : "длинное тире «—»";
+  if (!policy.allowQuotes) {
+    return `ПРЯМАЯ РЕЧЬ И КАВЫЧКИ (жёсткое правило):\n`
+      + `- Реплики героев оформляй ТОЛЬКО через ${dashName} в начале строки.\n`
+      + `- Кавычки «…» и "…" НЕ использовать вообще — ни для реплик, ни для мыслей, ни для названий и табличек.\n`
+      + `- Примеры правильного оформления:\n`
+      + `  ${mark} Ты слышишь это? ${mark} спросил Илья.\n`
+      + `  Надпись на стене гласила: Зал ожидания.`;
+  }
+  return `ПРЯМАЯ РЕЧЬ И КАВЫЧКИ (по образцу автора):\n`
+    + `- Реплики в диалогах оформляй ТОЛЬКО через ${dashName} в начале строки (не в кавычках).\n`
+    + `- Кавычки-ёлочки «…» допустимы ТОЛЬКО для названий, вывесок или цитат в той же плотности, что у автора (~${policy.quotesPer100Sentences} на 100 предложений, не более ${policy.windowQuoteLimit} на кусок текста).`;
+}

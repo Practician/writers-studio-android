@@ -1,7 +1,14 @@
 import { computeStyleStats, hashText, wordsOf } from "./authorAudit";
 import { DetectorReport } from "./detectorReport";
-import { aiTellScore } from "../../server/humanStyle";
+import { aiTellScore, computeExtendedMetrics } from "../../server/humanStyle";
 import { LABYRINTH_ADAPTIVE_DETECTOR_SEED } from "../data/labyrinth/adaptive-detector-seed";
+import {
+  addExtendedObservation,
+  emptyExtendedCentroid,
+  mahalanobisDistance,
+  type ExtendedCentroid,
+  type ExtendedVector,
+} from "./adaptiveDetectorEnhanced";
 
 const STORAGE_PREFIX = "writers-studio-adaptive-detector-v1:";
 const MAX_REPORT_HASHES = 100;
@@ -48,6 +55,8 @@ export interface AdaptiveDetectorProfile {
   reportHashes: string[];
   human: AdaptiveCentroid;
   ai: AdaptiveCentroid;
+  humanExtended?: ExtendedCentroid;
+  aiExtended?: ExtendedCentroid;
   fusion?: AdaptiveFusionConfig;
 }
 
@@ -64,6 +73,8 @@ export interface AdaptiveScore {
   confidence: number;
   humanDistance: number;
   aiDistance: number;
+  mahalanobisHumanDistance?: number;
+  mahalanobisAiDistance?: number;
   humanExamples: number;
   aiExamples: number;
 }
@@ -94,6 +105,8 @@ export function createAdaptiveProfile(storyId: string): AdaptiveDetectorProfile 
     reportHashes: [],
     human: emptyCentroid(),
     ai: emptyCentroid(),
+    humanExtended: emptyExtendedCentroid(),
+    aiExtended: emptyExtendedCentroid(),
   };
 }
 
@@ -112,6 +125,25 @@ const FEATURE_SCALES: FeatureVector = {
 export function extractAdaptiveFeatures(text: string): FeatureVector {
   const stats = computeStyleStats(text);
   return Object.fromEntries(ADAPTIVE_FEATURES.map((feature) => [feature, stats[feature]])) as FeatureVector;
+}
+
+export function extractExtendedAdaptiveFeatures(text: string): ExtendedVector {
+  const stats = computeStyleStats(text);
+  const ext = computeExtendedMetrics(text, { ...stats });
+  return {
+    averageSentenceWords: stats.averageSentenceWords,
+    sentenceLengthDeviation: stats.sentenceLengthDeviation,
+    shortSentenceShare: stats.shortSentenceShare,
+    exclamationsPerThousandWords: stats.exclamationsPerThousandWords,
+    ellipsesPerThousandWords: stats.ellipsesPerThousandWords,
+    dialogueLineShare: stats.dialogueLineShare,
+    particlesPerThousandWords: stats.particlesPerThousandWords,
+    similesPerThousandWords: stats.similesPerThousandWords,
+    paragraphLengthCV: ext.paragraphLengthCV,
+    passiveVoiceShare: ext.passiveVoiceShare,
+    uniqueWordRatio200: ext.uniqueWordRatio200,
+    connectorDiversity: ext.connectorDiversity,
+  };
 }
 
 function addObservation(centroid: AdaptiveCentroid, observation: FeatureVector): AdaptiveCentroid {
@@ -141,6 +173,8 @@ export function learnFromDetectorReport(
 
   let human = current.human;
   let ai = current.ai;
+  let humanExtended = current.humanExtended ?? emptyExtendedCentroid();
+  let aiExtended = current.aiExtended ?? emptyExtendedCentroid();
   let learnedHuman = 0;
   let learnedAi = 0;
   let ignored = 0;
@@ -155,11 +189,14 @@ export function learnFromDetectorReport(
       continue;
     }
     const features = extractAdaptiveFeatures(segment.text);
+    const extFeatures = extractExtendedAdaptiveFeatures(segment.text);
     if (label === "human") {
       human = addObservation(human, features);
+      humanExtended = addExtendedObservation(humanExtended, extFeatures);
       learnedHuman += 1;
     } else {
       ai = addObservation(ai, features);
+      aiExtended = addExtendedObservation(aiExtended, extFeatures);
       learnedAi += 1;
     }
   }
@@ -175,6 +212,8 @@ export function learnFromDetectorReport(
       reportHashes: [...current.reportHashes, fingerprint].slice(-MAX_REPORT_HASHES),
       human,
       ai,
+      humanExtended,
+      aiExtended,
     },
   };
 }
@@ -192,8 +231,22 @@ function distance(vector: FeatureVector, own: AdaptiveCentroid, other: AdaptiveC
 export function scoreWithAdaptiveProfile(text: string, profile: AdaptiveDetectorProfile): AdaptiveScore | null {
   if (!text.trim() || profile.human.count < 1 || profile.ai.count < 1) return null;
   const features = extractAdaptiveFeatures(text);
-  const humanDistance = distance(features, profile.human, profile.ai);
-  const aiDistance = distance(features, profile.ai, profile.human);
+  const baseHumanDist = distance(features, profile.human, profile.ai);
+  const baseAiDist = distance(features, profile.ai, profile.human);
+
+  let humanDistance = baseHumanDist;
+  let aiDistance = baseAiDist;
+  let mahalanobisHumanDistance: number | undefined;
+  let mahalanobisAiDistance: number | undefined;
+
+  if (profile.humanExtended && profile.aiExtended && profile.humanExtended.count >= 1 && profile.aiExtended.count >= 1) {
+    const extFeatures = extractExtendedAdaptiveFeatures(text);
+    mahalanobisHumanDistance = mahalanobisDistance(extFeatures, profile.humanExtended);
+    mahalanobisAiDistance = mahalanobisDistance(extFeatures, profile.aiExtended);
+    humanDistance = 0.5 * baseHumanDist + 0.5 * mahalanobisHumanDistance;
+    aiDistance = 0.5 * baseAiDist + 0.5 * mahalanobisAiDistance;
+  }
+
   const probability = 1 / (1 + Math.exp(-2.2 * (aiDistance - humanDistance)));
   const confidence = Math.min(0.95, 0.25 + Math.log2(1 + Math.min(profile.human.count, profile.ai.count)) / 5);
   return {
@@ -201,6 +254,7 @@ export function scoreWithAdaptiveProfile(text: string, profile: AdaptiveDetector
     confidence: Math.round(confidence * 100),
     humanDistance,
     aiDistance,
+    ...(mahalanobisHumanDistance !== undefined ? { mahalanobisHumanDistance, mahalanobisAiDistance } : {}),
     humanExamples: profile.human.count,
     aiExamples: profile.ai.count,
   };

@@ -220,7 +220,7 @@ function fixPunctuationArtifacts(input: string): { text: string; count: number; 
  * приводит необычные пробелы и переводы строк к предсказуемому виду и чинит
  * три машинных артефакта пунктуации, которых в живой прозе не бывает.
  */
-export function sanitizeGeneratedText(input: string): TextHygieneResult {
+export function sanitizeGeneratedText(input: string, authorSample?: string): TextHygieneResult {
   const normalizedLineEndings = /\r/u.test(input);
   const normalizedSpaces = countMatches(input, NONSTANDARD_SPACE);
   const removedHiddenCharacters =
@@ -234,7 +234,7 @@ export function sanitizeGeneratedText(input: string): TextHygieneResult {
   const punctuation = fixPunctuationArtifacts(cleaned);
   // Сборка 120: ё возвращается после всех пунктуационных правок — они слов
   // не меняют, а карта server/yoRestore.ts работает по целым словам.
-  const yo = restoreYo(punctuation.text);
+  const yo = restoreYo(punctuation.text, authorSample);
   const text = yo.text;
   const punctuationNotes = [...punctuation.notes];
   if (yo.restored > 0) {

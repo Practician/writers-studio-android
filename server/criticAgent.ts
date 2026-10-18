@@ -111,6 +111,10 @@ export function deterministicCriticism(text: string): CriticismFinding[] {
       severity: Math.min(silences / 5, 1),
     });
   }
+  const swapFinding = dialogueSwapFinding(text);
+  if (swapFinding) {
+    findings.push(swapFinding);
+  }
   if (!proseLongEnough) return findings.sort((left, right) => right.severity - left.severity).slice(0, 8);
 
   // 1. Регенерация образа: один и тот же смысл разными словами рядом.
@@ -265,6 +269,145 @@ export function deterministicCriticism(text: string): CriticismFinding[] {
   return findings.sort((left, right) => right.severity - left.severity).slice(0, 8);
 }
 
+export interface SpeakerDialogueStats {
+  speaker: string;
+  lineCount: number;
+  avgWords: number;
+  exclamationOrQuestionShare: number;
+  particleCount: number;
+  sampleLine: string;
+}
+
+export interface DialogueDifferentiationReport {
+  totalDialogueLines: number;
+  lengthCV: number;
+  shortRetortShare: number;
+  speakers: SpeakerDialogueStats[];
+  undifferentiated: boolean;
+  reason: string;
+}
+
+const DIALOGUE_SPEAKER_TAG = /[—–-]\s*(?:сказал[аи]?|спросил[аи]?|ответил[аи]?|буркнул[аи]?|прошептал[аи]?|бросил[аи]?|произн[её]с(?:ла)?|усмехнул(?:ся|ась)|крикнул[аи]?|пробормотал[аи]?|кивнул[аи]?|отозвал(?:ся|ась))\s+([А-ЯЁ][а-яё]{2,})/u;
+const DIALOGUE_PARTICLES = /\b(?:же|ведь|ну|мол|короче|слушай|слышь|ладно|давай|блин|чёрт|ага|угу|чё|чо|типа)\b/giu;
+
+/**
+ * Измеряет различимость голосов в диалоге (Dialogue Swap Test).
+ * В живой прозе реплики различаются по длине (CV ≥ 0,35, есть короткие перебивы ≤ 4 слов)
+ * и по модальности/частицам у разных говорящих. В генеративной прозе все персонажи
+ * обмениваются ровными 8–14-словными фразами с точкой в конце.
+ */
+export function measureDialogueDifferentiation(text: string): DialogueDifferentiationReport {
+  const lines = String(text || "")
+    .split(/\r?\n/u)
+    .map((l) => l.trim())
+    .filter((l) => /^[—–―-]\s+\S/u.test(l));
+
+  if (lines.length < 6) {
+    return {
+      totalDialogueLines: lines.length,
+      lengthCV: 1,
+      shortRetortShare: 0.5,
+      speakers: [],
+      undifferentiated: false,
+      reason: "",
+    };
+  }
+
+  const speechTextOnly = (line: string): string => {
+    // Отсекаем авторскую ремарку после второго тире, чтобы мерить именно речь героя
+    const parts = line.replace(/^[—–―-]\s*/u, "").split(/\s+[—–-]\s+/u);
+    return (parts[0] || line).trim();
+  };
+
+  const wordCounts = lines.map((line) => (speechTextOnly(line).match(/[а-яёa-z0-9]+/giu) || []).length).filter((n) => n > 0);
+  const mean = wordCounts.reduce((a, b) => a + b, 0) / Math.max(wordCounts.length, 1);
+  const variance = wordCounts.reduce((acc, n) => acc + (n - mean) ** 2, 0) / Math.max(wordCounts.length, 1);
+  const lengthCV = mean > 0 ? Math.sqrt(variance) / mean : 1;
+  const shortRetortShare = wordCounts.filter((n) => n <= 4).length / Math.max(wordCounts.length, 1);
+
+  const bySpeaker = new Map<string, string[]>();
+  for (const line of lines) {
+    const match = line.match(DIALOGUE_SPEAKER_TAG);
+    if (!match) continue;
+    const name = match[1];
+    const list = bySpeaker.get(name) || [];
+    list.push(line);
+    bySpeaker.set(name, list);
+  }
+
+  const speakers: SpeakerDialogueStats[] = [...bySpeaker.entries()]
+    .filter(([, sLines]) => sLines.length >= 3)
+    .map(([speaker, sLines]) => {
+      const counts = sLines.map((l) => (speechTextOnly(l).match(/[а-яёa-z0-9]+/giu) || []).length);
+      const avgWords = Math.round((counts.reduce((a, b) => a + b, 0) / counts.length) * 10) / 10;
+      const exclOrQ = sLines.filter((l) => /[!?…]/u.test(speechTextOnly(l))).length / sLines.length;
+      const pCount = sLines.reduce((acc, l) => acc + (speechTextOnly(l).match(DIALOGUE_PARTICLES) || []).length, 0);
+      return {
+        speaker,
+        lineCount: sLines.length,
+        avgWords,
+        exclamationOrQuestionShare: Math.round(exclOrQ * 100) / 100,
+        particleCount: pCount,
+        sampleLine: sLines[0],
+      };
+    });
+
+  if (speakers.length >= 2) {
+    const [a, b] = speakers;
+    const avgDiff = Math.abs(a.avgWords - b.avgWords);
+    const bothFlat = a.exclamationOrQuestionShare < 0.25 && b.exclamationOrQuestionShare < 0.25;
+    const bothNoParticles = a.particleCount === 0 && b.particleCount === 0;
+    if (avgDiff <= 1.8 && bothFlat && bothNoParticles && lengthCV < 0.38) {
+      return {
+        totalDialogueLines: lines.length,
+        lengthCV: Math.round(lengthCV * 100) / 100,
+        shortRetortShare: Math.round(shortRetortShare * 100) / 100,
+        speakers,
+        undifferentiated: true,
+        reason: `реплики ${a.speaker} (~${a.avgWords} сл.) и ${b.speaker} (~${b.avgWords} сл.) неразличимы по длине, интонации и словарю`,
+      };
+    }
+  }
+
+  if (lines.length >= 6 && lengthCV < 0.26 && shortRetortShare === 0) {
+    return {
+      totalDialogueLines: lines.length,
+      lengthCV: Math.round(lengthCV * 100) / 100,
+      shortRetortShare: 0,
+      speakers,
+      undifferentiated: true,
+      reason: `все ${lines.length} реплик диалога одной длины (CV=${lengthCV.toFixed(2)}, ни одной короткой реплики ≤4 слов)`,
+    };
+  }
+
+  return {
+    totalDialogueLines: lines.length,
+    lengthCV: Math.round(lengthCV * 100) / 100,
+    shortRetortShare: Math.round(shortRetortShare * 100) / 100,
+    speakers,
+    undifferentiated: false,
+    reason: "",
+  };
+}
+
+/**
+ * Находка критика для теста подмены реплик (Dialogue Swap Test).
+ */
+export function dialogueSwapFinding(text: string): CriticismFinding | null {
+  const report = measureDialogueDifferentiation(text);
+  if (!report.undifferentiated) return null;
+  const sampleLine = report.speakers[0]?.sampleLine
+    ?? String(text || "").split(/\r?\n/u).map((l) => l.trim()).find((l) => /^[—–―-]\s+\S/u.test(l))
+    ?? "";
+  return {
+    id: "dialogue-swap",
+    label: `тест подмены реплик: ${report.reason}`,
+    quote: `«${sampleLine.slice(0, 90)}»`,
+    advice: "разведи голоса героев: одному дай короткую реплику-перебив (1–4 слова) или действие вместо ответа, другому — вопрос, частицу или смену темы",
+    severity: 0.55,
+  };
+}
+
 /**
  * Замысел критики для модели: что спросить у текста, чего не спросила рубрика.
  * Отдельная функция, потому что полезен и сам по себе — как чек-лист ручной
@@ -279,6 +422,7 @@ export const CRITIC_QUESTIONS = [
   "Найди место, где деталь держится только на запахе или только на ощущении.",
   "Найди место, где абзац мог бы закончиться на предложение раньше — и текст выиграл бы.",
   "Найди объяснение, которое читателю не нужно, потому что он это уже видел.",
+  "Найди диалог, где герои говорят одним голосом и прямо отвечают на каждый вопрос без подтекста (тест подмены имён: если поменять реплики местами, ничего не изменится).",
 ] as const;
 
 /** Промпт критики для модели. Судья не ставит баллов — он указывает места. */

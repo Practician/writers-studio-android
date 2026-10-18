@@ -136,6 +136,10 @@ export const AI_TELL_CATALOG: AiTellPattern[] = [
   // — «инженерный дневник»: системный обход/подсчёт без эмоции
   { id: "counting-steps", category: "structural", pattern: /считая\s+шаги|шаг[аиуов]*\s+считал(?![а-яёa-z])|на\s+(?:тридцат|сорок|пятьдесят|шестьдесят|семьдесят|восемьдесят|девяносто)[а-яё]*\s+(?:шаг|счёт)/iu, label: "инженерный подсчёт шагов/метров", weight: 2 },
   { id: "instrument-readout", category: "interface", pattern: /тепловизор\s+включался|телефон\s+(?:вс[её]\s+ещ[ёе]\s+)?показывал\s+(?:около\s+)?двадцат/iu, label: "считывание приборов", weight: 2 },
+  // — Фильтр «Слово живое и мёртвое» (Нора Галь): цепочки родительного падежа, отглагольные существительные, переводные кальки
+  { id: "nora-genitive-chain", category: "bureaucratic", pattern: /(?<![\p{L}])(?:процесс|уровень|степень|результат|необходимость|возможность|осуществление|формирование|выполнение|обеспечение|состояние|наличие|отсутствие|возникновение|появление)\p{L}*\s+[а-яё]{4,}(?:ия|ения|ания|тия|ости|ести|ства)\s+[а-яё]{4,}(?:ия|ения|ания|тия|ости|ести|ства|ов|ев|ей)(?![\p{L}])/iu, label: "цепочка родительного падежа / отглагольных существительных (Нора Галь)", weight: 2 },
+  { id: "nora-verbal-noun", category: "bureaucratic", pattern: /(?<![\p{L}])(?:(?:привел[аои]?|приводит|способствовал[аои]?)\s+к\s+[а-яё]{4,}(?:ению|анию|тию|ости)|(?:появление|возникновение|формирование|наличие)\s+(?:ощущения|чувства|мысли|понимания|осознания|необходимости))(?![\p{L}])/iu, label: "отглагольное существительное вместо глагола (Нора Галь)", weight: 2 },
+  { id: "nora-eng-calque", category: "lexical", pattern: /(?<![\p{L}])(?:взял[аи]?\s+(?:секунду|минуту|момент|паузу)\s*,?\s*чтобы|выглядел[аои]?\s+(?:так,\s*словно|уставш\p{L}*|испуганн\p{L}*|растерянн\p{L}*|обеспокоенн\p{L}*)|почувствовал[аи]?\s+себя\s+так,\s*(?:словно|будто)|(?:это\s+)?имело\s+смысл|сделал[аи]?\s+мысленн(?:ую|ый)\s+(?:заметку|пометку))(?![\p{L}])/iu, label: "переводная англицизм-калька (Нора Галь)", weight: 2 },
 ];
 
 /**
@@ -812,30 +816,90 @@ export function segmentStyleAverage(text: string, size = 1050): SegmentStyle {
   };
 }
 
+export interface CalibratedSegmentStyleBounds {
+  openerShareLimit: number;
+  ttrLimit: number;
+  exclamationRateLimit: number;
+  quoteSentencesLimit: number;
+  authorExclamationRate: number;
+  authorTtr: number;
+}
+
+/**
+ * Калибровка сегментных порогов (зачины, TTR, кавычки, восклицания) по `authorSample`.
+ * Когда `authorSample` не передан или короче 600 знаков, используются калиброванные
+ * константы сборки 108 (`Вася.txt`). Если передан образец другого автора (например,
+ * использующего «…» или более спокойный регистр без «!»), пороги адаптируются под него.
+ */
+export function calibrateSegmentStyleBounds(authorSample?: string): CalibratedSegmentStyleBounds {
+  const defaults: CalibratedSegmentStyleBounds = {
+    openerShareLimit: OPENER_SHARE_LIMIT,
+    ttrLimit: WORD_REPEAT_TTR_LIMIT,
+    exclamationRateLimit: EXCLAMATION_RATE_LIMIT,
+    quoteSentencesLimit: 0,
+    authorExclamationRate: 13,
+    authorTtr: 0.79,
+  };
+  if (!authorSample || typeof authorSample !== "string" || authorSample.trim().length < 600) {
+    return defaults;
+  }
+  const avg = segmentStyleAverage(authorSample);
+  if (avg.sentences < 6 || avg.words < 80) return defaults;
+
+  const quoteRatePer100 = avg.sentences ? (avg.quoteSentences / avg.sentences) * 100 : 0;
+  const quoteSentencesLimit = quoteRatePer100 <= 1.5
+    ? 0
+    : Math.max(1, Math.ceil(avg.quoteSentences * 1.5));
+
+  const exclamationRateLimit = avg.exclamationRate < 2
+    ? 0
+    : Math.min(EXCLAMATION_RATE_LIMIT, Math.max(1, Math.floor(avg.exclamationRate * 0.35)));
+
+  return {
+    openerShareLimit: Math.max(OPENER_SHARE_LIMIT, Math.min(0.25, Math.round((avg.openerShare + 0.04) * 100) / 100)),
+    ttrLimit: Math.max(WORD_REPEAT_TTR_LIMIT, Math.min(0.89, Math.round((avg.ttr + 0.045) * 100) / 100)),
+    exclamationRateLimit,
+    quoteSentencesLimit,
+    authorExclamationRate: Math.max(1, Math.round(avg.exclamationRate)),
+    authorTtr: Math.round(avg.ttr * 100) / 100,
+  };
+}
+
 /**
  * Замечания по стилю для промпта батча. Пороги взяты на человеческом эталоне,
  * поэтому срабатывание — не «фрагмент плохой», а «фрагмент отличается от книги».
  * На правки идут только сегменты, помеченные внешним детектором как AI.
  */
-export function styleIssues(text: string, minSentences = STYLE_MIN_SENTENCES): string[] {
+export function styleIssues(
+  text: string,
+  minSentences = STYLE_MIN_SENTENCES,
+  authorSample?: string,
+): string[] {
   const style = segmentStyle(text);
+  const bounds = calibrateSegmentStyleBounds(authorSample);
   const issues: string[] = [];
   if (style.sentences >= minSentences && style.topOpenerCount >= 3
-    && style.openerShare > OPENER_SHARE_LIMIT) {
+    && style.openerShare > bounds.openerShareLimit) {
     issues.push(`зачины: «${style.topOpener}» начинает ${style.topOpenerCount} из ${style.sentences} предложений `
-      + `(${Math.round(style.openerShare * 100)}%, эталон до ${Math.round(OPENER_SHARE_LIMIT * 100)}%) — начинай `
+      + `(${Math.round(style.openerShare * 100)}%, эталон до ${Math.round(bounds.openerShareLimit * 100)}%) — начинай `
       + `по-разному: другое подлежащее, обстоятельство места или времени, инверсия`);
   }
-  if (style.words >= STYLE_MIN_WORDS && style.ttr > WORD_REPEAT_TTR_LIMIT) {
-    issues.push(`повтор слов: TTR ${style.ttr.toFixed(2)} против 0,79 у человека — повторяй уже названные слова, `
+  if (style.words >= STYLE_MIN_WORDS && style.ttr > bounds.ttrLimit) {
+    const humanTtrStr = bounds.authorTtr.toFixed(2).replace(".", ",");
+    issues.push(`повтор слов: TTR ${style.ttr.toFixed(2)} против ${humanTtrStr} у человека — повторяй уже названные слова, `
       + `возвращай «он», «тут», «снова», то же имя вторым кругом; не подменяй синонимом то, что уже названо`);
   }
-  if (style.sentences >= 6 && style.quoteSentences > 0) {
-    issues.push(`кавычки: в ${style.quoteSentences} ${style.quoteSentences === 1 ? "предложении" : "предложениях"} `
-      + `есть «», у автора реплики и названия идут без кавычек (0,7 на 100 предложений) — сними кавычки, реплику отдели дефисом`);
+  if (style.sentences >= 6 && style.quoteSentences > bounds.quoteSentencesLimit) {
+    if (bounds.quoteSentencesLimit === 0) {
+      issues.push(`кавычки: в ${style.quoteSentences} ${style.quoteSentences === 1 ? "предложении" : "предложениях"} `
+        + `есть «», у автора реплики и названия идут без кавычек (0,7 на 100 предложений) — сними кавычки, реплику отдели дефисом`);
+    } else {
+      issues.push(`кавычки: в ${style.quoteSentences} предложениях есть «» (лимит по образцу автора — не более ${bounds.quoteSentencesLimit} на фрагмент) — `
+        + `оставь кавычки только для названий/вывесок, прямую речь отделяй тире/дефисом`);
+    }
   }
-  if (style.sentences >= 8 && style.exclamationRate < EXCLAMATION_RATE_LIMIT) {
-    issues.push(`восклицания: ${Math.round(style.exclamationRate)} на 100 предложений, у автора 13 — в прямой речи `
+  if (bounds.exclamationRateLimit > 0 && style.sentences >= 8 && style.exclamationRate < bounds.exclamationRateLimit) {
+    issues.push(`восклицания: ${Math.round(style.exclamationRate)} на 100 предложений, у автора ${bounds.authorExclamationRate} — в прямой речи `
       + `допускай окрики, удивление и восклицания там, где они уместны, а не только ровные утверждения`);
   }
   return issues;
@@ -847,12 +911,12 @@ export function styleIssues(text: string, minSentences = STYLE_MIN_SENTENCES): s
  * из-за длины ниже, и левер почти не срабатывал бы. Одно замечание на левер: сцена
  * из двух-трёх окон не получает три строки «повтор слов» подряд.
  */
-export function styleIssuesByWindows(text: string, size = 1050): string[] {
+export function styleIssuesByWindows(text: string, size = 1050, authorSample?: string): string[] {
   const windows = segmentStyleWindows(text, size);
   const seen = new Set<string>();
   const issues: string[] = [];
   for (const source of windows.length ? windows : [text]) {
-    for (const issue of styleIssues(source)) {
+    for (const issue of styleIssues(source, STYLE_MIN_SENTENCES, authorSample)) {
       const key = issue.slice(0, issue.indexOf(":") + 1);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -1568,6 +1632,10 @@ const IDIOLECT_SLANG_CANDIDATES = [
 export interface AuthorIdiolect {
   /** Слова-маркеры автора: слово → число употреблений в образце. */
   markers: Array<{ word: string; count: number }>;
+  /** Слова-маркеры авторского нарратива (вне прямой речи). */
+  narratorMarkers: Array<{ word: string; count: number }>;
+  /** Разговорные/сленговые маркеры прямой речи героев. */
+  dialogueMarkers: Array<{ word: string; count: number }>;
   /** Обращения/имена из образца. */
   addresses: Array<{ word: string; count: number }>;
   /** Частицы: частица → на 1000 слов. */
@@ -1577,17 +1645,29 @@ export interface AuthorIdiolect {
 }
 
 /**
- * Детерминированный майнинг идиолекта (сборка 113). Идея как у StashBase
- * («point the agent at your past work»): не абстрактное «пиши живо», а конкретные
- * слова автора, замеренные на его образце. Детекторы меряют предсказуемость слов
- * (перплексию), а не длину фраз, — поэтому смена словаря бьёт точнее, чем смена
- * пунктуации. В блок попадают только слова с частотой ≥2: единичное вхождение —
- * шум, а не голос.
+ * Детерминированный майнинг идиолекта (сборка 113 + разделение «автор vs прямая речь»).
+ * Идея как у StashBase («point the agent at your past work»): не абстрактное «пиши живо»,
+ * а конкретные слова автора, замеренные на его образце, с разделением регистра рассказчика
+ * и прямой речи персонажей (чтобы сленг из реплик не протекал в авторский нарратив).
  */
 export function mineAuthorIdiolect(sample: string): AuthorIdiolect {
   const words = (sample.toLowerCase().match(/[а-яёa-z]+(?:-[а-яёa-z]+)*/giu) ?? []);
   const freq = new Map<string, number>();
   for (const word of words) freq.set(word, (freq.get(word) ?? 0) + 1);
+
+  // Разделяем строки на прямую речь и нарратив рассказчика
+  const rawLines = sample.split(/\r?\n/u).map((l) => l.trim()).filter(Boolean);
+  const narratorFreq = new Map<string, number>();
+  const dialogueFreq = new Map<string, number>();
+  for (const line of rawLines) {
+    const isSpeech = isDialogueSentence(line);
+    const lineWords = line.toLowerCase().match(/[а-яёa-z]+(?:-[а-яёa-z]+)*/giu) ?? [];
+    const targetMap = isSpeech ? dialogueFreq : narratorFreq;
+    for (const w of lineWords) {
+      targetMap.set(w, (targetMap.get(w) ?? 0) + 1);
+    }
+  }
+
   // Обращения: заглавные внутри предложения (не в его начале).
   const addressFreq = new Map<string, number>();
   for (const sentence of sample.split(/(?<=[.!?…])\s+/u)) {
@@ -1605,16 +1685,40 @@ export function mineAuthorIdiolect(sample: string): AuthorIdiolect {
     .slice(0, 8)
     .map(([word, count]) => ({ word, count }));
   const addressWords = new Set(addresses.map((entry) => entry.word));
+  const slangSet = new Set(IDIOLECT_SLANG_CANDIDATES);
+
   const markers = [...freq.entries()]
     .filter(([word, count]) => count >= 3 && word.length >= 4 && !IDIOLECT_STOPWORDS.has(word) && !addressWords.has(word))
     .sort((left, right) => right[1] - left[1])
     .slice(0, 12)
     .map(([word, count]) => ({ word, count }));
+
+  const narratorMarkers = [...narratorFreq.entries()]
+    .filter(([word, count]) => count >= 2 && word.length >= 4 && !IDIOLECT_STOPWORDS.has(word) && !addressWords.has(word) && !slangSet.has(word))
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 8)
+    .map(([word, count]) => ({ word, count }));
+
   const slang = IDIOLECT_SLANG_CANDIDATES
     .map((word) => ({ word, count: freq.get(word) ?? 0 }))
     .filter((entry) => entry.count >= 2)
     .sort((left, right) => right.count - left.count)
     .slice(0, 8);
+
+  const speechSpecific = [...dialogueFreq.entries()]
+    .filter(([word, count]) => count >= 2 && word.length >= 3 && !IDIOLECT_STOPWORDS.has(word) && !addressWords.has(word) && (count > (narratorFreq.get(word) ?? 0)))
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 6)
+    .map(([word, count]) => ({ word, count }));
+
+  const dialogueMarkersMap = new Map<string, number>();
+  for (const item of [...slang, ...speechSpecific]) {
+    dialogueMarkersMap.set(item.word, Math.max(dialogueMarkersMap.get(item.word) ?? 0, item.count));
+  }
+  const dialogueMarkers = [...dialogueMarkersMap.entries()]
+    .map(([word, count]) => ({ word, count }))
+    .slice(0, 8);
+
   const particles = ["же", "ведь", "ну", "мол", "-то", "-ка"]
     .map((word) => {
       const count = word.startsWith("-")
@@ -1623,14 +1727,19 @@ export function mineAuthorIdiolect(sample: string): AuthorIdiolect {
       return { word, per1k: words.length ? Math.round((count / words.length) * 1000) : 0 };
     })
     .filter((entry) => entry.per1k >= 1);
-  return { markers: [...markers, ...slang], addresses, particles, sampleWords: words.length };
+  return {
+    markers: [...markers, ...slang],
+    narratorMarkers,
+    dialogueMarkers,
+    addresses,
+    particles,
+    sampleWords: words.length,
+  };
 }
 
 /**
  * Блок словаря голоса для промпта сцены: вшивается при генерации, а не после.
- * Пост-правки той же моделью перплексию почти не сдвигают (прогон 02.10.2026:
- * локальный аудит 40→16 при внешнем вердикте без движения), а текст, изначально
- * написанный словами автора, в модельном распределении менее предсказуем.
+ * Разделяет лексику рассказчика и живую разговорную речь персонажей.
  */
 export function authorIdiolectBlock(sample: string): string {
   if (sample.trim().length < 1000) return "";
@@ -1644,6 +1753,12 @@ export function authorIdiolectBlock(sample: string): string {
   }
   if (idiolect.markers.length) {
     lines.push(`- характерные слова: ${idiolect.markers.slice(0, 12).map((entry) => `«${entry.word}» (${entry.count})`).join(", ")}`);
+  }
+  if (idiolect.narratorMarkers.length) {
+    lines.push(`- словарь рассказчика (описания и авторский текст, без уличного сленга): ${idiolect.narratorMarkers.map((entry) => `«${entry.word}» (${entry.count})`).join(", ")}`);
+  }
+  if (idiolect.dialogueMarkers.length) {
+    lines.push(`- живая речь в диалогах (ТОЛЬКО для прямой и внутренней речи героев): ${idiolect.dialogueMarkers.map((entry) => `«${entry.word}» (${entry.count})`).join(", ")}`);
   }
   if (idiolect.particles.length) {
     const parts = idiolect.particles.map((entry) => `«${entry.word}» ~${entry.per1k}/1000 слов`);
@@ -1665,17 +1780,81 @@ ${typeof sheet.summary === "string" ? sheet.summary : ""}
 - ${avoid}`;
 }
 
-// Позитивные few-shot абзацы из образца (не события — только манера).
-export function positiveVoiceFewShots(sample: string, maximum = 3): string {
-  const paragraphs = sample
+/**
+ * Позитивные few-shot абзацы из образца (не события — только манера).
+ * Поддерживает `contextHint` (описание текущей сцены/бита), чтобы подбирать
+ * релевантные по типу речи абзацы (диалог / динамика / рефлексия) и гарантировать
+ * присутствие хотя бы одного длинного предложения (25+ слов) в примерах.
+ */
+export function positiveVoiceFewShots(sample: string, maximum = 3, contextHint = ""): string {
+  let paragraphs = sample
     .split(/\n{2,}/u)
     .map((paragraph) => paragraph.trim())
     .filter((paragraph) => paragraph.length >= 40 && paragraph.length <= 900);
+  if (paragraphs.length < maximum) {
+    const singleLineBlocks = sample
+      .split(/\n+/u)
+      .map((paragraph) => paragraph.trim())
+      .filter((paragraph) => paragraph.length >= 60 && paragraph.length <= 900);
+    if (singleLineBlocks.length > paragraphs.length) {
+      paragraphs = singleLineBlocks;
+    }
+  }
   if (!paragraphs.length) {
     const slice = sample.trim().slice(0, 900);
     return slice ? `Эталонные фрагменты манеры (не копируй сюжет):\n"""\n${slice}\n"""` : "";
   }
-  const picked = paragraphs.slice(0, maximum);
+  if (paragraphs.length <= maximum) {
+    return `Эталонные абзацы манеры автора (ритм и лексика; события и имена из образца НЕ переносить в новую главу):\n${paragraphs.map((paragraph, index) => `${index + 1}) """${paragraph}"""`).join("\n")}`;
+  }
+
+  const hasLongSentence = (p: string): boolean =>
+    splitSentences(p).some((s) => !isDialogueSentence(s) && wordsOf(s).length >= LONG_SENTENCE_WORDS);
+
+  const hint = contextHint.toLowerCase();
+  const wantsDialogue = /диалог|разговор|спор|реплик|спрос|ответил|говор|крик|шепт/iu.test(hint);
+  const wantsAction = /действ|бег|бой|шаг|движ|удар|погон|схватк|опасн|рывок|прыж/iu.test(hint);
+  const wantsIntrospection = /мысл|чувств|сомнен|страх|память|внутр|решил|понял|тишин|одиноч/iu.test(hint);
+
+  let picked: string[];
+  if (!hint) {
+    // Без подсказки берём первые абзацы, но гарантируем хотя бы один с длинным хвостом (25+ слов), если он есть в образце
+    picked = paragraphs.slice(0, maximum);
+    if (!picked.some(hasLongSentence)) {
+      const longCandidate = paragraphs.slice(maximum).find(hasLongSentence);
+      if (longCandidate && picked.length >= 1) {
+        picked[picked.length - 1] = longCandidate;
+      }
+    }
+  } else {
+    const scored = paragraphs.map((p, idx) => {
+      let score = 0;
+      const isDial = isDialogueSentence(p) || /\n\s*[—–-]\s/u.test(p) || SPEECH_TAGS.test(p);
+      const hasLong = hasLongSentence(p);
+      const hasInterior = /\b(?:подумал|решил|понял|вспомнил|казалось|наверное)\b/iu.test(p) || p.includes("?");
+      const hasActionVerbs = /\b(?:шагнул|бросился|схватил|рванул|толкнул|побежал|ударил|прыгнул|отскочил|замер)\b/iu.test(p);
+
+      if (wantsDialogue && isDial) score += 6;
+      if (wantsIntrospection && hasInterior) score += 5;
+      if (wantsAction && hasActionVerbs) score += 5;
+      if (hasLong) score += 3;
+      if (p.includes("!") || p.includes("…")) score += 1.5;
+      // Небольшой бонус за разнообразие позиций по тексту образца
+      score -= idx * 0.02;
+      return { p, idx, score, hasLong };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    const chosen = scored.slice(0, maximum);
+    if (!chosen.some((c) => c.hasLong)) {
+      const bestLong = scored.slice(maximum).find((c) => c.hasLong);
+      if (bestLong && chosen.length >= 1) {
+        chosen[chosen.length - 1] = bestLong;
+      }
+    }
+    picked = chosen.sort((a, b) => a.idx - b.idx).map((c) => c.p);
+  }
+
   return `Эталонные абзацы манеры автора (ритм и лексика; события и имена из образца НЕ переносить в новую главу):\n${picked.map((paragraph, index) => `${index + 1}) """${paragraph}"""`).join("\n")}`;
 }
 
@@ -1712,7 +1891,13 @@ export {
 
 /** Объединённый каталог: оригинальные 80+ паттернов + 50 новых */
 export { AI_TELL_CATALOG_EXTENDED as AI_TELL_CATALOG_V2_EXTRA } from "./humanStyleEnhanced";
-export { NARRATIVE_ARCHITECTURE_CHECKLIST, DISCOURSE_FLOW_CHECKLIST, HUMAN_POSITIVE_MARKERS_CHECKLIST, modelFingerprintGuidance } from "./humanStyleEnhanced";
+export {
+  NARRATIVE_ARCHITECTURE_CHECKLIST,
+  DISCOURSE_FLOW_CHECKLIST,
+  HUMAN_POSITIVE_MARKERS_CHECKLIST,
+  modelFingerprintGuidance,
+  selectCrossFamilyRewriteModel,
+} from "./humanStyleEnhanced";
 export type { GenreContext } from "./humanStyleEnhanced";
 
 /**

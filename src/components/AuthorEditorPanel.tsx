@@ -38,6 +38,7 @@ import {
   scoreWithAdaptiveProfile,
 } from "../lib/adaptiveDetector";
 import { YANDEX_LOCAL_GAP } from "../../server/humanStyle";
+import { recordAuthorEditLesson } from "../lib/selfLearnerLessons";
 import { diffParagraphs } from "../lib/textDiff";
 import {
   listAuthorRevisions,
@@ -503,6 +504,7 @@ export default function AuthorEditorPanel({
       setError("Исходный текст изменился после запуска. Повторите редактуру для текущей версии.");
       return;
     }
+    recordAuthorEditLesson(story.id, applyTarget.original, result);
     if (currentRevision) {
       const updated = { ...currentRevision, applied: true };
       await saveAuthorRevision(updated);
@@ -674,6 +676,7 @@ export default function AuthorEditorPanel({
                           setError("Глава изменилась во время прогона. Повторите «Очеловечить AI-сегменты» по текущей версии.");
                           return;
                         }
+                        recordAuthorEditLesson(story.id, currentDraft, newDraft);
                         const appliedAudit = {
                           passed: true,
                           summary: `Автоматически заменено AI-сегментов в главе: ${replaced}. HUMAN-сегменты не тронуты. AI-tell: ${scoreBefore ?? "—"} → ${scoreAfter ?? "—"}.`,

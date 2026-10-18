@@ -132,7 +132,193 @@ export const YO_WORD_MAP: Record<string, string> = {
   "черные": "чёрные",
   "черточки": "чёрточки",
   "четырех": "четырёх",
+  "вздохнем": "вздохнём",
+  "включен": "включён",
+  "включена": "включена",
+  "вдвоем": "вдвоём",
+  "втроем": "втроём",
+  "живьем": "живьём",
+  "желтый": "жёлтый",
+  "желтая": "жёлтая",
+  "желтое": "жёлтое",
+  "желтые": "жёлтые",
+  "жесткий": "жёсткий",
+  "жесткая": "жёсткая",
+  "жестко": "жёстко",
+  "зажжет": "зажжёт",
+  "замерз": "замёрз",
+  "замерзла": "замёрзла",
+  "замерзло": "замёрзло",
+  "зеленый": "зелёный",
+  "зеленая": "зелёная",
+  "зеленое": "зелёное",
+  "знобит": "знобит",
+  "ковер": "ковёр",
+  "колеса": "колёса",
+  "колесах": "колёсах",
+  "котел": "котёл",
+  "крылом": "крылом",
+  "лед": "лёд",
+  "легкая": "лёгкая",
+  "легкий": "лёгкий",
+  "легко": "легко",
+  "мертвый": "мёртвый",
+  "мертвая": "мёртвая",
+  "мертвое": "мёртвое",
+  "мертвые": "мёртвые",
+  "назовем": "назовём",
+  "напряженно": "напряжённо",
+  "обреченно": "обречённо",
+  "огонек": "огонёк",
+  "оживленно": "оживлённо",
+  "острием": "остриём",
+  "отвернулся": "отвернулся",
+  "пестрый": "пёстрый",
+  "плечом": "плечом",
+  "пленка": "плёнка",
+  "пленку": "плёнку",
+  "повернулся": "повернулся",
+  "подъем": "подъём",
+  "подъеме": "подъёме",
+  "прием": "приём",
+  "приеме": "приёме",
+  "принес": "принёс",
+  "проем": "проём",
+  "проеме": "проёме",
+  "развернулся": "развернулся",
+  "ребенок": "ребёнок",
+  "решетка": "решётка",
+  "решетку": "решётку",
+  "решеткой": "решёткой",
+  "свежий": "свежий",
+  "свернул": "свернул",
+  "силен": "силён",
+  "сожженный": "сожжённый",
+  "спасен": "спасён",
+  "стекла": "стёкла",
+  "стеклах": "стёклах",
+  "съемка": "съёмка",
+  "твердо": "твёрдо",
+  "твердый": "твёрдый",
+  "твердая": "твёрдая",
+  "тверже": "твёрже",
+  "теплый": "тёплый",
+  "теплое": "тёплое",
+  "тетка": "тётка",
+  "тихонько": "тихонько",
+  "удивленно": "удивлённо",
+  "унес": "унёс",
+  "учет": "учёт",
+  "холодно": "холодно",
+  "черт": "чёрт",
+  "четкий": "чёткий",
+  "четкая": "чёткая",
+  "четко": "чётко",
+  "чутьем": "чутьём",
+  "шепот": "шёпот",
+  "шепотом": "шёпотом",
+  "щелк": "щёлк",
+  "щелкнул": "щёлкнул",
+  "щелкнула": "щёлкнула",
+  "щелкнуло": "щёлкнуло",
 };
+
+// Удалим тождественные пары (где е === ё), чтобы в YO_WORD_MAP оставались только реальные ё-замены
+for (const [k, v] of Object.entries(YO_WORD_MAP)) {
+  if (k === v || !v.includes("ё")) {
+    delete YO_WORD_MAP[k];
+  }
+}
+
+/**
+ * Омографы «е/ё», которые нельзя менять без контекста: обе словоформы существуют
+ * в русском языке самостоятельно («все» vs «всё», «небо» vs «нёбо», «осел» vs «осёл» и т.д.).
+ */
+export const YO_HOMOGRAPHS = new Set<string>([
+  "все",
+  "небо",
+  "осел",
+  "мел",
+  "сел",
+  "лен",
+  "пев",
+  "вел", //Примечание: в YO_WORD_MAP "вел" есть из Вася.txt, но для новых внешних текстов динамический парсер проверяет отсутствие е-формы
+  "совершенно",
+  "берег",
+  "ведро",
+  "крест",
+  "летом",
+  "след",
+  "теперь",
+  "перед",
+  "через",
+  "вверх",
+  "шея",
+  "железный",
+  "входакостер",
+  "далекиедетские",
+]);
+
+/** Динамический словарь ё, пополняемый из `authorSample` текущей книги. */
+const DYNAMIC_AUTHOR_YO_MAP: Record<string, string> = {};
+
+/**
+ * Извлекает однозначную карту `е → ё` из авторского образца (`authorSample`).
+ * Правило то же, что при сборке `YO_WORD_MAP` на `Вася.txt`:
+ * слово с `ё` попадает в карту только если его `е`-двойник ни разу не встретился
+ * в этом же образце отдельным словом и не входит в список омографов.
+ */
+export function extractYoMapFromSample(sample: string): Record<string, string> {
+  if (!sample || typeof sample !== "string") return {};
+  const words = sample.toLowerCase().match(/[а-яё]+/giu) ?? [];
+  if (!words.length) return {};
+
+  const plainSet = new Set<string>();
+  const yoWords = new Set<string>();
+
+  for (const raw of words) {
+    const w = raw.toLowerCase();
+    if (w.length < 2 || w.length > 24) continue;
+    if (w.includes("ё")) {
+      yoWords.add(w);
+    } else {
+      plainSet.add(w);
+    }
+  }
+
+  const extracted: Record<string, string> = {};
+  for (const yoWord of yoWords) {
+    const eWord = yoWord.replace(/ё/gu, "е");
+    if (eWord === yoWord) continue;
+    if (YO_HOMOGRAPHS.has(eWord)) continue;
+    if (plainSet.has(eWord)) continue;
+    extracted[eWord] = yoWord;
+  }
+  return extracted;
+}
+
+/**
+ * Регистрирует образец автора в динамическом словаре `ё` для текущего процесса генерации.
+ * Возвращает количество добавленных из образца слов.
+ */
+export function registerAuthorYoSample(sample: string): number {
+  const extracted = extractYoMapFromSample(sample);
+  let added = 0;
+  for (const [eWord, yoWord] of Object.entries(extracted)) {
+    if (!YO_WORD_MAP[eWord] && !DYNAMIC_AUTHOR_YO_MAP[eWord]) {
+      added += 1;
+    }
+    DYNAMIC_AUTHOR_YO_MAP[eWord] = yoWord;
+  }
+  return added;
+}
+
+/** Очистить динамический кеш авторских ё-слов (для изолированных тестов). */
+export function clearAuthorYoSample(): void {
+  for (const key of Object.keys(DYNAMIC_AUTHOR_YO_MAP)) {
+    delete DYNAMIC_AUTHOR_YO_MAP[key];
+  }
+}
 
 /** Сколько замен сделано и примеры — для журнала. */
 export interface YoRestoreResult {
@@ -147,15 +333,17 @@ export interface YoRestoreResult {
  * Вернуть ё однозначным словам. Границы — целые слова с сохранением регистра
  * первой буквы («Костер» → «Костёр»). Слова, которых нет в карте, не трогаем:
  * лучше недопоставить ё, чем поставить не туда.
+ * Если передан `authorSample`, дополнительно учитываются все ё-слова из образца автора.
  */
-export function restoreYo(input: string): YoRestoreResult {
+export function restoreYo(input: string, authorSample?: string): YoRestoreResult {
+  const inlineMap = authorSample ? extractYoMapFromSample(authorSample) : undefined;
   const samples: string[] = [];
   let restored = 0;
   const text = String(input || "").replace(
     /(?<![\p{L}Ёё])([А-Яа-яЁё]+)(?![\p{L}Ёё])/gu,
     (word) => {
       const lower = word.toLowerCase();
-      const yo = YO_WORD_MAP[lower];
+      const yo = YO_WORD_MAP[lower] ?? inlineMap?.[lower] ?? DYNAMIC_AUTHOR_YO_MAP[lower];
       if (!yo) return word;
       restored += 1;
       const fixed = word[0] === word[0].toUpperCase() && word[0] !== word[0].toLowerCase()
@@ -167,3 +355,4 @@ export function restoreYo(input: string): YoRestoreResult {
   );
   return { text, restored, samples };
 }
+

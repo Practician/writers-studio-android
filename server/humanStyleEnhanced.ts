@@ -473,7 +473,7 @@ export function buildRhythmBreakerPrompt(
 1. Разбей или объедини предложения, чтобы длинные чередовались с короткими
 2. Целевой диапазон burstiness (std/mean длин предложений): ${targetBurstiness[0].toFixed(2)}–${targetBurstiness[1].toFixed(2)}
 3. Если идут 3+ предложения одинаковой длины — разбей или объедини
-4. Вставь 1–2 очень коротких «стаккато» предложения в напряжённых местах
+4. Срасти соседние короткие рубленые фразы через союзы («и», «а», «но», «когда») и собери 1–2 длинных предложения в 25–40 слов (НЕ добавляй новых рубленых стаккато-фраз вне диалога!)
 5. Длинные описания разрежь парентетикой или диалоговой вставкой
 
 ${voiceGuidance ? `ГОЛОС АВТОРА:\n${voiceGuidance}\n` : ""}
@@ -935,3 +935,47 @@ export function modelFingerprintGuidance(provider?: string, model?: string): str
   // тексте — это порча текста, а не помощь.
   return "";
 }
+
+/**
+ * Выбор кросс-семейственной модели для точечного переписывания «горячих» 1050-символьных
+ * окон детектора (против Binoculars / Fast-DetectGPT cross-perplexity curvature).
+ *
+ * Когда черновик написан одной моделью (например, Gemini Flash), переписывание той же
+ * моделью сохраняет её распределение вероятностей токенов. Передача горячего окна
+ * модели другого семейства/весовой ступени размывает токенную сигнатуру генератора.
+ */
+export function selectCrossFamilyRewriteModel(primaryModel?: string): {
+  model: string;
+  family: "gemini" | "deepseek" | "llama" | "qwen";
+  reason: string;
+} {
+  const m = String(primaryModel || "").toLowerCase();
+  if (m.includes("deepseek")) {
+    return {
+      model: "gemini-3.8-flash",
+      family: "gemini",
+      reason: "кросс-семейственный рерайт (DeepSeek → Gemini) для сбития токенной кривизны",
+    };
+  }
+  if (m.includes("llama") || m.includes("groq")) {
+    return {
+      model: "deepseek-ai/deepseek-v4-flash-0731",
+      family: "deepseek",
+      reason: "кросс-семейственный рерайт (Llama → DeepSeek) для сбития токенной кривизны",
+    };
+  }
+  if (m.includes("gemini") && m.includes("lite")) {
+    return {
+      model: "gemini-3.8-flash",
+      family: "gemini",
+      reason: "переход с Lite-модели на полную ступень для правки горячего окна",
+    };
+  }
+  // Для базового Gemini переключаем на старшую/альтернативную ветку или DeepSeek (через fallback-цепочку провайдера)
+  return {
+    model: "deepseek-ai/deepseek-v4-flash-0731",
+    family: "deepseek",
+    reason: "кросс-семейственный рерайт (Gemini → DeepSeek/fallback) для сбития токенной сигнатуры",
+  };
+}
+

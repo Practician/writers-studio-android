@@ -1,3 +1,26 @@
+export interface CharacterVoiceProfile {
+  /** Типичная длина и ритм реплик (например: «короткие рубленые фразы по 4–7 слов» или «длинные обстоятельные объяснения»). */
+  speechRhythm?: string;
+  /** Речевой регистр / говор персонажа. */
+  speechRegister?: string;
+  /** Средняя длина реплики в словах. */
+  avgReplicaWords?: number;
+  /** Слова-паразиты, любимые частицы и междометия («короче», «слушай», «ведь», «ага»). */
+  particlesAndTics?: string[];
+  /** Синоним поля particlesAndTics для кратких карточек персонажей. */
+  favoriteParticles?: string[];
+  /** Как персонаж обращается к другим героям («Васёк», «брат», «Илюха», по фамилии). */
+  formsOfAddress?: string[];
+  /** Слова и конструкции, которые этот персонаж НИКОГДА не скажет (табу-лексика). */
+  tabooVocabulary?: string[];
+  /** Синоним поля tabooVocabulary. */
+  tabooWords?: string[];
+  /** Типичная реакция в споре/стрессе (перебивает, отшучивается, отвечает вопросом, уходит в бытовое действие). */
+  conflictBehavior?: string;
+  /** 1–3 эталонные реплики этого персонажа. */
+  sampleLines?: string[];
+}
+
 export interface Character {
   id: string;
   name: string;
@@ -5,7 +28,9 @@ export interface Character {
   description: string;
   traits: string;
   goals: string;
+  voiceProfile?: CharacterVoiceProfile;
 }
+
 
 export interface Chapter {
   id: string;
