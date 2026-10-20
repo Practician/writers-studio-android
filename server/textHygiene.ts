@@ -13,6 +13,11 @@ export interface TextHygieneReport {
   punctuationNotes: string[];
   /** Сколько словам возвращена буква ё (сборка 120, server/yoRestore.ts). */
   restoredYo: number;
+  fixedLatinLeaks: number;
+  fixedProperNounCase: number;
+  fixedGenderAgreement: number;
+  removedBurstinessStubs: number;
+  removedDuplicateParagraphs: number;
   /** Итоговый текст отличается от исходного. */
   changed: boolean;
 }
@@ -30,24 +35,45 @@ const INVISIBLE_OR_DIRECTIONAL = /[\u00AD\u034F\u061C\u180E\u200B\u200E\u200F\u2
 const NONSTANDARD_SPACE = /[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/gu;
 const DISALLOWED_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Линт пунктуации (сборка 114)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Три артефакта, которые не пишет ни один человек, а модель и наш собственный
-// конвейер — регулярно. В готовой главе 4 их было 21, 1 и 9 соответственно при
-// нуле в эталоне автора; в эталоне 38 145 знаков их нет ни одного.
-//
-//   1. «точка, заменённая на точку с запятой»: `…как маска идола; Он молча…`
-//      Порождает `fuseShortSentencesForTail` (склейка коротких фраз в длинные),
-//      который соединял независимые клаузы без опускания буквы. В русском
-//      тексте конструкция «точка с запятой + заглавная» не встречается вообще.
-//   2. «слипшаяся пунктуация»: `Оно открывается.Пластина издала…`
-//      Ошибка склейки ответа модели с обрезанным краем.
-//   3. «реплика, разорванная зазвучной ремаркой»: `— Слышал, — буркнул он. — Звук…`
-//      Само по себе допустимо, но с полным предложением внутри реплики
-//      («— Илья, гляди, — прошептал Васька. Внутри всё сжалось. — Оно
-//      открывается.») абзац перестаёт быть репликой: читается как сбой сборки.
+const LATIN_LEAK_MAP: Record<string, string> = {
+  brown: "бурого",
+  dark: "тёмно",
+  light: "светло",
+  grey: "серого",
+  gray: "серого",
+  black: "чёрного",
+  green: "зелёного",
+  red: "красного",
+  blue: "синего",
+  white: "белого",
+  stone: "каменного",
+  rock: "скального",
+  shadow: "тени",
+  deep: "глубокого",
+  cold: "холодного",
+  warm: "тёплого",
+};
+
+const MASCULINE_A_NOUNS = [
+  "Вася", "Васька", "Васёк", "Илья", "Илюха", "Илюша", "Никита",
+  "Даня", "Данила", "Миша", "Мишка", "Саша", "Сашка", "Паша", "Пашка",
+  "Лёша", "Лёшка", "Серёга", "Серёжа", "Коля", "Колька", "Толя",
+  "Витя", "Витька", "Генка", "Петька", "Федька", "Димка", "Вовка",
+  "батя", "дядя", "дядька", "дядюшка", "дедушка", "папа", "мужчина",
+  "парнишка", "мальчишка", "братишка", "старшина",
+];
+
+const PROPER_NAMES_RESTORE = [
+  "Вася", "Васька", "Васьки", "Ваське", "Ваську", "Васькой",
+  "Илья", "Ильи", "Илье", "Илью", "Ильёй", "Ильей",
+  "Илюха", "Илюхи", "Илюхе", "Илюху", "Илюхой",
+  "Лиза", "Лизы", "Лизе", "Лизу", "Лизой",
+  "Гур", "Гура", "Гуру", "Гуром",
+  "Паша", "Паши", "Пень", "Колода",
+];
+
+const ARTIFICIAL_TAIL_STUB_RE =
+  /(?<=[.!?])\s+(?:Прикинул|Решил|Подумал|Осознал|Смекнул|Отметил|Запомнил|Понял|Выдохнул|Вздохнул)\.(?=\s*(?:\n|$))/gu;
 
 /** Граница кириллического слова: `\b` в JS опирается на `\w` (ASCII) и по кириллице не работает. */
 const WORD_EDGE = "(?![а-яё])";
@@ -66,18 +92,6 @@ const GLUED_PUNCTUATION = new RegExp(
 );
 
 /**
- * Абзац-реплика, разорванная полным предложением зазвучной ремарки:
- * `— Илья, гляди, — прошептал Васька. Внутри всё сжалось. — Оно открывается.`
- *
- * Условие строгое, и это важно. У живого автора разрыв ремаркой внутри реплики —
- * норма: «— Ха! Темно потому что часы перевели не ту сторону, брат! — хохотнул
- * Илюха и помог Ваське отцепиться. — Ты вернулся с турбазы?» Там ремарка является
- * придаточным и держит реплику одной скобкой. Сбой — когда между двумя
- * половинами реплики стоит САМОСТОЯТЕЛЬНОЕ предложение без союза: предикат
- * теряет субъект, и абзац перестаёт быть репликой. Именно это и ловит приёмка:
- * ремарка без союза и без прямой речи внутри.
- */
-/**
  * Абзац-реплика целиком. Разрыв внутри ищется отдельно — так условие читается
  * прямо и не зависит от того, где остановился жадный матч.
  */
@@ -88,11 +102,6 @@ const SPEECH_BREAK = /(^|[.!?…])[ \t]*(?=[А-ЯЁ][а-яё]+[а-яё\s,]*[.!?�
 
 /**
  * Союз в ремарке — признак того, что это придаточное, а не разрыв реплики.
- *
- * Прежняя форма искала союз сразу после точки (`\. и\b`), то есть в начале
- * следующего предложения, а не внутри ремарки: на живых примерах не сработала ни
- * разу. Правильный признак — союз ВНУТРИ куска между половинами реплики.
- * Границы — через lookaround: `\b` по кириллице не работает.
  */
 const REMARK_CONJUNCTION = /(?<![а-яё])(?:и|а|но|зато|потом|хотя|как|будто|что|котор(?:ый|ая|ое)|если|когда|пока|даже|поэтому|значит)(?![а-яё])/iu;
 
@@ -101,33 +110,14 @@ function countMatches(text: string, pattern: RegExp): number {
   return [...text.matchAll(matcher)].length;
 }
 
-/**
- * Markdown-выделение в художественной прозе.
- *
- * Условие на границы — то, что отличает разметку от авторского знака ударения
- * (`тём*` пишут без пробела, и это живая речь) и от знака умножения (`2 ** 3`):
- * выделение стоит после пробела, скобки или открывающей ёлочки, заканчивается
- * пробелом, знаком препинания или закрывающей кавычкой, а внутри нет пробелов.
- * Внутри прямой речи (`«**Беги!**»`) выделение снимается: там это всё равно
- * разметка модели, а не авторский знак.
- */
 const MARKDOWN_EMPHASIS = /(?<=^|[\s([«„"'])\*\*(?!\s)([^*\n]{1,80}?)(?<!\s)\*\*(?=$|[\s.,!?;:…)\]»”"'])/gmu;
 
-/** Отрезок строки вокруг артефакта — для журнала. */
 function sampleAt(text: string, index: number, before = 40, after = 40): string {
   const start = Math.max(0, index - before);
   const end = Math.min(text.length, index + after);
   return text.slice(start, end).replace(/\s+/gu, " ").trim();
 }
 
-/**
- * Точечная починка машинных артефактов пунктуации.
- *
- * Модуль не переписывает фразы и не оценивает «человечность» текста. Каждая
- * правка — это восстановление того вида, который в русской прозе единственно
- * возможен: после точки с запятой строчная буква, после точки пробел, реплика
- * либо реплика с ремаркой, либо реплика без ремарки.
- */
 function fixPunctuationArtifacts(input: string): { text: string; count: number; notes: string[] } {
   let text = input;
   let count = 0;
@@ -156,12 +146,7 @@ function fixPunctuationArtifacts(input: string): { text: string; count: number; 
     notes.push(`пропущенный пробел после знака ×${glued.length} (${sampleAt(input, glued[0].index ?? 0)})`);
   }
 
-  // 3. Реплика, разорванная самостоятельным предложением ремарки. Ремарка
-  //    сворачивается в придаточное: перед ней ставится двоеточие, первая буква
-  //    опускается. Пример: «— Илья, гляди, — прошептал Васька. Внутри всё
-  //    сжалось. — Оно открывается.» → «— Илья, гляди, — прошептал Васька: внутри
-  //    всё сжалось. — Оно открывается.» Если в ремарке есть союз, предложение
-  //    оставляется как есть — это придаточное, а не сбой.
+  // 3. Реплика, разорванная самостоятельным предложением ремарки.
   let splitFixed = 0;
   SPEECH_PARAGRAPH.lastIndex = 0;
   text = text.replace(SPEECH_PARAGRAPH, (paragraph) => {
@@ -170,38 +155,23 @@ function fixPunctuationArtifacts(input: string): { text: string; count: number; 
     const markAt = broken.index ?? 0;
     const head = paragraph.slice(0, markAt).replace(/[.!?…][ \t]*$/u, "");
     const tail = paragraph.slice(markAt);
-    // Граница ремарки — знак перед следующей репликой.
     const nextSpeech = tail.search(/[.!?…][ \t]*(?=(?:—|–|-)[ \t]+\S)/u);
     if (nextSpeech < 0) return paragraph;
-    // Знак, которым заканчивалась первая половина реплики, поглощается: он больше
-    // не нужен, потому что ремарка становится придаточным.
     const remark = tail.slice(/^[.!?…][ \t]*/u.exec(tail)?.[0].length || 0, nextSpeech)
       .replace(/[.!?…][ \t]*$/u, "");
     const rest = tail.slice(nextSpeech).replace(/^[.!?…][ \t]*/u, "");
     if (!remark || !rest) return paragraph;
-    // Союз ищется В РЕМАРКЕ, а не во всём хвосте. Проверка по хвосту ловила любой
-    // союз дальше по абзацу и потому пропускала настоящие разрывы: в «Он сделал
-    // шаг вперёд… как экран телевизора» союз «как» стоял за второй репликой.
     if (REMARK_CONJUNCTION.test(remark)) return paragraph;
-    // Знак перед следующей репликой сохраняем: без него «— Оно открывается»
-    // приклеивается к ремарке и абзац снова рассыпается.
     const breakMark = tail[nextSpeech];
     splitFixed += 1;
     return `${head}: ${remark.charAt(0).toLowerCase()}${remark.slice(1)}${breakMark} ${rest}`;
   });
   if (splitFixed) {
     count += splitFixed;
-    notes.push(`реплика, разорванная ремаркой, собрана зново ×${splitFixed}`);
+    notes.push(`реплика, разорванная ремаркой, собрана заново ×${splitFixed}`);
   }
 
-  // 4. Markdown-выделение внутри прозы: `боясь спугнуть **трепет**`. Модель
-  //    помечает слово двумя звёздочками, и в готовой главе они остаются
-  //    буквальными символами — в живом DOCX выгрузки главы 4 (05.10.2026) их
-  //    было 8 на 19 300 знаков (`**трепет**`, `**тревоги**`). Ни одна из трёх
-  //    правок выше markdown не ловит: он не про пунктуацию. Снимаем только
-  //    парное выделение и одиночные хвостовые звёздочки; одиночная `*`
-  //    посреди слова — это знак ударения вроде `тём*` в авторской речи, её
-  //    не трогаем (проверка требует, чтобы рядом был пробел или граница).
+  // 4. Markdown-выделение внутри прозы
   const emphasised = [...text.matchAll(MARKDOWN_EMPHASIS)];
   if (emphasised.length) {
     text = text.replace(MARKDOWN_EMPHASIS, "$1");
@@ -212,34 +182,187 @@ function fixPunctuationArtifacts(input: string): { text: string; count: number; 
   return { text, count, notes };
 }
 
-/**
- * Финальный lossless-ish проход перед отправкой результата пользователю.
- *
- * Модуль не переписывает фразы и не оценивает «человечность» текста. Он только
- * удаляет невидимые служебные символы, bidi-маркеры и управляющие коды,
- * приводит необычные пробелы и переводы строк к предсказуемому виду и чинит
- * три машинных артефакта пунктуации, которых в живой прозе не бывает.
- */
+function normalizeForSimilarity(paragraph: string): string {
+  return paragraph
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenJaccardSimilarity(a: string, b: string): number {
+  const normA = normalizeForSimilarity(a);
+  const normB = normalizeForSimilarity(b);
+  if (!normA || !normB) return 0;
+  if (normA === normB) return 1;
+
+  const wordsA = normA.split(" ").filter((w) => w.length > 2);
+  const wordsB = normB.split(" ").filter((w) => w.length > 2);
+  if (wordsA.length < 5 || wordsB.length < 5) return 0;
+
+  const setA = new Set<string>();
+  const setB = new Set<string>();
+  for (let i = 0; i <= wordsA.length - 3; i++) {
+    setA.add(`${wordsA[i]} ${wordsA[i + 1]} ${wordsA[i + 2]}`);
+  }
+  for (let i = 0; i <= wordsB.length - 3; i++) {
+    setB.add(`${wordsB[i]} ${wordsB[i + 1]} ${wordsB[i + 2]}`);
+  }
+  if (setA.size === 0 || setB.size === 0) return 0;
+
+  let intersection = 0;
+  for (const token of setA) {
+    if (setB.has(token)) intersection++;
+  }
+  const union = setA.size + setB.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function deduplicateParagraphs(text: string): { text: string; removedCount: number } {
+  const blocks = text.split("\n");
+  const kept: string[] = [];
+  let removedCount = 0;
+
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed || trimmed.length < 45) {
+      kept.push(block);
+      continue;
+    }
+
+    let isDuplicate = false;
+    const windowStart = Math.max(0, kept.length - 6);
+    for (let i = windowStart; i < kept.length; i++) {
+      const prev = kept[i].trim();
+      if (prev.length < 45) continue;
+      if (tokenJaccardSimilarity(prev, trimmed) >= 0.82) {
+        isDuplicate = true;
+        removedCount++;
+        break;
+      }
+    }
+
+    if (!isDuplicate) {
+      kept.push(block);
+    }
+  }
+
+  return { text: kept.join("\n"), removedCount };
+}
+
 export function sanitizeGeneratedText(input: string, authorSample?: string): TextHygieneResult {
   const normalizedLineEndings = /\r/u.test(input);
   const normalizedSpaces = countMatches(input, NONSTANDARD_SPACE);
   const removedHiddenCharacters =
     countMatches(input, INVISIBLE_OR_DIRECTIONAL) + countMatches(input, DISALLOWED_CONTROL);
 
-  const cleaned = input
+  let text = input
     .replace(/\r\n?/gu, "\n")
     .replace(INVISIBLE_OR_DIRECTIONAL, "")
     .replace(DISALLOWED_CONTROL, "")
     .replace(NONSTANDARD_SPACE, " ");
-  const punctuation = fixPunctuationArtifacts(cleaned);
-  // Сборка 120: ё возвращается после всех пунктуационных правок — они слов
-  // не меняют, а карта server/yoRestore.ts работает по целым словам.
-  const yo = restoreYo(punctuation.text, authorSample);
-  const text = yo.text;
+
+  const punctuation = fixPunctuationArtifacts(text);
+  text = punctuation.text;
+  let fixedPunctuationArtifacts = punctuation.count;
   const punctuationNotes = [...punctuation.notes];
-  if (yo.restored > 0) {
-    punctuationNotes.push(`ё восстановлено ×${yo.restored} (${yo.samples.join(", ")})`);
+
+  let fixedLatinLeaks = 0;
+  text = text.replace(
+    /([А-ЯЁа-яё]+)-([A-Za-z]+)|([A-Za-z]+)-([А-ЯЁа-яё]+)/g,
+    (full, cyr1, lat1, lat2, cyr2) => {
+      fixedLatinLeaks++;
+      if (cyr1 && lat1) {
+        const replacement = LATIN_LEAK_MAP[lat1.toLowerCase()];
+        return replacement ? `${cyr1}-${replacement}` : cyr1;
+      }
+      if (lat2 && cyr2) {
+        const replacement = LATIN_LEAK_MAP[lat2.toLowerCase()];
+        return replacement ? `${replacement}-${cyr2}` : cyr2;
+      }
+      return full;
+    }
+  );
+  if (fixedLatinLeaks > 0) {
+    punctuationNotes.push(`Исправлены англоязычные склейки в словах (${fixedLatinLeaks})`);
   }
+
+  let fixedProperNounCase = 0;
+  for (const properName of PROPER_NAMES_RESTORE) {
+    const lowerName = properName.toLowerCase();
+    const re = new RegExp(`([;:])\\s+${lowerName}(?![а-яё])`, "gu");
+    text = text.replace(re, () => {
+      fixedProperNounCase++;
+      fixedPunctuationArtifacts++;
+      return `. ${properName}`;
+    });
+  }
+  if (fixedProperNounCase > 0) {
+    punctuationNotes.push(
+      `Восстановлены заглавные буквы имён собственных после точки с запятой (${fixedProperNounCase})`
+    );
+  }
+
+  text = text.replace(/;\s+([А-ЯЁ])/gu, (_m, cap) => {
+    fixedPunctuationArtifacts++;
+    return `. ${cap}`;
+  });
+
+  text = text.replace(/(^|\n|[—–-]\s*)А:\s+чего\?/gu, (_m, prefix) => {
+    fixedPunctuationArtifacts++;
+    return `${prefix}А? Чего?`;
+  });
+  text = text.replace(/(Чего\s+там\s+ещ[её]):\s+/giu, (_m, prefix) => {
+    fixedPunctuationArtifacts++;
+    return `${prefix} — `;
+  });
+
+  let removedBurstinessStubs = 0;
+  text = text.replace(ARTIFICIAL_TAIL_STUB_RE, () => {
+    removedBurstinessStubs++;
+    fixedPunctuationArtifacts++;
+    return "";
+  });
+  if (removedBurstinessStubs > 0) {
+    punctuationNotes.push(
+      `Удалены искусственные однословные отбивки ритма (${removedBurstinessStubs})`
+    );
+  }
+
+  let fixedGenderAgreement = 0;
+  const mascPattern = MASCULINE_A_NOUNS.join("|");
+  const genderRe = new RegExp(
+    `(?<![А-ЯЁа-яё])(${mascPattern})((?:\\s+(?:уже|снова|опять|вдруг|сразу|тихо|быстро|молча|нехотя|тоже|также|чуть|едва|просто|сам))?)\\s+([а-яё]{2,}л)а(сь)?(?![а-яё])`,
+    "giu"
+  );
+  text = text.replace(genderRe, (_full, name, adv, verbStem, refl) => {
+    fixedGenderAgreement++;
+    fixedPunctuationArtifacts++;
+    const fixedSuffix = refl ? "ся" : "";
+    return `${name}${adv ?? ""} ${verbStem}${fixedSuffix}`;
+  });
+  if (fixedGenderAgreement > 0) {
+    punctuationNotes.push(
+      `Исправлено согласование мужского рода для имён на -а/-я (${fixedGenderAgreement})`
+    );
+  }
+
+  const dedup = deduplicateParagraphs(text);
+  text = dedup.text;
+  const removedDuplicateParagraphs = dedup.removedCount;
+  if (removedDuplicateParagraphs > 0) {
+    punctuationNotes.push(`Удалены дублирующиеся абзацы (${removedDuplicateParagraphs})`);
+  }
+
+  const yoResult = restoreYo(text, authorSample);
+  text = yoResult.text;
+  const restoredYo = yoResult.restored;
+  if (restoredYo > 0) {
+    punctuationNotes.push(`ё восстановлено ×${restoredYo} (${yoResult.samples.join(", ")})`);
+  }
+
+  const changed = text !== input;
 
   return {
     text,
@@ -247,15 +370,19 @@ export function sanitizeGeneratedText(input: string, authorSample?: string): Tex
       removedHiddenCharacters,
       normalizedSpaces,
       normalizedLineEndings,
-      fixedPunctuationArtifacts: punctuation.count,
+      fixedPunctuationArtifacts,
       punctuationNotes,
-      restoredYo: yo.restored,
-      changed: text !== input,
+      restoredYo,
+      fixedLatinLeaks,
+      fixedProperNounCase,
+      fixedGenderAgreement,
+      removedBurstinessStubs,
+      removedDuplicateParagraphs,
+      changed,
     },
   };
 }
 
-/** Строки отчёта для журнала: пусто, когда чисто. */
 export function punctuationHygieneNote(report: TextHygieneReport): string {
   return report.punctuationNotes.length
     ? `машинная пунктуация исправлена (${report.fixedPunctuationArtifacts}): ${report.punctuationNotes.join("; ")}`

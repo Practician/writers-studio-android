@@ -1,4 +1,9 @@
 import { Type } from "@google/genai";
+import {
+  buildCanonAndBoundaryBlock,
+  detectRussianAndCanonDefects,
+  isPlotRestartOrDuplicateScene,
+} from "./humanStylePatch";
 import { humanProfileScore } from "./humanStyleEnhanced";
 import { architectureDiagnostics, architectureFixBlock, type ArchitectureDiagnostics } from "./architectureAudit";
 import {
@@ -672,7 +677,7 @@ export function emitChapterStep(message: string, level: "info" | "warn" = "info"
 }
 
 /** Только русская проза: латиница (кроме редких исключений) — брак. */
-export function russianLanguageIssues(text: string): string[] {
+export function russianLanguageIssues(text: string, worldBible = ""): string[] {
   const issues: string[] = [];
   const withoutAllowed = text
     .replace(/\bOLED\b/gi, "")
@@ -687,6 +692,7 @@ export function russianLanguageIssues(text: string): string[] {
   if (/\b(the|and|with|that|this|chapter|level)\b/i.test(text)) {
     issues.push("английские служебные слова — недопустимы");
   }
+  issues.push(...detectRussianAndCanonDefects(text, worldBible));
   return issues;
 }
 
@@ -1893,6 +1899,8 @@ export function buildScenePrompt(
   scenePlan: ScenePlan = { minWords: 350, maxWords: 520 },
   movePlan?: ChapterMovePlan,
   architectureSheet?: ArchitectureSheet,
+  completedBeatSummaries: string[] = [],
+  isTopUpScene = false,
 ): string {
   const focus = SCENE_FOCUSES[beatIndex % SCENE_FOCUSES.length];
   const characterNotes = buildCharacterNotes(input);
@@ -1903,6 +1911,14 @@ export function buildScenePrompt(
   const codexBlock = Array.isArray(input.codexEntries) && input.codexEntries.length
     ? buildCodexInstructionBlock(queryCodex(input.codexEntries, `${beat.title} ${beat.goal} ${beat.hook} ${previousTail}`))
     : "";
+  const canonBoundaryBlock = buildCanonAndBoundaryBlock({
+    worldBible: input.worldBible || "",
+    bookPlan: input.bookPlan || "",
+    currentChapterTitle: input.currentChapterTitle || "",
+    currentChapterSummary: input.currentChapterSummary || "",
+    completedBeatSummaries,
+    isTopUpScene,
+  });
   return `Напиши фрагмент главы (бит ${beatIndex + 1} из ${beatCount}).
 
 ЯЗЫК (жёстко):
@@ -1933,7 +1949,7 @@ ${scenePlan.continuityNotes ? `${scenePlan.continuityNotes}\n` : ""}
 ${scenePlan.reactionNotes ? `РЕАКЦИИ И МОЛЧАНИЕ:\n${scenePlan.reactionNotes}\n` : ""}
 ${antiRepeatNotes ? `ЗАПРЕТ ПОВТОРОВ (уже было в предыдущих кусках — не копируй смысл дословно):\n${antiRepeatNotes}\n` : ""}
 
-Канон и контекст:
+${canonBoundaryBlock ? `${canonBoundaryBlock}\n\n` : ""}Канон и контекст:
 - Синопсис главы: ${input.currentChapterSummary || "—"}
 ${input.canonDossier ? `- Замок канона (фрагмент): ${input.canonDossier.slice(0, 3500)}` : ""}
 ${input.worldBible ? `- Библия мира (фрагмент): ${input.worldBible.slice(0, 2000)}` : ""}
@@ -3648,6 +3664,8 @@ export async function generateScenesDraft(
           scenePlan,
           movePlan,
           architectureSheet,
+          beats.slice(0, index).map((b) => `${b.title}: ${b.goal}`),
+          isTopup,
         ),
         temperature: modelTemperature(input.model, depth.sceneTemperature, candidateIndex) + attempt * 0.03,
         // free Groq TPM: max_tokens входит в лимит; сервер ещё урежет для groq
@@ -3657,7 +3675,7 @@ export async function generateScenesDraft(
         timeoutMs: SCENE_REQUEST_TIMEOUT_MS,
       });
       cleaned = sceneText.replace(/^```(?:text|markdown)?\s*/i, "").replace(/```$/i, "").trim();
-      const langIssues = russianLanguageIssues(cleaned);
+      const langIssues = russianLanguageIssues(cleaned, input.worldBible);
       const words = countWordsRu(cleaned);
       // Повтор ищем по последним сценам, а не только по предыдущей.
       const overlap = scenes
@@ -3792,6 +3810,17 @@ export async function generateScenesDraft(
       console.warn(`Scene ${index + 1}: все 3 попытки бракованные — бит пропущен, текст главы не испорчен.`);
       rejectedScenes += 1;
       continue;
+    }
+    if (isTopup) {
+      const restartCheck = isPlotRestartOrDuplicateScene(scenes, cleaned);
+      if (restartCheck.rejected) {
+        emitChapterStep(
+          `Добор остановлен (сцена ${index + 1}): ${restartCheck.reason || "повтор сюжета или рассинхрон времени суток"}.`,
+          "warn",
+        );
+        console.warn(`Topup scene ${index + 1} rejected due to plot restart:`, restartCheck.reason);
+        break;
+      }
     }
     scenes.push(cleaned);
     const silentInScene = countSoftenedSilentReactions(cleaned);
@@ -4404,6 +4433,11 @@ export async function rewriteDetectorAiSegments(
     fixedPunctuationArtifacts: 0,
     punctuationNotes: [],
     restoredYo: 0,
+    fixedLatinLeaks: 0,
+    fixedProperNounCase: 0,
+    fixedGenderAgreement: 0,
+    removedBurstinessStubs: 0,
+    removedDuplicateParagraphs: 0,
     changed: false,
   };
   const foreignReplaced: Record<string, string> = {};

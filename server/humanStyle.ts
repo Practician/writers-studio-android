@@ -1,4 +1,5 @@
 import { computeStyleStats } from "../src/lib/authorAudit";
+import { joinPairSafe, safeLowerFirst } from "./humanStylePatch";
 
 // Общий модуль «человечного стиля»: каталог признаков ИИ-текста, детерминированная
 // оценка (AI-tell score) и промпт-блоки, которые внедряются в генерацию, чтобы модель
@@ -533,7 +534,7 @@ const FUSABLE_CONJUNCTIONS = /^(?:И|А|Но|Зато|Однако|Причём|
  * строчной буквы после неё, и в этом же состоит живая речь.
  */
 function lowerFirst(word: string): string {
-  return `${word.charAt(0).toLowerCase()}${word.slice(1)}`;
+  return safeLowerFirst(word);
 }
 
 /**
@@ -559,17 +560,7 @@ function lowerFirst(word: string): string {
 /** Склейка внутри одного куска: возвращает текст и число склеек. */
 function fuseChunk(chunk: string, targetShare: number): { text: string; fused: number } {
   const joinPair = (a: string, b: string): string => {
-    const clean = a.trim().replace(/\.$/u, "");
-    const next = b.trim();
-    // Вторая фраза начинается с союза — запятая вместо точки грамматически чиста.
-    if (FUSABLE_CONJUNCTIONS.test(next)) {
-      return `${clean}, ${lowerFirst(next)}`;
-    }
-    // Две независимые клаузы: точка с запятой и строчная буква после неё.
-    // Буква ОБЯЗАТЕЛЬНО опускается: «фраза; Фраза» — след машинной склейки, в
-    // русском тексте такая конструкция не встречается (в эталоне автора ноль
-    // на 38 000 знаков, в старой главе 4 — двадцать одно).
-    return `${clean}; ${lowerFirst(next)}`;
+    return joinPairSafe(a, b);
   };
   let sents = splitSentences(chunk);
   if (sents.length < 2) return { text: chunk, fused: 0 };
